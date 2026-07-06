@@ -12,9 +12,17 @@
   "app": {
     "windows": [
       {
-        "title": "pulse",
-        "width": 800,
-        "height": 600
+        "label": "main",
+        "title": "Pulse",
+        "width": 380,
+        "height": 124,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "maximizable": false
       }
     ],
     "security": {

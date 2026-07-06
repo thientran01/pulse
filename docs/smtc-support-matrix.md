@@ -25,6 +25,22 @@ Behavior is version-dependent — re-run the spike if either app updates signifi
 5. **AM metadata quirk:** `Artist` comes back as `"<artist> — <album>"` (em-dash separated) with `AlbumTitle` empty. The apple_music adapter must split on `" — "` for LRCLIB lookups and display.
 6. **Spotify position is pushed ~every 5 s** — between pushes, interpolate: `position + (now − last_updated)` while status is Playing. AM position is fresh on every poll at 1 s granularity.
 
+## Apple Music seek fallbacks tested (2026-07-06, M1)
+
+All measured with `smtc-spike amseek` / `amappcmd` (focus-flick via AttachThreadInput + modifier-tap
+SetForegroundWindow grant — the flick itself works; `set_foreground=true`):
+
+| Approach | Result |
+|---|---|
+| `WM_APPCOMMAND` MEDIA_FAST_FORWARD / REWIND to the AM window | ❌ returns 0, unhandled |
+| Synthesize Ctrl+←/→ | ❌ that's **prev/next track** (skips the song!) |
+| Synthesize Ctrl+Shift+←/→ | ❌ also track skip |
+| Synthesize Alt+Ctrl+←/→ (Apple's documented in-song seek) | ❌ swallowed / ≤1s effect, even with KEYEVENTF_EXTENDEDKEY and a Ctrl-tap (not Alt-tap) foreground grant |
+
+**Verdict:** keystroke injection is unusable for AM seek. M1 ships AM with a display-only
+progress bar (±10s buttons capability-gated off). Next candidate: UI Automation
+RangeValuePattern on AM's scrubber slider (no focus needed, absolute seek) — spun off as its own task.
+
 ## Raw spike commands
 
 ```

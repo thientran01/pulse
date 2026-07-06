@@ -23,6 +23,17 @@ src/            React widget: pill ↔ card ↔ expanded-lyrics modes
 
 Design rule: chrome stays neutral (house semantic tokens); the album-art palette is the **accent layer only** (glow, progress fill, current lyric line). Motion uses EASE/DUR tokens — `/emil-pass` binds to them.
 
+## Global hotkeys (M1 defaults, constants in src-tauri/src/lib.rs)
+
+- `Ctrl+Alt+K` play/pause (Space variant was taken system-wide on this machine)
+- `Ctrl+Alt+←/→` seek ∓10s (current session; no-op on Apple Music — it ignores SMTC seek)
+- `Ctrl+Alt+N/P` next/previous track
+- `Ctrl+Alt+M` show/hide the widget
+
+Commands route to the OS "current" media session, which Windows re-points to
+whichever app played most recently (pause AM while Spotify plays → next command
+hits Spotify). The card shows the controlled app's name for this reason.
+
 ## Commands
 
 - `npm run tauri dev` — run the app (requires Rust MSVC toolchain + VS Build Tools, both installed)

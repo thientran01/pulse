@@ -1,0 +1,259 @@
+//! GSMTC media core: polls the current Windows media session and exposes
+//! transport commands. Capability quirks per player are documented in
+//! docs/smtc-support-matrix.md — notably Apple Music ignores seek and packs
+//! "artist — album" into the artist field.
+
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
+use serde::Serialize;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+use windows::Media::Control::{
+    GlobalSystemMediaTransportControlsSession as Session,
+    GlobalSystemMediaTransportControlsSessionManager as Manager,
+    GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus,
+};
+use windows::Storage::Streams::{Buffer, DataReader, InputStreamOptions};
+
+const TICKS_PER_MS: i64 = 10_000; // WinRT TimeSpan tick = 100ns
+/// Offset between the Windows FILETIME epoch (1601) and the unix epoch, in ms.
+const FILETIME_EPOCH_OFFSET_MS: i64 = 11_644_473_600_000;
+
+#[derive(Serialize, Clone, Default)]
+pub struct NowPlaying {
+    pub app_id: String,
+    /// "apple_music" | "spotify" | "other" | "none"
+    pub player: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    /// "playing" | "paused" | "stopped" | "none"
+    pub status: String,
+    pub position_ms: i64,
+    pub duration_ms: i64,
+    /// Unix ms at which position_ms was true — the frontend interpolates from here.
+    pub emitted_at_ms: i64,
+    pub can_seek: bool,
+    pub art_id: Option<String>,
+}
+
+/// Cached album art for the currently playing media (one entry is enough).
+pub struct ArtCache(pub Mutex<Option<(String, String)>>); // (art_id, data_url)
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn manager() -> windows::core::Result<Manager> {
+    Manager::RequestAsync()?.get()
+}
+
+pub fn current_session() -> Option<Session> {
+    manager().ok()?.GetCurrentSession().ok()
+}
+
+fn player_kind(app_id: &str) -> &'static str {
+    let id = app_id.to_lowercase();
+    if id.contains("applemusic") {
+        "apple_music"
+    } else if id.contains("spotify") {
+        "spotify"
+    } else {
+        "other"
+    }
+}
+
+fn art_key(app_id: &str, title: &str, artist: &str) -> String {
+    let mut h = DefaultHasher::new();
+    (app_id, title, artist).hash(&mut h);
+    format!("{:x}", h.finish())
+}
+
+/// Read the session thumbnail into a data URL. Best-effort: any failure → None.
+fn read_art(session: &Session) -> Option<String> {
+    let props = session.TryGetMediaPropertiesAsync().ok()?.get().ok()?;
+    let thumb = props.Thumbnail().ok()?;
+    let stream = thumb.OpenReadAsync().ok()?.get().ok()?;
+    let size = stream.Size().ok()?;
+    if size == 0 || size > 8_000_000 {
+        return None;
+    }
+    let mime = stream
+        .ContentType()
+        .map(|h| h.to_string())
+        .unwrap_or_else(|_| "image/jpeg".into());
+    let buffer = Buffer::Create(size as u32).ok()?;
+    let buffer = stream
+        .ReadAsync(&buffer, size as u32, InputStreamOptions::ReadAhead)
+        .ok()?
+        .get()
+        .ok()?;
+    let reader = DataReader::FromBuffer(&buffer).ok()?;
+    let mut bytes = vec![0u8; buffer.Length().ok()? as usize];
+    reader.ReadBytes(&mut bytes).ok()?;
+    Some(format!("data:{};base64,{}", mime, B64.encode(bytes)))
+}
+
+/// Snapshot the current session into a NowPlaying payload, refreshing the art
+/// cache when the (app, title, artist) key changes.
+pub fn snapshot(art_cache: &ArtCache) -> NowPlaying {
+    let Some(session) = current_session() else {
+        return NowPlaying {
+            player: "none".into(),
+            status: "none".into(),
+            ..Default::default()
+        };
+    };
+    let app_id = session
+        .SourceAppUserModelId()
+        .map(|h| h.to_string())
+        .unwrap_or_default();
+    let player = player_kind(&app_id).to_string();
+
+    let (mut title, mut artist, mut album, has_thumb) =
+        match session.TryGetMediaPropertiesAsync().and_then(|op| op.get()) {
+            Ok(p) => (
+                p.Title().map(|h| h.to_string()).unwrap_or_default(),
+                p.Artist().map(|h| h.to_string()).unwrap_or_default(),
+                p.AlbumTitle().map(|h| h.to_string()).unwrap_or_default(),
+                p.Thumbnail().is_ok(),
+            ),
+            Err(_) => (String::new(), String::new(), String::new(), false),
+        };
+    // Apple Music packs "artist — album" into the artist field (matrix quirk #5).
+    if player == "apple_music" && album.is_empty() {
+        if let Some((a, b)) = artist.split_once(" — ") {
+            album = b.trim().to_string();
+            artist = a.trim().to_string();
+        }
+    }
+    if title.is_empty() && artist.is_empty() {
+        title = "Unknown".into();
+    }
+
+    let status = playback_status(&session).to_string();
+    let can_seek = session
+        .GetPlaybackInfo()
+        .and_then(|i| i.Controls())
+        .and_then(|c| c.IsPlaybackPositionEnabled())
+        .unwrap_or(false);
+
+    let (mut position_ms, duration_ms) = corrected_position(&session, &status);
+    if duration_ms > 0 {
+        position_ms = position_ms.clamp(0, duration_ms);
+    }
+
+    let art_id = if has_thumb {
+        let key = art_key(&app_id, &title, &artist);
+        let mut cache = art_cache.0.lock().unwrap();
+        let cached = cache.as_ref().map(|(id, _)| id == &key).unwrap_or(false);
+        if !cached {
+            match read_art(&session) {
+                Some(url) => *cache = Some((key.clone(), url)),
+                None => *cache = None,
+            }
+        }
+        cache.as_ref().map(|(id, _)| id.clone())
+    } else {
+        None
+    };
+
+    NowPlaying {
+        app_id,
+        player,
+        title,
+        artist,
+        album,
+        status,
+        position_ms,
+        duration_ms,
+        emitted_at_ms: now_ms(),
+        can_seek,
+        art_id,
+    }
+}
+
+/// (position_ms, duration_ms) with staleness correction: Spotify pushes its
+/// timeline only ~every 5s, so while playing we add the time elapsed since
+/// LastUpdatedTime. Correction is skipped for insane staleness values
+/// (clock skew, first emit after a session appears).
+fn corrected_position(session: &Session, status: &str) -> (i64, i64) {
+    let Ok(t) = session.GetTimelineProperties() else {
+        return (0, 0);
+    };
+    let pos = t.Position().map(|d| d.Duration / TICKS_PER_MS).unwrap_or(0);
+    let end = t.EndTime().map(|d| d.Duration / TICKS_PER_MS).unwrap_or(0);
+    let corrected = if status == "playing" {
+        let updated_unix_ms = t
+            .LastUpdatedTime()
+            .map(|d| d.UniversalTime / TICKS_PER_MS - FILETIME_EPOCH_OFFSET_MS)
+            .unwrap_or(0);
+        let staleness = now_ms() - updated_unix_ms;
+        if (0..30_000).contains(&staleness) {
+            pos + staleness
+        } else {
+            pos
+        }
+    } else {
+        pos
+    };
+    (corrected, end)
+}
+
+fn playback_status(session: &Session) -> &'static str {
+    match session.GetPlaybackInfo().and_then(|i| i.PlaybackStatus()) {
+        Ok(PlaybackStatus(4)) => "playing",
+        Ok(PlaybackStatus(5)) => "paused",
+        _ => "stopped",
+    }
+}
+
+pub fn play_pause() -> bool {
+    current_session()
+        .and_then(|s| s.TryTogglePlayPauseAsync().ok()?.get().ok())
+        .unwrap_or(false)
+}
+
+pub fn next() -> bool {
+    current_session()
+        .and_then(|s| s.TrySkipNextAsync().ok()?.get().ok())
+        .unwrap_or(false)
+}
+
+pub fn prev() -> bool {
+    current_session()
+        .and_then(|s| s.TrySkipPreviousAsync().ok()?.get().ok())
+        .unwrap_or(false)
+}
+
+/// Absolute seek. Returns false when the session is gone or refuses the call.
+/// NOTE: Apple Music returns true and does nothing — callers should treat the
+/// bool as "command delivered", not "seek happened" (matrix finding #3).
+pub fn seek_abs_ms(target_ms: i64) -> bool {
+    let Some(session) = current_session() else {
+        return false;
+    };
+    let target = target_ms.max(0) * TICKS_PER_MS;
+    session
+        .TryChangePlaybackPositionAsync(target)
+        .and_then(|op| op.get())
+        .unwrap_or(false)
+}
+
+/// Relative seek anchored on the staleness-corrected position (Spotify's raw
+/// reported position can be ~5s behind what the user hears), clamped to the
+/// track bounds.
+pub fn seek_rel_ms(delta_ms: i64) -> bool {
+    let Some(session) = current_session() else {
+        return false;
+    };
+    let status = playback_status(&session);
+    let (pos, end) = corrected_position(&session, status);
+    let end = if end > 0 { end } else { i64::MAX };
+    seek_abs_ms((pos + delta_ms).clamp(0, end))
+}
