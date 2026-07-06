@@ -34,7 +34,9 @@ Design rule: chrome stays neutral (house semantic tokens); the album-art palette
 - PRs off `feature/*` branches, self-review + `/quick-review`; never commit to main.
 - M0 support matrix (`docs/smtc-support-matrix.md`) is the source of truth for what Apple Music / Spotify honor over GSMTC — check it before assuming seek/position works.
 
-## Gotchas
+## Gotchas (M0-verified 2026-07-06 — details in docs/smtc-support-matrix.md)
 
-- Spotify does not report timeline position via GSMTC — position/seek for Spotify rides the Web API adapter (M5); until then, interpolate from play/pause timestamps.
+- **Spotify seek/position work natively over SMTC** (as of 1.2.92) — the Web API adapter is only needed for like/unlike. Position is pushed ~every 5s; interpolate between pushes.
+- **Apple Music silently ignores seek** (returns `true`, does nothing, playing or paused) and reports position at 1s granularity. Never trust SMTC command bools — verify by re-reading the timeline.
+- Apple Music packs `"<artist> — <album>"` into the Artist field (AlbumTitle empty) and **deregisters its session when playback stops** — treat session disappearance as a normal state.
 - Repo deliberately lives OFF OneDrive (`C:\Users\Thien\Projects\pulse`) — Vite misbehaves under OneDrive sync.
