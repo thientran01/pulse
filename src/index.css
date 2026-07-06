@@ -1,0 +1,73 @@
+@import "tailwindcss";
+
+/*
+ * Semantic tokens — roles, never color names. Values are space-separated RGB
+ * channels so alpha composes: rgb(var(--surface) / 0.8).
+ * Pulse is dark-first: :root IS the dark theme (the widget floats translucent
+ * over the desktop). data-theme="light" is the flip.
+ * In M2 the album-art palette overrides --accent at runtime; these are the
+ * resting values, and chrome must keep working if --accent never changes.
+ */
+:root,
+[data-theme="dark"] {
+  --surface: 20 18 16; /* warm near-black — never #000 */
+  --surface-2: 32 29 26; /* raised surface */
+  --fg: 245 239 230; /* cream near-white — never #fff */
+  --muted: 161 152 140; /* secondary text */
+  --border: 245 239 230; /* = fg; always used at 5–15% alpha */
+  --accent: 232 122 90; /* the ONE brand hue; art palette may retint */
+}
+
+[data-theme="light"] {
+  --surface: 245 239 230;
+  --surface-2: 255 252 247;
+  --fg: 31 26 18;
+  --muted: 110 102 92;
+  --border: 31 26 18;
+  --accent: 224 106 74; /* same hue, shade-shifted for contrast */
+}
+
+@theme {
+  --color-*: initial;
+  --color-surface: rgb(var(--surface));
+  --color-surface-2: rgb(var(--surface-2));
+  --color-fg: rgb(var(--fg));
+  --color-muted: rgb(var(--muted));
+  --color-border: rgb(var(--border));
+  --color-accent: rgb(var(--accent));
+
+  /* Motion tokens — the single source of truth /emil-pass binds to. */
+  --ease-out-tk: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out-tk: cubic-bezier(0.65, 0, 0.35, 1);
+  --transition-duration-1: 90ms;
+  --transition-duration-2: 140ms;
+  --transition-duration-3: 200ms;
+  --transition-duration-4: 220ms;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/* The widget window is transparent; the React root paints its own surface. */
+body {
+  margin: 0;
+  background: transparent;
+  color: rgb(var(--fg));
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

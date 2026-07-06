@@ -1,50 +1,24 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
-
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
-
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
-
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
+    <div className="flex h-full items-center justify-center bg-surface/90 p-4">
+      <div className="w-full max-w-sm rounded-2xl border border-border/10 bg-surface-2 p-5">
+        <p className="text-sm font-medium text-fg">Pulse</p>
+        <p className="mt-1 text-sm text-muted">
+          Token smoke test — replaced by the player widget in M1.
+        </p>
+        <div className="mt-4 flex items-center gap-3">
+          <button
+            className="rounded-lg bg-fg px-3 py-1.5 text-sm font-medium text-surface transition-transform duration-2 ease-out-tk active:scale-[0.97]"
+            type="button"
+          >
+            Primary
+          </button>
+          <span className="rounded-full bg-accent/15 px-2 py-0.5 text-xs text-accent">
+            accent flourish
+          </span>
+        </div>
       </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    </div>
   );
 }
 
