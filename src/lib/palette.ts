@@ -1,18 +1,30 @@
 /*
  * Album-art accent extraction. House rule (Phantom-style restraint): the
- * extracted color retints the ACCENT layer only — glow, progress fill,
- * highlights — never the neutral chrome.
+ * extracted color retints the ACCENT layer only — progress fill, separator,
+ * lyric marker — never the neutral chrome.
  *
  * Pipeline: downscale to 24×24 on a canvas → score pixels for "vibrancy"
  * (saturated, mid-lightness) into hue buckets → weighted-average the winning
  * bucket → adjust lightness until it clears CONTRAST_FLOOR against the
- * current surface, so a near-black or near-white cover still yields a
- * readable accent.
+ * current surface. When the art has no meaningful vibrant mass (white, black,
+ * or gray-dominant covers), fall back to the cover's overall TONE, saturation-
+ * capped — a monochrome cover gets a muted matching accent, not the house
+ * coral clashing beside it.
  */
 
 const SAMPLE = 24;
 const HUE_BUCKETS = 12;
 const CONTRAST_FLOOR = 3.0;
+/**
+ * The winning hue bucket must carry this much vibrancy mass (≈ a few percent
+ * of the 576 samples at typical saturation) before it may retint the accent.
+ * Below it the cover reads as neutral overall — a handful of colorful pixels
+ * (speckles, stickers, a small logo) shouldn't pick a loud accent whose hue
+ * is effectively arbitrary.
+ */
+const MIN_VIBRANT_SCORE = 8;
+/** Saturation cap for the tone fallback — neutral covers get MUTED accents. */
+const TONE_MAX_SATURATION = 0.3;
 
 function srgbChannel(c: number): number {
   const s = c / 255;
@@ -92,8 +104,11 @@ function currentSurface(): [number, number, number] {
 
 /**
  * Extract an accent from an image URL. Resolves to "r g b" channel string for
- * the --accent CSS var, or null when nothing usable is found (grayscale art,
- * decode failure) — callers should fall back to the house accent.
+ * the --accent CSS var: the dominant vibrant hue when the cover has real
+ * chroma, otherwise a saturation-capped average tone (white cover → soft
+ * cream, black cover → subtle gray). Resolves null only when the image is
+ * unusable (decode failure, fully transparent) — callers keep the house
+ * accent for that and for the no-art state.
  */
 export function extractAccent(url: string): Promise<string | null> {
   return new Promise((resolve) => {
@@ -118,9 +133,17 @@ export function extractAccent(url: string): Promise<string | null> {
         return;
       }
       const buckets = Array.from({ length: HUE_BUCKETS }, () => ({ score: 0, r: 0, g: 0, b: 0 }));
+      let toneR = 0;
+      let toneG = 0;
+      let toneB = 0;
+      let opaque = 0;
       for (let i = 0; i < data.length; i += 4) {
         const [r, g, b, a] = [data[i], data[i + 1], data[i + 2], data[i + 3]];
         if (a < 200) continue;
+        opaque++;
+        toneR += r;
+        toneG += g;
+        toneB += b;
         const [h, s, l] = rgbToHsl(r, g, b);
         // Vibrancy: saturated and mid-lightness; near-black/white contribute ~0.
         const score = s * s * (1 - Math.abs(l - 0.5) * 2);
@@ -132,16 +155,25 @@ export function extractAccent(url: string): Promise<string | null> {
         bucket.b += b * score;
       }
       const best = buckets.reduce((a, b) => (b.score > a.score ? b : a));
-      if (best.score < 1) {
-        resolve(null); // effectively grayscale art — keep the house accent
+      if (best.score >= MIN_VIBRANT_SCORE) {
+        const rgb: [number, number, number] = [
+          Math.round(best.r / best.score),
+          Math.round(best.g / best.score),
+          Math.round(best.b / best.score),
+        ];
+        resolve(ensureContrast(rgb, currentSurface()).join(" "));
         return;
       }
-      const rgb: [number, number, number] = [
-        Math.round(best.r / best.score),
-        Math.round(best.g / best.score),
-        Math.round(best.b / best.score),
-      ];
-      resolve(ensureContrast(rgb, currentSurface()).join(" "));
+      // Neutral-dominant cover: no hue earned the accent, so match the
+      // cover's overall tone instead — muted by the saturation cap, readable
+      // via the contrast floor.
+      if (opaque === 0) {
+        resolve(null);
+        return;
+      }
+      const [h, s, l] = rgbToHsl(toneR / opaque, toneG / opaque, toneB / opaque);
+      const toned = hslToRgb(h, Math.min(s, TONE_MAX_SATURATION), l);
+      resolve(ensureContrast(toned, currentSurface()).join(" "));
     };
     img.onerror = () => resolve(null);
     img.src = url;
