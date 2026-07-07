@@ -18,6 +18,10 @@ const FFT_SIZE: usize = 2048;
 const EMIT_INTERVAL: Duration = Duration::from_millis(33);
 /// Band edges in Hz: bass, mid, high.
 const BANDS: [(f32, f32); 3] = [(30.0, 150.0), (150.0, 2000.0), (2000.0, 8000.0)];
+/// Log-spaced fine bins for the now-playing waveform separator's bars.
+const SPECTRUM_BINS: usize = 16;
+const SPECTRUM_LO_HZ: f32 = 40.0;
+const SPECTRUM_HI_HZ: f32 = 8000.0;
 const ATTACK: f32 = 0.55;
 const RELEASE: f32 = 0.12;
 /// Auto-gain reference decays slowly so quiet and loud tracks both animate.
@@ -30,6 +34,18 @@ pub struct Bands {
     pub high: f32,
     /// Overall level 0..1 (auto-gained RMS).
     pub level: f32,
+    /// Log-spaced bins bass→high, each auto-gained/smoothed like the bands.
+    pub spectrum: [f32; SPECTRUM_BINS],
+}
+
+/// Log-spaced bin edges: edge(i) = LO * (HI/LO)^(i/N).
+fn spectrum_edges() -> [f32; SPECTRUM_BINS + 1] {
+    let ratio = SPECTRUM_HI_HZ / SPECTRUM_LO_HZ;
+    let mut edges = [0.0f32; SPECTRUM_BINS + 1];
+    for (i, e) in edges.iter_mut().enumerate() {
+        *e = SPECTRUM_LO_HZ * ratio.powf(i as f32 / SPECTRUM_BINS as f32);
+    }
+    edges
 }
 
 /// Latest samples ring (mono-mixed), written by the cpal callback.
@@ -96,17 +112,22 @@ fn open_loopback(
     Some((stream, sample_rate))
 }
 
-fn band_energies(spectrum: &[Complex<f32>], sample_rate: f32) -> [f32; 3] {
+/// RMS energy of one frequency range. At high sample rates (96/192kHz) the
+/// narrow low log bins fall below the FFT's resolution — clamping `hi_bin`
+/// up to `lo_bin` merges them into the nearest real bin (neighbors read the
+/// same energy) instead of leaving them permanently dead-zero.
+fn range_energy(spectrum: &[Complex<f32>], sample_rate: f32, lo_hz: f32, hi_hz: f32) -> f32 {
     let bin_hz = sample_rate / FFT_SIZE as f32;
+    let lo_bin = ((lo_hz / bin_hz) as usize).clamp(1, FFT_SIZE / 2 - 1);
+    let hi_bin = ((hi_hz / bin_hz) as usize).clamp(lo_bin, FFT_SIZE / 2 - 1);
+    let sum: f32 = spectrum[lo_bin..=hi_bin].iter().map(|c| c.norm_sqr()).sum();
+    (sum / (hi_bin - lo_bin + 1) as f32).sqrt()
+}
+
+fn band_energies(spectrum: &[Complex<f32>], sample_rate: f32) -> [f32; 3] {
     let mut out = [0.0f32; 3];
     for (i, (lo, hi)) in BANDS.iter().enumerate() {
-        let lo_bin = ((lo / bin_hz) as usize).max(1);
-        let hi_bin = ((hi / bin_hz) as usize).min(FFT_SIZE / 2 - 1);
-        if hi_bin <= lo_bin {
-            continue;
-        }
-        let sum: f32 = spectrum[lo_bin..=hi_bin].iter().map(|c| c.norm_sqr()).sum();
-        out[i] = (sum / (hi_bin - lo_bin + 1) as f32).sqrt();
+        out[i] = range_energy(spectrum, sample_rate, *lo, *hi);
     }
     out
 }
@@ -128,6 +149,9 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
         let mut active: Option<(cpal::Stream, f32, Arc<Mutex<Ring>>)> = None;
         let mut smoothed = [0.0f32; 3];
         let mut gain_ref = [1e-4f32; 3];
+        let spec_edges = spectrum_edges();
+        let mut smoothed_spec = [0.0f32; SPECTRUM_BINS];
+        let mut gain_spec = [1e-4f32; SPECTRUM_BINS];
         let mut scratch = vec![Complex::default(); FFT_SIZE];
         // Stream-health watchdog: the callback bumps `frames`; if it stalls
         // while we're supposedly capturing (default device changed, stream
@@ -153,6 +177,7 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                 (Some(_), false) => {
                     active = None; // drops the stream, releases the device
                     smoothed = [0.0; 3];
+                    smoothed_spec = [0.0; SPECTRUM_BINS];
                     let _ = app.emit("audio-bands", Bands::default());
                 }
                 (Some(_), true) => {
@@ -192,11 +217,21 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                 smoothed[i] += (target - smoothed[i]) * k;
                 norm[i] = smoothed[i];
             }
+            let mut spectrum = [0.0f32; SPECTRUM_BINS];
+            for i in 0..SPECTRUM_BINS {
+                let raw_e = range_energy(&scratch, *rate, spec_edges[i], spec_edges[i + 1]);
+                gain_spec[i] = (gain_spec[i] * GAIN_DECAY).max(raw_e).max(1e-4);
+                let target = (raw_e / gain_spec[i]).clamp(0.0, 1.0);
+                let k = if target > smoothed_spec[i] { ATTACK } else { RELEASE };
+                smoothed_spec[i] += (target - smoothed_spec[i]) * k;
+                spectrum[i] = smoothed_spec[i];
+            }
             let bands = Bands {
                 bass: norm[0],
                 mid: norm[1],
                 high: norm[2],
                 level: (norm[0] * 0.5 + norm[1] * 0.35 + norm[2] * 0.15).clamp(0.0, 1.0),
+                spectrum,
             };
             let _ = app.emit("audio-bands", bands);
             std::thread::sleep(EMIT_INTERVAL);

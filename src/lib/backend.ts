@@ -65,11 +65,15 @@ export function onNowPlaying(cb: (np: NowPlaying) => void): () => void {
   return () => window.clearInterval(id);
 }
 
+export const SPECTRUM_BINS = 16;
+
 export interface AudioBands {
   bass: number;
   mid: number;
   high: number;
   level: number;
+  /** SPECTRUM_BINS log-spaced bins bass→high, 0..1, smoothed like the bands. */
+  spectrum: number[];
 }
 
 /** ~30Hz band energies while music plays; zeroed on stop/hide. */
@@ -83,7 +87,7 @@ export function onAudioBands(cb: (b: AudioBands) => void): () => void {
   // Mock: musical-ish motion so preview exercises the reactive layer.
   const id = window.setInterval(() => {
     if (mock.status !== "playing") {
-      cb({ bass: 0, mid: 0, high: 0, level: 0 });
+      cb({ bass: 0, mid: 0, high: 0, level: 0, spectrum: new Array<number>(SPECTRUM_BINS).fill(0) });
       return;
     }
     const t = Date.now() / 1000;
@@ -91,7 +95,15 @@ export function onAudioBands(cb: (b: AudioBands) => void): () => void {
     const bass = 0.25 + beat * 0.75;
     const mid = 0.35 + 0.3 * Math.sin(t * 2.7) ** 2;
     const high = 0.25 + 0.35 * Math.sin(t * 8.1) ** 2;
-    cb({ bass, mid, high, level: bass * 0.5 + mid * 0.35 + high * 0.15 });
+    // Bins lerp bass→mid→high by position, with per-bin phase/rate offsets so
+    // the bars variant visibly moves independently in browser preview.
+    const spectrum = Array.from({ length: SPECTRUM_BINS }, (_, i) => {
+      const p = i / (SPECTRUM_BINS - 1);
+      const base = p < 0.5 ? bass + (mid - bass) * p * 2 : mid + (high - mid) * (p - 0.5) * 2;
+      const wobble = 0.6 + 0.4 * Math.sin(t * (3 + i * 0.7) + i * 1.3) ** 2;
+      return Math.min(1, base * wobble);
+    });
+    cb({ bass, mid, high, level: bass * 0.5 + mid * 0.35 + high * 0.15, spectrum });
   }, 33);
   return () => window.clearInterval(id);
 }
