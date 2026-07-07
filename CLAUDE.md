@@ -18,10 +18,11 @@ src-tauri/src/
                 (M1 state — splits into media_core/ + adapters/ when M5 adds Spotify Web API)
   audio/        (M4) WASAPI loopback → FFT → ~30Hz band-energy events (suspends when hidden)
   lyrics/       (M3) LRCLIB lookup + disk cache
-src/            React widget: card now; pill ↔ card ↔ expanded-lyrics modes in M2
+src/            React widget: pill ↔ card ↔ expanded size modes (M2; expanded = big-art
+                view — the lyrics panel arrives in M3) + palette.ts accent extraction
 ```
 
-Design rule: chrome stays neutral (house semantic tokens); the album-art palette is the **accent layer only** (glow, progress fill, current lyric line). Motion uses EASE/DUR tokens — `/emil-pass` binds to them.
+Design rule: chrome stays neutral (house semantic tokens); the album-art palette is the **accent layer only** — progress fills, art glow, the **ambient shell glow** (blessed 2026-07-06: the card's outer accent glow is the surface M4's audio-reactive glow drives; it counts toward the accent budget in every mode), and the current lyric line (M3). Accent never colors text or chrome surfaces. Motion uses EASE/DUR tokens — `/emil-pass` binds to them.
 
 ## Global hotkeys (M1 defaults, constants in src-tauri/src/lib.rs)
 

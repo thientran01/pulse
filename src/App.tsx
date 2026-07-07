@@ -1,9 +1,21 @@
 import { useEffect, useRef, useState } from "react";
+import { motion, useReducedMotion } from "motion/react";
 import { commands, onNowPlaying } from "./lib/backend";
+import { extractAccent } from "./lib/palette";
+import { DUR, EASE } from "./lib/tokens";
 import type { NowPlaying } from "./types";
 
 // Keep in sync with SEEK_STEP_MS in src-tauri/src/lib.rs (global hotkeys).
 const SEEK_STEP_MS = 10_000;
+
+type Mode = "pill" | "card" | "expanded";
+
+/** Native window size per mode — the window snaps, the content morphs. */
+const MODE_SIZES: Record<Mode, [number, number]> = {
+  pill: [300, 48],
+  card: [380, 124],
+  expanded: [380, 310], // measured content ~292px — headroom for real font metrics
+};
 
 function fmt(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -48,15 +60,37 @@ function useArt(artId: string | null): string | null {
   return artId ? url : null;
 }
 
+/** Retint the accent layer from the current cover; house accent when absent. */
+function useArtAccent(artUrl: string | null): void {
+  useEffect(() => {
+    const root = document.documentElement;
+    if (!artUrl) {
+      root.style.removeProperty("--accent");
+      return;
+    }
+    let alive = true;
+    void extractAccent(artUrl).then((rgb) => {
+      if (!alive) return;
+      if (rgb) root.style.setProperty("--accent", rgb);
+      else root.style.removeProperty("--accent");
+    });
+    return () => {
+      alive = false;
+    };
+  }, [artUrl]);
+}
+
 function IconButton({
   label,
   onClick,
   disabled,
+  size = "md",
   children,
 }: {
   label: string;
   onClick: () => void;
   disabled?: boolean;
+  size?: "sm" | "md";
   children: React.ReactNode;
 }) {
   return (
@@ -66,7 +100,9 @@ function IconButton({
       title={label}
       disabled={disabled}
       onClick={onClick}
-      className="grid h-7 w-7 place-items-center rounded-md text-fg transition duration-2 ease-out-tk hover:bg-fg/10 active:scale-95 disabled:pointer-events-none disabled:opacity-40"
+      className={`grid place-items-center rounded-md text-fg transition duration-2 ease-out-tk hover:bg-fg/10 active:scale-95 disabled:pointer-events-none disabled:opacity-40 ${
+        size === "sm" ? "h-6 w-6" : "h-7 w-7"
+      }`}
     >
       {children}
     </button>
@@ -122,6 +158,16 @@ const icons = {
   note: (
     <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
       <path d="M6 13.5a2 2 0 1 1-1-1.73V4.6a.8.8 0 0 1 .57-.77l6-1.8A.8.8 0 0 1 12.6 2.8v8.2a2 2 0 1 1-1-1.73V5.06l-5 1.5v6.94Z" />
+    </svg>
+  ),
+  chevronUp: (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+      <path d="M3.5 10 8 5.5l4.5 4.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  chevronDown: (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+      <path d="M3.5 6 8 10.5 12.5 6" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
 };
@@ -187,13 +233,57 @@ function ProgressBar({ np, position }: { np: NowPlaying; position: number }) {
         >
           <div
             className={`h-full rounded-full bg-accent ${
-              dragFrac === null ? "transition-[width] duration-1 ease-out-tk" : ""
+              dragFrac === null
+                ? "[transition:width_90ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]"
+                : "[transition:background-color_220ms_var(--ease-out-tk)]"
             }`}
             style={{ width: `${Math.min(frac * 100, 100)}%` }}
           />
         </div>
       </div>
       <span className="w-8 text-[10px] tabular-nums text-muted">{fmt(np.duration_ms)}</span>
+    </div>
+  );
+}
+
+function Art({ url, sizeClass, glow }: { url: string | null; sizeClass: string; glow?: boolean }) {
+  return (
+    <div
+      className={`grid shrink-0 place-items-center overflow-hidden rounded-lg bg-surface-2 text-muted ${sizeClass} ${
+        glow ? "shadow-[0_8px_48px_-10px_rgb(var(--accent)/0.55)] transition-shadow duration-4 ease-out-tk" : ""
+      }`}
+    >
+      {url ? <img src={url} alt="" className="h-full w-full object-cover" draggable={false} /> : icons.note}
+    </div>
+  );
+}
+
+function Transport({ np, seekable, playing }: { np: NowPlaying; seekable: boolean; playing: boolean }) {
+  return (
+    <div className="flex items-center gap-0.5">
+      <IconButton label="Previous track" onClick={commands.prev}>
+        {icons.prev}
+      </IconButton>
+      <IconButton
+        label={seekable ? "Back 10 seconds" : `Seeking not supported by ${PLAYER_NAMES[np.player]}`}
+        disabled={!seekable}
+        onClick={() => commands.seekRel(-SEEK_STEP_MS)}
+      >
+        {icons.back10}
+      </IconButton>
+      <IconButton label={playing ? "Pause" : "Play"} onClick={commands.playPause}>
+        {playing ? icons.pause : icons.play}
+      </IconButton>
+      <IconButton
+        label={seekable ? "Forward 10 seconds" : `Seeking not supported by ${PLAYER_NAMES[np.player]}`}
+        disabled={!seekable}
+        onClick={() => commands.seekRel(SEEK_STEP_MS)}
+      >
+        {icons.fwd10}
+      </IconButton>
+      <IconButton label="Next track" onClick={commands.next}>
+        {icons.next}
+      </IconButton>
     </div>
   );
 }
@@ -206,7 +296,33 @@ function App() {
   // A data URL that fails to decode falls back to the note glyph instead of
   // the browser's broken-image icon.
   const [brokenArtUrl, setBrokenArtUrl] = useState<string | null>(null);
-  const showArt = artUrl !== null && artUrl !== brokenArtUrl;
+  const shownArt = artUrl !== null && artUrl !== brokenArtUrl ? artUrl : null;
+  useArtAccent(shownArt);
+
+  const [mode, setMode] = useState<Mode>(() => {
+    try {
+      const saved = localStorage.getItem("pulse.mode");
+      return saved === "pill" || saved === "expanded" ? saved : "card";
+    } catch {
+      return "card"; // storage unavailable — mode just won't persist
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("pulse.mode", mode);
+    } catch {
+      // non-fatal: mode resets to card on next launch
+    }
+    const [w, h] = MODE_SIZES[mode];
+    commands.setWindowSize(w, h);
+  }, [mode]);
+
+  const reducedMotion = useReducedMotion();
+  const morph = {
+    initial: reducedMotion ? {} : { opacity: 0, scale: 0.98 },
+    animate: { opacity: 1, scale: 1 },
+    transition: { duration: reducedMotion ? 0 : DUR[3] / 1000, ease: [...EASE.out] as [number, number, number, number] },
+  };
 
   const nothing = !np || np.player === "none";
   const playing = np?.status === "playing";
@@ -223,76 +339,113 @@ function App() {
     commands.startDrag();
   };
 
+  const frac = np && np.duration_ms > 0 ? Math.min(position / np.duration_ms, 1) : 0;
+
   return (
     <div className="h-screen p-1.5" onMouseDown={onDragStart}>
-      <div
-               className="flex h-full items-center gap-3 rounded-xl border border-border/10 bg-surface/95 px-3"
+      <motion.div
+        key={mode}
+        {...morph}
+        className="relative flex h-full flex-col overflow-hidden rounded-xl border border-border/10 bg-surface/95 shadow-[0_0_36px_-12px_rgb(var(--accent)/0.4)] transition-shadow duration-4 ease-out-tk"
       >
         {nothing ? (
-          <div className="flex w-full items-center justify-center gap-2 text-muted">
+          <div className="flex h-full w-full items-center justify-center gap-2 text-muted">
             {icons.note}
             <span className="text-sm">Nothing playing</span>
           </div>
-        ) : (
+        ) : mode === "pill" ? (
           <>
-            <div className="grid h-[72px] w-[72px] shrink-0 place-items-center overflow-hidden rounded-lg bg-surface-2 text-muted">
-              {showArt ? (
-                <img
-                  src={artUrl}
-                  alt=""
-                  className="h-full w-full object-cover"
-                  draggable={false}
-                  onError={() => setBrokenArtUrl(artUrl)}
-                />
-              ) : (
-                icons.note
-              )}
+            <div className="flex h-full items-center gap-2 pl-1.5 pr-1">
+              <Art url={shownArt} sizeClass="h-[26px] w-[26px] rounded-md" />
+              <p className="min-w-0 flex-1 truncate text-xs font-medium text-fg">
+                {np.title}
+                <span className="font-normal text-muted"> — {np.artist}</span>
+              </p>
+              <IconButton size="sm" label={playing ? "Pause" : "Play"} onClick={commands.playPause}>
+                {playing ? icons.pause : icons.play}
+              </IconButton>
+              <IconButton size="sm" label="Expand to card" onClick={() => setMode("card")}>
+                {icons.chevronUp}
+              </IconButton>
             </div>
+            {/* Non-interactive progress hairline — still announced to AT. */}
+            <div
+              role="progressbar"
+              aria-label="Track position"
+              aria-valuemin={0}
+              aria-valuemax={np.duration_ms}
+              aria-valuenow={Math.round(position)}
+              aria-valuetext={`${fmt(position)} of ${fmt(np.duration_ms)}`}
+              className="absolute inset-x-0 bottom-0 h-[2px] bg-fg/10"
+            >
+              <div
+                className="h-full bg-accent [transition:width_90ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]"
+                style={{ width: `${frac * 100}%` }}
+              />
+            </div>
+          </>
+        ) : mode === "card" ? (
+          <div className="flex h-full items-center gap-3 px-3">
+            <Art url={shownArt} sizeClass="h-[72px] w-[72px]" />
             <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <div className="flex items-baseline gap-2">
-                <p className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
-                  {np.title}
-                </p>
+              <div className="flex items-center gap-1">
+                <p className="min-w-0 flex-1 truncate text-sm font-medium text-fg">{np.title}</p>
                 {/* Windows routes commands to the OS "current" session, which
                     hops between apps — always show which app this card controls. */}
                 <span className="shrink-0 text-[10px] uppercase tracking-wider text-muted">
                   {PLAYER_NAMES[np.player]}
                 </span>
+                <IconButton size="sm" label="Collapse to pill" onClick={() => setMode("pill")}>
+                  {icons.chevronDown}
+                </IconButton>
+                <IconButton size="sm" label="Expand" onClick={() => setMode("expanded")}>
+                  {icons.chevronUp}
+                </IconButton>
               </div>
               <p className="truncate text-xs text-muted">
                 {np.artist}
                 {np.album ? ` — ${np.album}` : ""}
               </p>
-              <div className="mt-0.5 flex items-center gap-0.5">
-                <IconButton label="Previous track" onClick={commands.prev}>
-                  {icons.prev}
-                </IconButton>
-                <IconButton
-                  label={seekable ? "Back 10 seconds" : `Seeking not supported by ${PLAYER_NAMES[np.player]}`}
-                  disabled={!seekable}
-                  onClick={() => commands.seekRel(-SEEK_STEP_MS)}
-                >
-                  {icons.back10}
-                </IconButton>
-                <IconButton label={playing ? "Pause" : "Play"} onClick={commands.playPause}>
-                  {playing ? icons.pause : icons.play}
-                </IconButton>
-                <IconButton
-                  label={seekable ? "Forward 10 seconds" : `Seeking not supported by ${PLAYER_NAMES[np.player]}`}
-                  disabled={!seekable}
-                  onClick={() => commands.seekRel(SEEK_STEP_MS)}
-                >
-                  {icons.fwd10}
-                </IconButton>
-                <IconButton label="Next track" onClick={commands.next}>
-                  {icons.next}
-                </IconButton>
+              <div className="mt-0.5">
+                <Transport np={np} seekable={seekable} playing={playing} />
               </div>
               <ProgressBar np={np} position={position} />
             </div>
-          </>
+          </div>
+        ) : (
+          <div className="flex h-full flex-col items-center gap-2.5 px-4 pb-2 pt-4">
+            <div className="absolute right-2 top-2 flex items-center gap-1">
+              <span className="text-[10px] uppercase tracking-wider text-muted">{PLAYER_NAMES[np.player]}</span>
+              <IconButton size="sm" label="Collapse to card" onClick={() => setMode("card")}>
+                {icons.chevronDown}
+              </IconButton>
+            </div>
+            <Art url={shownArt} sizeClass="h-[150px] w-[150px] rounded-xl" glow />
+            <div className="min-w-0 self-stretch text-center">
+              <p className="truncate text-sm font-medium text-fg">{np.title}</p>
+              <p className="truncate text-xs text-muted">
+                {np.artist}
+                {np.album ? ` — ${np.album}` : ""}
+              </p>
+            </div>
+            <Transport np={np} seekable={seekable} playing={playing} />
+            <div className="self-stretch">
+              <ProgressBar np={np} position={position} />
+            </div>
+          </div>
         )}
-      </div>
+      </motion.div>
+      {/* Broken-art detector — OUTSIDE the mode-keyed subtree so the data URL
+          isn't re-decoded on every mode switch, only per track. */}
+      {artUrl && artUrl !== brokenArtUrl && (
+        <img
+          src={artUrl}
+          alt=""
+          className="hidden"
+          aria-hidden
+          onError={() => setBrokenArtUrl(artUrl)}
+        />
+      )}
     </div>
   );
 }
