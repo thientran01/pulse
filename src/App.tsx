@@ -94,17 +94,6 @@ function useLyrics(np: NowPlaying | null): LyricsState {
   return state;
 }
 
-/** How long the karaoke sweep runs across a line: the gap to the next line,
- * capped by a per-character pacing estimate so a line followed by an
- * instrumental break doesn't crawl. Line-level LRC has no word timing — this
- * is an even-pace approximation. */
-function sweepDurationMs(line: LyricLine, next: LyricLine | undefined): number {
-  // Floor of 1ms: duplicate/out-of-order timestamps would otherwise yield a
-  // 0 gap and a NaN sweep fraction (0/0), which drops the clip entirely.
-  const gap = Math.max((next ? next.t : line.t + 8000) - line.t, 1);
-  return Math.min(gap, Math.max(1000, 70 * line.text.length + 600));
-}
-
 const BROWSE_RESUME_MS = 3500;
 
 function LyricsPanel({
@@ -163,12 +152,6 @@ function LyricsPanel({
     resumeTimer.current = window.setTimeout(() => setManualOffset(null), BROWSE_RESUME_MS);
   };
 
-  // Karaoke sweep fraction across the current line (linear — constant motion).
-  const currentLine = idx >= 0 ? lines[idx] : null;
-  const sweepPct = currentLine
-    ? Math.min(Math.max(((position + 250 - currentLine.t) / sweepDurationMs(currentLine, lines[idx + 1])) * 100, 0), 100)
-    : 0;
-
   return (
     <div
       ref={viewportRef}
@@ -205,7 +188,7 @@ function LyricsPanel({
                   }
                 : {})}
               className={`relative rounded-md px-3 py-1 text-left text-base leading-normal transition-colors duration-3 ease-out-tk ${
-                current ? "font-medium text-muted" : "text-muted/80"
+                current ? "font-medium text-fg" : "text-muted/80"
               } ${seekable ? "cursor-pointer hover:bg-fg/5" : ""}`}
             >
               {/* Accent lives on the marker, never the text (contrast floor is 3:1). */}
@@ -215,22 +198,7 @@ function LyricsPanel({
                   current ? "opacity-100" : "opacity-0"
                 }`}
               />
-              {current ? (
-                // Sweep: dim base text with a bright overlay clipped to the sung
-                // fraction; keyed by line so the clip never animates backwards.
-                <span key={idx} className="relative block">
-                  {line.text}
-                  <span
-                    aria-hidden
-                    className="absolute inset-0 text-fg [transition:clip-path_250ms_linear]"
-                    style={{ clipPath: `inset(0 ${100 - sweepPct}% 0 0)` }}
-                  >
-                    {line.text}
-                  </span>
-                </span>
-              ) : (
-                line.text
-              )}
+              {line.text}
             </Tag>
           );
         })}
