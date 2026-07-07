@@ -3,7 +3,8 @@ mod lyrics;
 mod media;
 
 use media::ArtCache;
-use std::sync::atomic::{AtomicBool, Ordering};
+use serde::Serialize;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -51,18 +52,19 @@ fn media_prev(app: AppHandle) -> bool {
     ok
 }
 
+// The seek commands deliberately do NOT snapshot afterwards: the player hasn't
+// applied the seek yet, so an immediate emit carries the PRE-seek position and
+// visibly snaps the UI back to the old spot (worst on lyrics click-to-seek).
+// The next heartbeat/event delivers the post-seek timeline within ~500ms.
+
 #[tauri::command]
-fn media_seek_rel(app: AppHandle, delta_ms: i64) -> bool {
-    let ok = media::seek_rel_ms(delta_ms);
-    emit_now(&app);
-    ok
+fn media_seek_rel(delta_ms: i64) -> bool {
+    media::seek_rel_ms(delta_ms)
 }
 
 #[tauri::command]
-fn media_seek_abs(app: AppHandle, position_ms: i64) -> bool {
-    let ok = media::seek_abs_ms(position_ms);
-    emit_now(&app);
-    ok
+fn media_seek_abs(position_ms: i64) -> bool {
+    media::seek_abs_ms(position_ms)
 }
 
 /// The frontend's vote on audio reactivity (false under OS reduced-motion) —
@@ -99,11 +101,50 @@ fn media_art(art_id: String, cache: State<ArtCache>) -> Option<String> {
     media::art_url(&cache, &art_id)
 }
 
+/// One-shot state read for webview mount/reload. Emits are diff-suppressed,
+/// so a freshly loaded webview cannot count on an event ever arriving — it
+/// seeds from this instead. Seq-stamped like emits, but the frontend applies a
+/// seed only before the first event payload (seed/emit seq order across
+/// concurrent snapshots is not linearized).
+#[tauri::command]
+fn now_playing(cache: State<ArtCache>) -> Stamped {
+    Stamped {
+        seq: SEQ.fetch_add(1, Ordering::Relaxed),
+        now: media::snapshot(&cache),
+    }
+}
+
+/// Monotonic stamp on every now-playing payload — lets the frontend clock
+/// drop stale/out-of-order payloads instead of trusting IPC delivery order.
+static SEQ: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Serialize, Clone)]
+struct Stamped {
+    seq: u64,
+    #[serde(flatten)]
+    now: media::NowPlaying,
+}
+
+/// Last payload emitted. Raw pairs make unchanged GSMTC data byte-identical,
+/// so suppressing equal payloads costs nothing and zeroes idle/paused IPC —
+/// and every suppressed emit is also one less regression lottery ticket for
+/// the position pipeline (ad-hoc emit_now callers included).
+struct LastEmit(Mutex<Option<media::NowPlaying>>);
+
 fn emit_now(app: &AppHandle) -> media::NowPlaying {
     let cache = app.state::<ArtCache>();
-    let payload = media::snapshot(&cache);
-    let _ = app.emit("now-playing", payload.clone());
-    payload
+    let np = media::snapshot(&cache);
+    let last = app.state::<LastEmit>();
+    let mut last = last.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if last.as_ref() != Some(&np) {
+        let stamped = Stamped {
+            seq: SEQ.fetch_add(1, Ordering::Relaxed),
+            now: np.clone(),
+        };
+        let _ = app.emit("now-playing", &stamped);
+        *last = Some(stamped.now);
+    }
+    np
 }
 
 fn toggle_widget(app: &AppHandle) {
@@ -132,6 +173,7 @@ pub fn run() {
         )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(ArtCache(Mutex::new(None)))
+        .manage(LastEmit(Mutex::new(None)))
         .manage(UiReactive(Arc::new(AtomicBool::new(true))))
         .invoke_handler(tauri::generate_handler![
             media_play_pause,
@@ -141,6 +183,7 @@ pub fn run() {
             media_seek_abs,
             media_art,
             media_lyrics,
+            now_playing,
             set_reactive_enabled
         ])
         .setup(|app| {
@@ -177,13 +220,13 @@ pub fn run() {
                     media::play_pause();
                     emit_now(app);
                 }),
-                (HK_SEEK_BACK, |app| {
+                // Seek hotkeys: no post-seek emit for the same reason as the
+                // seek commands — it would carry the pre-seek position.
+                (HK_SEEK_BACK, |_app| {
                     media::seek_rel_ms(-SEEK_STEP_MS);
-                    emit_now(app);
                 }),
-                (HK_SEEK_FWD, |app| {
+                (HK_SEEK_FWD, |_app| {
                     media::seek_rel_ms(SEEK_STEP_MS);
-                    emit_now(app);
                 }),
                 (HK_NEXT, |app| {
                     media::next();
@@ -226,6 +269,12 @@ pub fn run() {
                 // None → GSMTC unavailable; the loop degrades to pure polling.
                 let mut watch = media::SessionWatch::new(wake_tx);
                 let mut resubscribe = true;
+                // Event wakes force a full snapshot; heartbeat ticks first
+                // probe tick_key and skip the snapshot (metadata marshal, art
+                // work, emit) when nothing moved — except while the art probe
+                // window is open, which needs every tick.
+                let mut force_snapshot = true;
+                let mut last_tick: Option<media::TickKey> = None;
                 loop {
                     if let Some(w) = watch.as_mut() {
                         w.resubscribe(std::mem::take(&mut resubscribe));
@@ -235,7 +284,15 @@ pub fn run() {
                         .and_then(|w| w.is_visible().ok())
                         .unwrap_or(true);
                     let playing = if visible {
-                        emit_now(&handle).status == "playing"
+                        let tick = media::tick_key();
+                        let probing = media::art_probing(&handle.state::<ArtCache>());
+                        let p = if std::mem::take(&mut force_snapshot) || probing || tick != last_tick {
+                            emit_now(&handle).status == "playing"
+                        } else {
+                            tick.as_ref().is_some_and(|k| k.2 == "playing")
+                        };
+                        last_tick = tick;
+                        p
                     } else {
                         false
                     };
@@ -250,6 +307,7 @@ pub fn run() {
                                 changed |= matches!(w, media::Wake::SessionChanged);
                             }
                             resubscribe = changed;
+                            force_snapshot = true;
                         }
                         Err(RecvTimeoutError::Timeout) => {}
                         // Only reachable when SessionWatch never constructed

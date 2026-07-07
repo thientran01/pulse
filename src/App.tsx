@@ -25,7 +25,10 @@ function fmt(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-/** Position interpolated between backend emits while playing. */
+/** Position interpolated from the raw (position, reported-at) pair while
+ * playing. Interim naive projection with the same 30s sanity gate the backend
+ * used to apply — the monotonic clock kernel (next PR) replaces this and is
+ * where the lyric flash-back fix lands. */
 function useLivePosition(np: NowPlaying | null): number {
   const [, force] = useState(0);
   useEffect(() => {
@@ -34,7 +37,8 @@ function useLivePosition(np: NowPlaying | null): number {
     return () => window.clearInterval(id);
   }, [np?.status]);
   if (!np) return 0;
-  const drift = np.status === "playing" ? Date.now() - np.emitted_at_ms : 0;
+  const staleness = np.position_at_ms > 0 ? Date.now() - np.position_at_ms : -1;
+  const drift = np.status === "playing" && staleness >= 0 && staleness < 30_000 ? staleness : 0;
   return Math.min(np.position_ms + drift, np.duration_ms || Infinity);
 }
 

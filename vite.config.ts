@@ -13,9 +13,12 @@ export default defineConfig(async () => ({
   //
   // 1. prevent Vite from obscuring rust errors
   clearScreen: false,
-  // 2. tauri expects a fixed port, fail if that port is not available
+  // 2. tauri expects a fixed port, fail if that port is not available.
+  // PORT override: lets preview tooling run a second dev server without
+  // colliding with `tauri dev` (which sets no PORT and gets 1420).
   server: {
-    port: 1420,
+    // @ts-expect-error process is a nodejs global
+    port: Number(process.env.PORT) || 1420,
     strictPort: true,
     host: host || false,
     hmr: host

@@ -10,6 +10,7 @@ import { IN_TAURI, type NowPlaying } from "../types";
 
 const MOCK_DURATION = 204_000;
 let mock: NowPlaying = {
+  seq: 1,
   app_id: "Mock.Player",
   player: "spotify",
   title: "Savior",
@@ -18,10 +19,15 @@ let mock: NowPlaying = {
   status: "playing",
   position_ms: 63_000,
   duration_ms: MOCK_DURATION,
-  emitted_at_ms: Date.now(),
+  position_at_ms: Date.now(),
   can_seek: true,
   art_id: "mock-art",
 };
+
+/** Mutate the mock payload, advancing the seq stamp like the backend does. */
+function pushMock(patch: Partial<NowPlaying>): void {
+  mock = { ...mock, ...patch, seq: mock.seq + 1 };
+}
 
 /** Deterministic fake album cover so preview exercises art + accent extraction. */
 function mockArt(): string {
@@ -44,7 +50,17 @@ function mockArt(): string {
 
 export function onNowPlaying(cb: (np: NowPlaying) => void): () => void {
   if (IN_TAURI) {
-    const un = listen<NowPlaying>("now-playing", (e) => cb(e.payload));
+    let gotEvent = false;
+    const un = listen<NowPlaying>("now-playing", (e) => {
+      gotEvent = true;
+      cb(e.payload);
+    });
+    // Emits are diff-suppressed backend-side, so a fresh webview (mount, dev
+    // reload) seeds itself instead of waiting for the next change. An event
+    // that lands first wins — it is always at least as new as the seed.
+    void invoke<NowPlaying>("now_playing").then((np) => {
+      if (!gotEvent) cb(np);
+    });
     return () => {
       un.then((f) => f());
     };
@@ -52,11 +68,10 @@ export function onNowPlaying(cb: (np: NowPlaying) => void): () => void {
   const tick = () => {
     if (mock.status === "playing") {
       const now = Date.now();
-      mock = {
-        ...mock,
-        position_ms: (mock.position_ms + (now - mock.emitted_at_ms)) % MOCK_DURATION,
-        emitted_at_ms: now,
-      };
+      pushMock({
+        position_ms: (mock.position_ms + (now - mock.position_at_ms)) % MOCK_DURATION,
+        position_at_ms: now,
+      });
     }
     cb(mock);
   };
@@ -146,7 +161,7 @@ export const commands = {
     if (IN_TAURI) {
       void invoke("media_play_pause");
     } else {
-      mock = { ...mock, status: mock.status === "playing" ? "paused" : "playing", emitted_at_ms: Date.now() };
+      pushMock({ status: mock.status === "playing" ? "paused" : "playing", position_at_ms: Date.now() });
     }
   },
   next(): void {
@@ -159,18 +174,17 @@ export const commands = {
     if (IN_TAURI) {
       void invoke("media_seek_rel", { deltaMs });
     } else {
-      mock = {
-        ...mock,
+      pushMock({
         position_ms: Math.min(Math.max(mock.position_ms + deltaMs, 0), mock.duration_ms),
-        emitted_at_ms: Date.now(),
-      };
+        position_at_ms: Date.now(),
+      });
     }
   },
   seekAbs(positionMs: number): void {
     if (IN_TAURI) {
       void invoke("media_seek_abs", { positionMs });
     } else {
-      mock = { ...mock, position_ms: positionMs, emitted_at_ms: Date.now() };
+      pushMock({ position_ms: positionMs, position_at_ms: Date.now() });
     }
   },
   async art(artId: string): Promise<string | null> {
