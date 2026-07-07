@@ -250,11 +250,35 @@ function useAudioReactive(
   artRef: React.RefObject<HTMLDivElement | null>,
 ): void {
   useEffect(() => {
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    return onAudioBands((b) => {
-      if (glowRef.current) glowRef.current.style.opacity = (0.2 + b.level * 0.8).toFixed(3);
-      if (artRef.current) artRef.current.style.transform = `scale(${(1 + b.bass * 0.02).toFixed(4)})`;
-    });
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    let unsub: (() => void) | null = null;
+    const apply = () => {
+      // Also stops backend capture — no audio work for suppressed visuals.
+      commands.setReactiveEnabled(!mq.matches);
+      if (mq.matches) {
+        unsub?.();
+        unsub = null;
+        if (glowRef.current) glowRef.current.style.opacity = "0";
+        if (artRef.current) artRef.current.style.transform = "";
+      } else if (!unsub) {
+        unsub = onAudioBands((b) => {
+          // Rest at zero on silence/stop; the static shell glow carries the
+          // ambient look — this layer only ever ADDS energy.
+          if (glowRef.current) {
+            glowRef.current.style.opacity = b.level <= 0.01 ? "0" : (0.08 + b.level * 0.85).toFixed(3);
+          }
+          if (artRef.current) {
+            artRef.current.style.transform = `scale(${(1 + b.bass * 0.02).toFixed(4)})`;
+          }
+        });
+      }
+    };
+    apply();
+    mq.addEventListener("change", apply);
+    return () => {
+      mq.removeEventListener("change", apply);
+      unsub?.();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 }
@@ -618,7 +642,7 @@ function App() {
         <div
           ref={glowRef}
           aria-hidden
-          className="pointer-events-none absolute inset-0 z-10 rounded-xl opacity-0 shadow-[inset_0_0_32px_-8px_rgb(var(--accent)/0.5)] will-change-[opacity] [transition:opacity_100ms_linear]"
+          className="pointer-events-none absolute inset-0 rounded-xl opacity-0 shadow-[inset_0_0_32px_-8px_rgb(var(--accent)/0.5)] will-change-[opacity] [transition:opacity_100ms_linear]"
         />
         {nothing ? (
           <div className="flex h-full w-full items-center justify-center gap-2 text-muted">

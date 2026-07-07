@@ -97,6 +97,11 @@ export function onAudioBands(cb: (b: AudioBands) => void): () => void {
 }
 
 export const commands = {
+  /** Tell the backend whether reactive visuals are wanted (false under
+   * reduced motion) — it stops audio capture entirely when not. */
+  setReactiveEnabled(enabled: boolean): void {
+    if (IN_TAURI) void invoke("set_reactive_enabled", { enabled });
+  },
   /** Native window drag — call from mousedown on any non-interactive surface. */
   startDrag(): void {
     if (IN_TAURI) void getCurrentWindow().startDragging();

@@ -55,17 +55,30 @@ impl Ring {
     }
 }
 
-fn open_loopback(ring: Arc<Mutex<Ring>>) -> Option<(cpal::Stream, f32)> {
+fn open_loopback(
+    ring: Arc<Mutex<Ring>>,
+    frames: Arc<std::sync::atomic::AtomicU64>,
+) -> Option<(cpal::Stream, f32)> {
     let host = cpal::default_host();
     let device = host.default_output_device()?;
     let config = device.default_output_config().ok()?;
+    // cpal panics INSIDE the audio callback on a type mismatch — degrade to
+    // "no visuals" instead for the rare non-F32 shared-mode mix format.
+    if config.sample_format() != cpal::SampleFormat::F32 {
+        eprintln!("audio loopback: unsupported sample format {:?}", config.sample_format());
+        return None;
+    }
     let sample_rate = config.sample_rate().0 as f32;
     let channels = config.channels() as usize;
     // Building an INPUT stream on an OUTPUT device = WASAPI loopback.
+    // The Mutex hold inside the callback is a few µs (push into a fixed ring);
+    // snapshot() on the reader side is equally short — contention risk is
+    // negligible at 30Hz reads.
     let stream = device
         .build_input_stream(
             &config.into(),
             move |data: &[f32], _| {
+                frames.fetch_add(1, Ordering::Relaxed);
                 let mut ring = match ring.lock() {
                     Ok(r) => r,
                     Err(p) => p.into_inner(),
@@ -116,14 +129,22 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
         let mut smoothed = [0.0f32; 3];
         let mut gain_ref = [1e-4f32; 3];
         let mut scratch = vec![Complex::default(); FFT_SIZE];
+        // Stream-health watchdog: the callback bumps `frames`; if it stalls
+        // while we're supposedly capturing (default device changed, stream
+        // silently died — cpal never signals this), drop and reopen.
+        let frames = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut last_frames = 0u64;
+        let mut last_progress = std::time::Instant::now();
 
         loop {
             let want = switch.load(Ordering::Relaxed);
             match (&active, want) {
                 (None, true) => {
                     let ring = Arc::new(Mutex::new(Ring::new()));
-                    if let Some((stream, rate)) = open_loopback(ring.clone()) {
+                    if let Some((stream, rate)) = open_loopback(ring.clone(), frames.clone()) {
                         active = Some((stream, rate, ring));
+                        last_frames = frames.load(Ordering::Relaxed);
+                        last_progress = std::time::Instant::now();
                     } else {
                         // Device unavailable — retry lazily, don't spin.
                         std::thread::sleep(Duration::from_secs(5));
@@ -133,6 +154,17 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                     active = None; // drops the stream, releases the device
                     smoothed = [0.0; 3];
                     let _ = app.emit("audio-bands", Bands::default());
+                }
+                (Some(_), true) => {
+                    let now_frames = frames.load(Ordering::Relaxed);
+                    if now_frames != last_frames {
+                        last_frames = now_frames;
+                        last_progress = std::time::Instant::now();
+                    } else if last_progress.elapsed() > Duration::from_secs(2) {
+                        eprintln!("audio loopback stalled — reopening against current default device");
+                        active = None; // next iteration reopens
+                        continue;
+                    }
                 }
                 _ => {}
             }

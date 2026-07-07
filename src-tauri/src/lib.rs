@@ -61,6 +61,15 @@ fn media_seek_abs(app: AppHandle, position_ms: i64) -> bool {
     ok
 }
 
+/// The frontend's vote on audio reactivity (false under OS reduced-motion) —
+/// ANDed into the capture switch so suppressed visuals also stop the capture.
+struct UiReactive(Arc<AtomicBool>);
+
+#[tauri::command]
+fn set_reactive_enabled(enabled: bool, state: State<UiReactive>) {
+    state.0.store(enabled, Ordering::Relaxed);
+}
+
 /// Fetch synced/plain lyrics for a track (LRCLIB + disk cache). Blocking
 /// network call — Tauri runs sync commands on a worker thread.
 #[tauri::command]
@@ -122,6 +131,7 @@ pub fn run() {
         )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(ArtCache(Mutex::new(None)))
+        .manage(UiReactive(Arc::new(AtomicBool::new(true))))
         .invoke_handler(tauri::generate_handler![
             media_play_pause,
             media_next,
@@ -129,7 +139,8 @@ pub fn run() {
             media_seek_rel,
             media_seek_abs,
             media_art,
-            media_lyrics
+            media_lyrics,
+            set_reactive_enabled
         ])
         .setup(|app| {
             // Tray: Show/Hide + Quit.
@@ -198,9 +209,13 @@ pub fn run() {
             // (plan M4 — a hidden or paused widget does zero audio work).
             let audio_switch = Arc::new(AtomicBool::new(false));
             audio::spawn(app.handle().clone(), audio_switch.clone());
+            let ui_reactive = app.state::<UiReactive>().0.clone();
 
             // Media poll loop → "now-playing" events. Skips all work while the
             // widget is hidden (toggle_widget emits fresh state on show).
+            // NOTE: is_visible() is "not hidden/minimized", not "unoccluded" —
+            // a fully covered widget still captures. Occlusion detection isn't
+            // exposed through Tauri; accepted for v1.
             let handle = app.handle().clone();
             std::thread::spawn(move || loop {
                 let visible = handle
@@ -212,7 +227,8 @@ pub fn run() {
                 } else {
                     false
                 };
-                audio_switch.store(visible && playing, Ordering::Relaxed);
+                let reactive = ui_reactive.load(Ordering::Relaxed);
+                audio_switch.store(visible && playing && reactive, Ordering::Relaxed);
                 std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
             });
             Ok(())
