@@ -24,7 +24,7 @@ src/            React widget: pill ↔ card ↔ expanded modes; expanded = karao
                 (click-line-to-seek) with big-art fallback; palette.ts accent extraction
 ```
 
-Design rule: chrome stays neutral (house semantic tokens); the album-art palette is the **accent layer only** — progress fills, the **audio-reactive art halo** (ArtGlow — supersedes the ambient shell glow blessed 2026-07-06; the halo is the ONLY audio-reactive accent surface, mounted in card + expanded big-art modes only, with a static accent resting shadow on the art), and the current-lyric **marker** (the lyric line's text stays fg — extracted accents only guarantee 3:1, below the 4.5:1 text floor). The card shell shadow is neutral black and non-reactive — its only job is lifting the overlay off the app beneath. The art itself never moves; only light does. Accent never colors text or chrome surfaces. Motion uses EASE/DUR tokens — `/emil-pass` binds to them.
+Design rule: chrome stays neutral (house semantic tokens); the album-art palette is the **accent layer only** — progress fills, the **now-playing waveform icon** (src/Waveform.tsx — five Apple-style bouncing capsules replacing the em dash between artist and album in every mode; the ONLY audio-reactive surface, settles to resting dots on pause; supersedes the art-halo direction and the shell glow blessed 2026-07-06), and the current-lyric **marker** (the lyric line's text stays fg — extracted accents only guarantee 3:1, below the 4.5:1 text floor). No glow anywhere: the card shell shadow is neutral black and non-reactive (lift only), the art carries no shadow. The art never moves; nothing moves except the icon's bars. Accent never colors text or chrome surfaces. Motion uses EASE/DUR tokens — `/emil-pass` binds to them.
 
 ## Global hotkeys (M1 defaults, constants in src-tauri/src/lib.rs)
 
@@ -32,7 +32,6 @@ Design rule: chrome stays neutral (house semantic tokens); the album-art palette
 - `Ctrl+Alt+←/→` seek ∓10s (current session; the hotkey always fires the SMTC call — Apple Music silently ignores it, only the UI buttons are capability-gated)
 - `Ctrl+Alt+N/P` next/previous track
 - `Ctrl+Alt+M` show/hide the widget
-- `g` (in-widget, not global) cycles the art-halo lobe placement around → bottom → sides → top+bottom; `[`/`]` tune lobes per edge (2–10) — hidden dev settings, persisted as `pulse.glowPlacement` / `pulse.glowLobes` in localStorage
 
 Commands route to the OS "current" media session, which Windows re-points to
 whichever app played most recently (pause AM while Spotify plays → next command

@@ -79,8 +79,3 @@ export class Envelope {
     return this.value;
   }
 }
-
-/** Gamma-shape a 0..1 level: quiet passages whisper, drops bloom. */
-export function expressive(v: number): number {
-  return Math.pow(v, 1.35);
-}

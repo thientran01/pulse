@@ -1,11 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
-import { ArtGlow, GLOW_PLACEMENTS, LOBES_MAX, LOBES_MIN, type GlowPlacement } from "./ArtGlow";
 import { commands, onNowPlaying } from "./lib/backend";
 import { currentLineIndex, parseLrc, type LyricLine } from "./lib/lrc";
 import { extractAccent } from "./lib/palette";
 import { initReactive } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
+import { Waveform } from "./Waveform";
 import type { NowPlaying } from "./types";
 
 // Keep in sync with SEEK_STEP_MS in src-tauri/src/lib.rs (global hotkeys).
@@ -429,34 +429,13 @@ function ProgressBar({ np, position }: { np: NowPlaying; position: number }) {
   );
 }
 
-function Art({
-  url,
-  size,
-  radiusPx,
-  halo,
-}: {
-  url: string | null;
-  size: number;
-  radiusPx: number;
-  /** Mounts the audio-reactive halo behind the art (the art never moves —
-   * only light does) plus a static accent resting shadow. */
-  halo?: { pad: number; placement: GlowPlacement; lobes: number };
-}) {
+function Art({ url, size, radiusPx }: { url: string | null; size: number; radiusPx: number }) {
   return (
-    // `isolate` contains the halo's negative z-index so it paints above the
-    // card background but under neighboring text, never over it.
-    <div className="relative isolate shrink-0" style={{ width: size, height: size }}>
-      {halo && (
-        <ArtGlow artSize={size} pad={halo.pad} radius={radiusPx} placement={halo.placement} lobes={halo.lobes} />
-      )}
-      <div
-        className={`relative z-10 grid h-full w-full place-items-center overflow-hidden bg-surface-2 text-muted ${
-          halo ? "shadow-[0_0_16px_-4px_rgb(var(--accent)/0.22)]" : ""
-        }`}
-        style={{ borderRadius: radiusPx }}
-      >
-        {url ? <img src={url} alt="" className="h-full w-full object-cover" draggable={false} /> : icons.note}
-      </div>
+    <div
+      className="grid shrink-0 place-items-center overflow-hidden bg-surface-2 text-muted"
+      style={{ width: size, height: size, borderRadius: radiusPx }}
+    >
+      {url ? <img src={url} alt="" className="h-full w-full object-cover" draggable={false} /> : icons.note}
     </div>
   );
 }
@@ -504,56 +483,6 @@ function App() {
   const lyrics = useLyrics(np);
   // Assert the reduced-motion capture vote even before any halo mounts.
   useEffect(() => initReactive(), []);
-
-  // Hidden settings: `g` cycles the halo placement, `[`/`]` tune lobe count.
-  const [glowPlacement, setGlowPlacement] = useState<GlowPlacement>(() => {
-    try {
-      const saved = localStorage.getItem("pulse.glowPlacement") as GlowPlacement | null;
-      return saved && GLOW_PLACEMENTS.includes(saved) ? saved : "around";
-    } catch {
-      return "around";
-    }
-  });
-  const [glowLobes, setGlowLobes] = useState<number>(() => {
-    try {
-      const saved = Number(localStorage.getItem("pulse.glowLobes"));
-      return Number.isInteger(saved) && saved >= LOBES_MIN && saved <= LOBES_MAX ? saved : 5;
-    } catch {
-      return 5;
-    }
-  });
-  const [glowToast, setGlowToast] = useState<string | null>(null);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
-      if (e.key !== "g" && e.key !== "[" && e.key !== "]") return;
-      const target = e.target as HTMLElement;
-      if (target.closest('input, textarea, [role="slider"]')) return;
-      let placement = glowPlacement;
-      let lobes = glowLobes;
-      if (e.key === "g") {
-        placement = GLOW_PLACEMENTS[(GLOW_PLACEMENTS.indexOf(glowPlacement) + 1) % GLOW_PLACEMENTS.length];
-        setGlowPlacement(placement);
-      } else {
-        lobes = Math.min(LOBES_MAX, Math.max(LOBES_MIN, glowLobes + (e.key === "]" ? 1 : -1)));
-        setGlowLobes(lobes);
-      }
-      setGlowToast(`${placement} · ${lobes} lobes`);
-      try {
-        localStorage.setItem("pulse.glowPlacement", placement);
-        localStorage.setItem("pulse.glowLobes", String(lobes));
-      } catch {
-        // non-fatal: settings reset on next launch
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [glowPlacement, glowLobes]);
-  useEffect(() => {
-    if (!glowToast) return;
-    const id = window.setTimeout(() => setGlowToast(null), 1200);
-    return () => window.clearTimeout(id);
-  }, [glowToast]);
 
   const [mode, setMode] = useState<Mode>(() => {
     try {
@@ -609,12 +538,6 @@ function App() {
         {...morph}
         className="relative flex h-full flex-col overflow-hidden rounded-xl border border-border/10 bg-surface/95 shadow-[0_2px_6px_rgb(0_0_0/0.25),0_8px_28px_rgb(0_0_0/0.4)]"
       >
-        {/* Tuning feedback (`g` cycles placement, `[`/`]` tune lobe count). */}
-        {glowToast && (
-          <span aria-hidden className="pointer-events-none absolute left-2 top-1.5 z-20 text-[10px] text-muted">
-            glow: {glowToast}
-          </span>
-        )}
         {nothing ? (
           <div className="flex h-full w-full items-center justify-center gap-2 text-muted">
             {icons.note}
@@ -626,7 +549,8 @@ function App() {
               <Art url={shownArt} size={26} radiusPx={6} />
               <p className="min-w-0 flex-1 truncate text-xs font-medium text-fg">
                 {np.title}
-                <span className="font-normal text-muted"> — {np.artist}</span>
+                <Waveform />
+                <span className="font-normal text-muted">{np.artist}</span>
               </p>
               <IconButton size="sm" label={playing ? "Pause" : "Play"} onClick={commands.playPause}>
                 {playing ? icons.pause : icons.play}
@@ -653,7 +577,7 @@ function App() {
           </>
         ) : mode === "card" ? (
           <div className="flex h-full items-center gap-3 px-3">
-            <Art url={shownArt} size={72} radiusPx={8} halo={{ pad: 32, placement: glowPlacement, lobes: glowLobes }} />
+            <Art url={shownArt} size={72} radiusPx={8} />
             <div className="flex min-w-0 flex-1 flex-col gap-0.5">
               <div className="flex items-center gap-1">
                 <p className="min-w-0 flex-1 truncate text-[15px] font-medium text-fg">{np.title}</p>
@@ -669,7 +593,8 @@ function App() {
               </div>
               <p className="truncate text-xs text-muted">
                 {np.artist}
-                {np.album ? ` — ${np.album}` : ""}
+                <Waveform />
+                {np.album}
               </p>
               <div className="mt-0.5">
                 <Transport np={np} seekable={seekable} playing={playing} />
@@ -685,7 +610,10 @@ function App() {
               <Art url={shownArt} size={44} radiusPx={6} />
               <div className="min-w-0 flex-1">
                 <p className="truncate text-[15px] font-medium text-fg">{np.title}</p>
-                <p className="truncate text-[13px] text-muted">{np.artist}</p>
+                <p className="truncate text-[13px] text-muted">
+                  {np.artist}
+                  <Waveform />
+                </p>
               </div>
               <PlayerBadge player={np.player} />
               <IconButton size="sm" label="Collapse to card" onClick={() => setMode("card")}>
@@ -710,12 +638,13 @@ function App() {
                 {icons.chevronDown}
               </IconButton>
             </div>
-            <Art url={shownArt} size={190} radiusPx={12} halo={{ pad: 44, placement: glowPlacement, lobes: glowLobes }} />
+            <Art url={shownArt} size={190} radiusPx={12} />
             <div className="min-w-0 self-stretch text-center">
               <p className="truncate text-sm font-medium text-fg">{np.title}</p>
               <p className="truncate text-xs text-muted">
                 {np.artist}
-                {np.album ? ` — ${np.album}` : ""}
+                <Waveform />
+                {np.album}
               </p>
               {lyrics.status === "none" && (
                 <p className="mt-0.5 text-[10px] text-muted">No synced lyrics</p>
