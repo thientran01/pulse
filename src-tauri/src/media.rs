@@ -23,7 +23,7 @@ const TICKS_PER_MS: i64 = 10_000; // WinRT TimeSpan tick = 100ns
 /// Offset between the Windows FILETIME epoch (1601) and the unix epoch, in ms.
 const FILETIME_EPOCH_OFFSET_MS: i64 = 11_644_473_600_000;
 
-#[derive(Serialize, Clone, Default)]
+#[derive(Serialize, Clone, Default, PartialEq)]
 pub struct NowPlaying {
     pub app_id: String,
     /// "apple_music" | "spotify" | "other" | "none"
@@ -33,10 +33,14 @@ pub struct NowPlaying {
     pub album: String,
     /// "playing" | "paused" | "stopped" | "none"
     pub status: String,
+    /// RAW player-reported position — no staleness projection applied. The
+    /// frontend owns the one clock that turns (position, reported-at) pairs
+    /// into a display position; Rust never projects a UI-visible position.
     pub position_ms: i64,
     pub duration_ms: i64,
-    /// Unix ms at which position_ms was true — the frontend interpolates from here.
-    pub emitted_at_ms: i64,
+    /// Unix ms when the player last stamped its timeline (GSMTC
+    /// LastUpdatedTime). 0 = the player never stamped it.
+    pub position_at_ms: i64,
     pub can_seek: bool,
     pub art_id: Option<String>,
 }
@@ -95,12 +99,35 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn manager() -> windows::core::Result<Manager> {
-    Manager::RequestAsync()?.get()
+/// GSMTC manager, cached for the app lifetime: RequestAsync is a blocking
+/// cross-process round-trip and was being paid on every snapshot and every
+/// transport command. The manager is a stable singleton connection — sessions
+/// come and go underneath it. A failed request retries on the next call.
+static MANAGER: Mutex<Option<Manager>> = Mutex::new(None);
+
+fn manager() -> Option<Manager> {
+    let mut cached = MANAGER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if cached.is_none() {
+        *cached = Manager::RequestAsync().ok().and_then(|op| op.get().ok());
+    }
+    cached.clone()
 }
 
 pub fn current_session() -> Option<Session> {
-    manager().ok()?.GetCurrentSession().ok()
+    match manager()?.GetCurrentSession() {
+        Ok(s) => Some(s),
+        // windows-rs maps a null return ("no current session" — a normal
+        // state, e.g. Apple Music stopped) to an Err carrying S_OK. Any real
+        // failure code means the cached manager's connection died (service
+        // restart, sleep/resume) — drop it so the next call re-requests,
+        // otherwise the app would stay dark until restart.
+        Err(e) => {
+            if !e.code().is_ok() {
+                *MANAGER.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            }
+            None
+        }
+    }
 }
 
 /// Wake signals sent from WinRT event handlers to the media loop.
@@ -125,7 +152,7 @@ pub struct SessionWatch {
 impl SessionWatch {
     /// None when GSMTC is unavailable — the caller falls back to pure polling.
     pub fn new(tx: Sender<Wake>) -> Option<Self> {
-        let manager = manager().ok()?;
+        let manager = manager()?;
         let session_tx = tx.clone();
         manager
             .CurrentSessionChanged(&TypedEventHandler::new(move |_, _| {
@@ -310,20 +337,11 @@ pub fn snapshot(art_cache: &ArtCache) -> NowPlaying {
         title = "Unknown".into();
     }
 
-    let status = playback_status(&session).to_string();
-    let can_seek = session
-        .GetPlaybackInfo()
-        .and_then(|i| i.Controls())
-        .and_then(|c| c.IsPlaybackPositionEnabled())
-        .unwrap_or(false);
-
-    let (mut position_ms, duration_ms) = corrected_position(&session, &status);
+    let (status, can_seek) = playback_info(&session);
+    let (mut position_ms, duration_ms, position_at_ms) = raw_timeline(&session);
     if duration_ms > 0 {
         position_ms = position_ms.clamp(0, duration_ms);
     }
-    // Stamp BEFORE the (potentially slow) art read below — the frontend treats
-    // position_ms as true at emitted_at_ms and interpolates from there.
-    let emitted_at_ms = now_ms();
 
     let art_id = if has_thumb {
         let key = art_key(&app_id, &title, &artist);
@@ -431,50 +449,90 @@ pub fn snapshot(art_cache: &ArtCache) -> NowPlaying {
         title,
         artist,
         album,
-        status,
+        status: status.to_string(),
         position_ms,
         duration_ms,
-        emitted_at_ms,
+        position_at_ms,
         can_seek,
         art_id,
     }
 }
 
-/// (position_ms, duration_ms) with staleness correction for ANY player:
-/// position + elapsed-since-LastUpdatedTime is the best estimate of the true
-/// position while playing. It matters for Spotify (pushes its timeline only
-/// ~every 5s) and is a ≤1s refinement for Apple Music (reports fresh every
-/// second). Correction is skipped for insane staleness values (clock skew,
-/// first emit after a session appears).
-fn corrected_position(session: &Session, status: &str) -> (i64, i64) {
+/// Raw GSMTC timeline triple: (position_ms, duration_ms, last_updated_unix_ms).
+/// Deliberately NO staleness projection — re-projecting each snapshot is what
+/// let Apple Music's 1s-quantized pushes land behind the previous projection
+/// (the lyric flash-back), and the old out-of-range fallback to the raw
+/// position was a second regression source. last_updated is 0 when the player
+/// never stamped the timeline.
+fn raw_timeline(session: &Session) -> (i64, i64, i64) {
     let Ok(t) = session.GetTimelineProperties() else {
-        return (0, 0);
+        return (0, 0, 0);
     };
     let pos = t.Position().map(|d| d.Duration / TICKS_PER_MS).unwrap_or(0);
     let end = t.EndTime().map(|d| d.Duration / TICKS_PER_MS).unwrap_or(0);
-    let corrected = if status == "playing" {
-        let updated_unix_ms = t
-            .LastUpdatedTime()
-            .map(|d| d.UniversalTime / TICKS_PER_MS - FILETIME_EPOCH_OFFSET_MS)
-            .unwrap_or(0);
-        let staleness = now_ms() - updated_unix_ms;
-        if (0..30_000).contains(&staleness) {
-            pos + staleness
-        } else {
-            pos
-        }
-    } else {
-        pos
-    };
-    (corrected, end)
+    let updated = t
+        .LastUpdatedTime()
+        .map(|d| d.UniversalTime / TICKS_PER_MS - FILETIME_EPOCH_OFFSET_MS)
+        .unwrap_or(0);
+    (pos, end, updated)
 }
 
-fn playback_status(session: &Session) -> &'static str {
-    match session.GetPlaybackInfo().and_then(|i| i.PlaybackStatus()) {
+/// (status, can_seek) from ONE GetPlaybackInfo read — snapshot used to fetch
+/// it twice (status, then capability).
+fn playback_info(session: &Session) -> (&'static str, bool) {
+    let Ok(info) = session.GetPlaybackInfo() else {
+        return ("stopped", false);
+    };
+    let status = match info.PlaybackStatus() {
         Ok(PlaybackStatus(4)) => "playing",
         Ok(PlaybackStatus(5)) => "paused",
         _ => "stopped",
-    }
+    };
+    let can_seek = info
+        .Controls()
+        .and_then(|c| c.IsPlaybackPositionEnabled())
+        .unwrap_or(false);
+    (status, can_seek)
+}
+
+fn playback_status(session: &Session) -> &'static str {
+    playback_info(session).0
+}
+
+/// Cheap heartbeat probe: (app_id, timeline Position + LastUpdatedTime ticks,
+/// status). The media loop skips the full snapshot (metadata marshal + art
+/// work + emit) when this hasn't moved since the previous tick. Position is
+/// included on its own because a player may move it without re-stamping
+/// LastUpdatedTime (unverified for programmatic Spotify seeks) — the post-seek
+/// UI bound must stay one heartbeat, not one push cadence. Metadata-only
+/// changes still snapshot: MediaPropertiesChanged wakes force one.
+pub type TickKey = (String, i64, i64, &'static str);
+
+pub fn tick_key() -> Option<TickKey> {
+    let session = current_session()?;
+    let app_id = session
+        .SourceAppUserModelId()
+        .map(|h| h.to_string())
+        .unwrap_or_default();
+    let (position, updated) = session
+        .GetTimelineProperties()
+        .map(|t| {
+            (
+                t.Position().map(|d| d.Duration).unwrap_or(0),
+                t.LastUpdatedTime().map(|d| d.UniversalTime).unwrap_or(0),
+            )
+        })
+        .unwrap_or((0, 0));
+    Some((app_id, position, updated, playback_status(&session)))
+}
+
+/// True while the art cache is inside its distrust window for the current key.
+/// The stale-art probe re-reads thumbnail bytes every tick then (#11), so the
+/// media loop must not skip snapshots on an unchanged tick_key.
+pub fn art_probing(cache: &ArtCache) -> bool {
+    lock_art(cache)
+        .as_ref()
+        .is_some_and(|e| !e.settled && now_ms() - e.first_seen_ms < ART_PROBE_WINDOW_MS)
 }
 
 pub fn play_pause() -> bool {
@@ -509,15 +567,22 @@ pub fn seek_abs_ms(target_ms: i64) -> bool {
         .unwrap_or(false)
 }
 
-/// Relative seek anchored on the staleness-corrected position (Spotify's raw
+/// Relative seek anchored on a locally projected position (Spotify's raw
 /// reported position can be ~5s behind what the user hears), clamped to the
-/// track bounds.
+/// track bounds. This projection is the ONE left in Rust and it never reaches
+/// the UI — global hotkeys land here without passing through the frontend, so
+/// the ±10s anchor must be computed on this side.
 pub fn seek_rel_ms(delta_ms: i64) -> bool {
     let Some(session) = current_session() else {
         return false;
     };
-    let status = playback_status(&session);
-    let (pos, end) = corrected_position(&session, status);
+    let (pos, end, updated) = raw_timeline(&session);
+    let staleness = now_ms() - updated;
+    let pos = if playback_status(&session) == "playing" && (0..30_000).contains(&staleness) {
+        pos + staleness
+    } else {
+        pos
+    };
     let end = if end > 0 { end } else { i64::MAX };
     seek_abs_ms((pos + delta_ms).clamp(0, end))
 }

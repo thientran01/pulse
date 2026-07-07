@@ -16,7 +16,11 @@ Full plan: `C:\Users\Thien\.claude\plans\i-want-to-start-buzzing-wreath.md` (mil
 src-tauri/src/
   media.rs      GSMTC watcher → now-playing events + transport/seek commands + art cache;
                 change events (SessionWatch) wake a 500ms heartbeat poll, so track/art/
-                status changes land in ~50ms while position staleness stays poll-bounded
+                status changes land in ~50ms. Emits carry the RAW (position_ms,
+                position_at_ms=LastUpdatedTime) pair + seq — Rust never projects a
+                UI-visible position; the frontend owns the clock. Emits are
+                diff-suppressed and unchanged heartbeat ticks skip the snapshot, so a
+                payload arrives only when the player's data actually moved
                 (splits into media_core/ + adapters/ when M5 adds Spotify Web API)
   lyrics.rs     LRCLIB get→search fallback, disk cache (bounded, app-data) + session miss set
   audio.rs      WASAPI loopback (cpal input stream on the output device) → FFT →
