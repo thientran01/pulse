@@ -43,6 +43,12 @@ const SEEK_CONFIRM_MS = 2000;
  * a deliberate scrub in the player's own UI, jitter-band rules don't apply. */
 const PAUSED_SCRUB_MS = 50;
 
+/* Module-level state, deliberately: the kernel outlives React remounts. Two
+ * lifecycle assumptions hold on Tauri: (1) a backend seq reset only happens
+ * with a full process restart, which resets this module too, so the seq guard
+ * can never go permanently deaf; (2) an HMR reload of this module self-heals
+ * within one IPC round-trip — Fast Refresh re-runs App's effects, and the
+ * onNowPlaying mount seed re-feeds the freshly reset state. */
 let track = "";
 let playing = false;
 let durationMs = 0;
@@ -90,7 +96,12 @@ export function ingest(np: NowPlaying): boolean {
   const shown = now(); // BEFORE mutating state — the clock's previous value
   const wasPlaying = playing;
   const isPlaying = np.status === "playing";
-  const key = `${np.app_id}|${np.title}|${np.artist}|${np.duration_ms}`;
+  // duration_ms is deliberately NOT part of track identity: a transient
+  // duration misreport (0 for a beat during metadata churn) would force a
+  // false track-change that bypasses every filter below. A genuine
+  // same-title/artist track transition still lands correctly — its position
+  // restart is a beyond-band discontinuity, which the normal rule adopts.
+  const key = `${np.app_id}|${np.title}|${np.artist}`;
 
   // The wall clock is consulted exactly once per ingest and converted to a
   // projection immediately — the running clock is performance.now()-based,
@@ -162,6 +173,12 @@ export function ingest(np: NowPlaying): boolean {
     // discontinuity only beyond the jitter band, so a resume never ticks
     // backwards on quantization jitter.
     next = projected >= shown || shown - projected >= band ? projected : shown;
+  }
+  if (import.meta.env.DEV && next === projected && shown - next > PAUSED_SCRUB_MS) {
+    // Adopted backward moves are the one event class where a filter bug would
+    // hide — every legitimate entry here is a real seek/restart/scrub. Watch
+    // this during live soaks: unexpected entries = the flash trying to return.
+    console.debug("posClock: backward discontinuity adopted", { shown, projected, player: np.player });
   }
   rebase(next);
   notify();
