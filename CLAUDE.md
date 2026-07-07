@@ -33,7 +33,8 @@ Design rule: chrome stays neutral (house semantic tokens); the album-art palette
 
 Commands route to the OS "current" media session, which Windows re-points to
 whichever app played most recently (pause AM while Spotify plays → next command
-hits Spotify). The card shows the controlled app's name for this reason.
+hits Spotify). The card shows the controlled app's brand icon (name in the
+tooltip/aria-label) for this reason.
 
 ## Commands
 

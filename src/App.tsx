@@ -94,6 +94,17 @@ function useLyrics(np: NowPlaying | null): LyricsState {
   return state;
 }
 
+/** How long the karaoke sweep runs across a line: the gap to the next line,
+ * capped by a per-character pacing estimate so a line followed by an
+ * instrumental break doesn't crawl. Line-level LRC has no word timing — this
+ * is an even-pace approximation. */
+function sweepDurationMs(line: LyricLine, next: LyricLine | undefined): number {
+  const gap = (next ? next.t : line.t + 8000) - line.t;
+  return Math.min(gap, Math.max(1000, 70 * line.text.length + 600));
+}
+
+const BROWSE_RESUME_MS = 3500;
+
 function LyricsPanel({
   lines,
   position,
@@ -106,10 +117,20 @@ function LyricsPanel({
   const idx = currentLineIndex(lines, position);
   const viewportRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const [offset, setOffset] = useState(0);
+  const [autoOffset, setAutoOffset] = useState(0);
+  // Wheel-scrolling pauses auto-follow; it resumes after a short idle.
+  const [manualOffset, setManualOffset] = useState<number | null>(null);
+  const resumeTimer = useRef<number | undefined>(undefined);
 
-  // Center-ish the current line (40% from the top) via a compositor-friendly
-  // translate on the list, not scrollTop.
+  const maxOffset = (): number => {
+    const viewport = viewportRef.current;
+    const list = listRef.current;
+    if (!viewport || !list) return 0;
+    return Math.max(list.scrollHeight - viewport.clientHeight, 0);
+  };
+
+  // Anchor the current line 40% from the top via a compositor-friendly
+  // translate. Rounded — fractional offsets put text off the pixel grid.
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
     const list = listRef.current;
@@ -117,15 +138,40 @@ function LyricsPanel({
     const line = list.children[Math.max(idx, 0)] as HTMLElement | undefined;
     if (!line) return;
     const anchor = viewport.clientHeight * 0.4;
-    const target = idx < 0 ? 0 : line.offsetTop + line.offsetHeight / 2 - anchor;
-    setOffset(Math.max(0, target));
+    const raw = idx < 0 ? 0 : line.offsetTop + line.offsetHeight / 2 - anchor;
+    setAutoOffset(Math.round(Math.min(Math.max(raw, 0), maxOffset())));
   }, [idx, lines]);
 
+  useEffect(() => () => window.clearTimeout(resumeTimer.current), []);
+
+  const browsing = manualOffset !== null;
+  const offset = manualOffset ?? autoOffset;
+
+  const onWheel = (e: React.WheelEvent) => {
+    const next = Math.round(Math.min(Math.max((manualOffset ?? autoOffset) + e.deltaY, 0), maxOffset()));
+    setManualOffset(next);
+    window.clearTimeout(resumeTimer.current);
+    resumeTimer.current = window.setTimeout(() => setManualOffset(null), BROWSE_RESUME_MS);
+  };
+
+  // Karaoke sweep fraction across the current line (linear — constant motion).
+  const currentLine = idx >= 0 ? lines[idx] : null;
+  const sweepPct = currentLine
+    ? Math.min(Math.max(((position + 250 - currentLine.t) / sweepDurationMs(currentLine, lines[idx + 1])) * 100, 0), 100)
+    : 0;
+
   return (
-    <div ref={viewportRef} className="relative min-h-0 flex-1 overflow-hidden" aria-label="Lyrics">
+    <div
+      ref={viewportRef}
+      onWheel={onWheel}
+      className="relative min-h-0 flex-1 overflow-hidden [mask-image:linear-gradient(transparent,black_28px,black_calc(100%-28px),transparent)]"
+      aria-label="Lyrics"
+    >
       <div
         ref={listRef}
-        className="flex flex-col gap-1 py-3 will-change-transform [transition:transform_220ms_var(--ease-in-out-tk)]"
+        className={`flex flex-col gap-1 py-4 will-change-transform ${
+          browsing ? "" : "[transition:transform_220ms_var(--ease-in-out-tk)]"
+        }`}
         style={{ transform: `translateY(${-offset}px)` }}
       >
         {lines.map((line, i) => {
@@ -137,7 +183,11 @@ function LyricsPanel({
               {...(seekable
                 ? {
                     type: "button" as const,
-                    onClick: () => commands.seekAbs(line.t),
+                    onClick: () => {
+                      commands.seekAbs(line.t);
+                      setManualOffset(null); // hand control back to auto-follow
+                      window.clearTimeout(resumeTimer.current);
+                    },
                     "aria-label": `Seek to ${line.text}`,
                     // Out of the tab order — dozens of lines would otherwise sit
                     // between the header and transport; keyboard seek lives on
@@ -145,26 +195,37 @@ function LyricsPanel({
                     tabIndex: -1,
                   }
                 : {})}
-              className={`relative rounded-md px-3 py-0.5 text-left text-sm leading-snug transition-colors duration-3 ease-out-tk ${
-                current ? "font-medium text-fg" : "text-muted/80"
+              className={`relative rounded-md px-3 py-1 text-left text-base leading-snug transition-colors duration-3 ease-out-tk ${
+                current ? "font-medium text-muted" : "text-muted/80"
               } ${seekable ? "cursor-pointer hover:bg-fg/5" : ""}`}
             >
               {/* Accent lives on the marker, never the text (contrast floor is 3:1). */}
               <span
                 aria-hidden
-                className={`absolute left-0 top-1/2 h-3.5 w-[3px] -translate-y-1/2 rounded-full bg-accent transition-opacity duration-3 ease-out-tk ${
+                className={`absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-accent transition-opacity duration-3 ease-out-tk ${
                   current ? "opacity-100" : "opacity-0"
                 }`}
               />
-              {line.text}
+              {current ? (
+                // Sweep: dim base text with a bright overlay clipped to the sung
+                // fraction; keyed by line so the clip never animates backwards.
+                <span key={idx} className="relative block">
+                  {line.text}
+                  <span
+                    aria-hidden
+                    className="absolute inset-0 text-fg [transition:clip-path_250ms_linear]"
+                    style={{ clipPath: `inset(0 ${100 - sweepPct}% 0 0)` }}
+                  >
+                    {line.text}
+                  </span>
+                </span>
+              ) : (
+                line.text
+              )}
             </Tag>
           );
         })}
       </div>
-      {/* Edge fades so lines dissolve instead of clipping (tall enough to
-          cover a wrapped second line on CJK tracks). */}
-      <div className="pointer-events-none absolute inset-x-0 top-0 h-8 bg-[linear-gradient(rgb(var(--surface)/0.95),transparent)]" />
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-[linear-gradient(transparent,rgb(var(--surface)/0.95))]" />
     </div>
   );
 }
@@ -210,7 +271,7 @@ function IconButton({
       disabled={disabled}
       onClick={onClick}
       className={`grid place-items-center rounded-md text-fg transition duration-2 ease-out-tk hover:bg-fg/10 active:scale-95 disabled:pointer-events-none disabled:opacity-40 ${
-        size === "sm" ? "h-6 w-6" : "h-7 w-7"
+        size === "sm" ? "h-7 w-7" : "h-8 w-8"
       }`}
     >
       {children}
@@ -225,29 +286,63 @@ const PLAYER_NAMES: Record<NowPlaying["player"], string> = {
   none: "",
 };
 
+/** Monochrome source-app marks (muted, tooltip carries the name). */
+const PLAYER_ICONS: Record<NowPlaying["player"], React.ReactNode> = {
+  spotify: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm4.58 14.42a.72.72 0 0 1-.99.25c-2.7-1.65-6.1-2.02-10.1-1.1a.72.72 0 0 1-.32-1.4c4.37-1 8.13-.57 11.16 1.28.34.2.45.65.25.97Zm1.23-2.72a.9.9 0 0 1-1.24.3c-3.09-1.9-7.8-2.45-11.45-1.34a.9.9 0 1 1-.52-1.72c4.17-1.27 9.36-.65 12.92 1.53.42.26.55.81.29 1.23Zm.1-2.83C14.3 8.72 8.16 8.51 4.62 9.58a1.08 1.08 0 1 1-.62-2.06c4.06-1.23 10.81-1 14.93 1.45a1.08 1.08 0 0 1-1.1 1.86Z" />
+    </svg>
+  ),
+  apple_music: (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+      <path d="M13.9 1.22a.9.9 0 0 1 .35.72v8.6a2.5 2.5 0 1 1-1.5-2.29V5.02L6.75 6.3v6.02a2.5 2.5 0 1 1-1.5-2.29V3.65a.9.9 0 0 1 .7-.88l7.2-1.7a.9.9 0 0 1 .75.15Z" />
+    </svg>
+  ),
+  other: (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+      <path d="M6 13.5a2 2 0 1 1-1-1.73V4.6a.8.8 0 0 1 .57-.77l6-1.8A.8.8 0 0 1 12.6 2.8v8.2a2 2 0 1 1-1-1.73V5.06l-5 1.5v6.94Z" />
+    </svg>
+  ),
+  none: null,
+};
+
+function PlayerBadge({ player }: { player: NowPlaying["player"] }) {
+  if (player === "none") return null;
+  return (
+    <span
+      role="img"
+      aria-label={`Controlling ${PLAYER_NAMES[player]}`}
+      title={PLAYER_NAMES[player]}
+      className="grid shrink-0 place-items-center text-muted"
+    >
+      {PLAYER_ICONS[player]}
+    </span>
+  );
+}
+
 const icons = {
   prev: (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
       <path d="M3 2.5a.5.5 0 0 1 1 0v11a.5.5 0 0 1-1 0v-11ZM13.2 3a.6.6 0 0 1 .8.57v8.86a.6.6 0 0 1-.98.46L6.6 8.46a.6.6 0 0 1 0-.92L13.02 3.1a.6.6 0 0 1 .18-.1Z" />
     </svg>
   ),
   next: (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
       <path d="M13 2.5a.5.5 0 0 0-1 0v11a.5.5 0 0 0 1 0v-11ZM2.8 3a.6.6 0 0 0-.8.57v8.86a.6.6 0 0 0 .98.46l6.42-4.43a.6.6 0 0 0 0-.92L2.98 3.1a.6.6 0 0 0-.18-.1Z" />
     </svg>
   ),
   play: (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+    <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
       <path d="M4.5 2.7a.7.7 0 0 1 1.06-.6l8.13 4.7a.7.7 0 0 1 0 1.2l-8.13 4.7a.7.7 0 0 1-1.06-.6V2.7Z" />
     </svg>
   ),
   pause: (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+    <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
       <path d="M4 2.8c0-.44.36-.8.8-.8h1.4c.44 0 .8.36.8.8v10.4a.8.8 0 0 1-.8.8H4.8a.8.8 0 0 1-.8-.8V2.8Zm5 0c0-.44.36-.8.8-.8h1.4c.44 0 .8.36.8.8v10.4a.8.8 0 0 1-.8.8H9.8a.8.8 0 0 1-.8-.8V2.8Z" />
     </svg>
   ),
   back10: (
-    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
+    <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
       <path d="M8 3a5 5 0 1 1-4.55 2.93" strokeLinecap="round" />
       <path d="M3.2 2.6v3.3h3.3" strokeLinecap="round" strokeLinejoin="round" />
       <text x="8" y="10.6" fontSize="5.4" fill="currentColor" stroke="none" textAnchor="middle" fontWeight="700">
@@ -256,7 +351,7 @@ const icons = {
     </svg>
   ),
   fwd10: (
-    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
+    <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
       <path d="M8 3a5 5 0 1 0 4.55 2.93" strokeLinecap="round" />
       <path d="M12.8 2.6v3.3H9.5" strokeLinecap="round" strokeLinejoin="round" />
       <text x="8" y="10.6" fontSize="5.4" fill="currentColor" stroke="none" textAnchor="middle" fontWeight="700">
@@ -265,17 +360,17 @@ const icons = {
     </svg>
   ),
   note: (
-    <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+    <svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
       <path d="M6 13.5a2 2 0 1 1-1-1.73V4.6a.8.8 0 0 1 .57-.77l6-1.8A.8.8 0 0 1 12.6 2.8v8.2a2 2 0 1 1-1-1.73V5.06l-5 1.5v6.94Z" />
     </svg>
   ),
   chevronUp: (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
       <path d="M3.5 10 8 5.5l4.5 4.5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
   chevronDown: (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
       <path d="M3.5 6 8 10.5 12.5 6" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
@@ -296,7 +391,7 @@ function ProgressBar({ np, position }: { np: NowPlaying; position: number }) {
 
   return (
     <div className="flex items-center gap-2">
-      <span className="w-8 text-right text-[10px] tabular-nums text-muted">{fmt(shownMs)}</span>
+      <span className="w-9 text-right text-[11px] tabular-nums text-muted">{fmt(shownMs)}</span>
       <div
         ref={barRef}
         role={seekable ? "slider" : "progressbar"}
@@ -350,7 +445,7 @@ function ProgressBar({ np, position }: { np: NowPlaying; position: number }) {
           />
         </div>
       </div>
-      <span className="w-8 text-[10px] tabular-nums text-muted">{fmt(np.duration_ms)}</span>
+      <span className="w-9 text-[11px] tabular-nums text-muted">{fmt(np.duration_ms)}</span>
     </div>
   );
 }
@@ -504,12 +599,10 @@ function App() {
             <Art url={shownArt} sizeClass="h-[72px] w-[72px]" />
             <div className="flex min-w-0 flex-1 flex-col gap-0.5">
               <div className="flex items-center gap-1">
-                <p className="min-w-0 flex-1 truncate text-sm font-medium text-fg">{np.title}</p>
+                <p className="min-w-0 flex-1 truncate text-[15px] font-medium text-fg">{np.title}</p>
                 {/* Windows routes commands to the OS "current" session, which
                     hops between apps — always show which app this card controls. */}
-                <span className="shrink-0 text-[10px] uppercase tracking-wider text-muted">
-                  {PLAYER_NAMES[np.player]}
-                </span>
+                <PlayerBadge player={np.player} />
                 <IconButton size="sm" label="Collapse to pill" onClick={() => setMode("pill")}>
                   {icons.chevronDown}
                 </IconButton>
@@ -534,12 +627,10 @@ function App() {
             <div className="flex items-center gap-2.5">
               <Art url={shownArt} sizeClass="h-[44px] w-[44px] rounded-md" />
               <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium text-fg">{np.title}</p>
-                <p className="truncate text-xs text-muted">{np.artist}</p>
+                <p className="truncate text-[15px] font-medium text-fg">{np.title}</p>
+                <p className="truncate text-[13px] text-muted">{np.artist}</p>
               </div>
-              <span className="shrink-0 text-[10px] uppercase tracking-wider text-muted">
-                {PLAYER_NAMES[np.player]}
-              </span>
+              <PlayerBadge player={np.player} />
               <IconButton size="sm" label="Collapse to card" onClick={() => setMode("card")}>
                 {icons.chevronDown}
               </IconButton>
@@ -557,7 +648,7 @@ function App() {
             className="flex h-full flex-col items-center justify-center gap-3 px-4 pb-2 pt-4"
           >
             <div className="absolute right-2 top-2 flex items-center gap-1">
-              <span className="text-[10px] uppercase tracking-wider text-muted">{PLAYER_NAMES[np.player]}</span>
+              <PlayerBadge player={np.player} />
               <IconButton size="sm" label="Collapse to card" onClick={() => setMode("card")}>
                 {icons.chevronDown}
               </IconButton>
