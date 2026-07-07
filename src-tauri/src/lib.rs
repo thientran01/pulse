@@ -1,4 +1,5 @@
 mod audio;
+mod dock;
 mod lyrics;
 mod media;
 
@@ -183,6 +184,7 @@ pub fn run() {
         .manage(ArtCache(Mutex::new(None)))
         .manage(LastEmit(Mutex::new(None)))
         .manage(UiReactive(Arc::new(AtomicBool::new(true))))
+        .manage(dock::Dock::default())
         .invoke_handler(tauri::generate_handler![
             media_play_pause,
             media_next,
@@ -192,17 +194,24 @@ pub fn run() {
             media_art,
             media_lyrics,
             now_playing,
-            set_reactive_enabled
+            set_reactive_enabled,
+            dock::set_window_size,
+            dock::start_drag
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Moved(_) = event {
+                dock::on_moved(window);
+            }
+        })
         .setup(|app| {
             // Tray: Show/Hide + Quit.
             let show_hide = MenuItem::with_id(app, "toggle", "Show / Hide", true, None::<&str>)?;
-            // Recovery for a position persisted on a now-disconnected monitor —
-            // the window is chromeless and skips the taskbar, so this is the
-            // only way to pull it back on-screen.
-            let center = MenuItem::with_id(app, "center", "Center on screen", true, None::<&str>)?;
+            // Manual re-dock (bottom-right). Launch snapping already heals
+            // positions persisted on a now-disconnected monitor; this is the
+            // belt-and-braces path for a chromeless, taskbar-less window.
+            let reset = MenuItem::with_id(app, "reset", "Reset position", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Pulse", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_hide, &center, &quit])?;
+            let menu = Menu::with_items(app, &[&show_hide, &reset, &quit])?;
             TrayIconBuilder::with_id("pulse-tray")
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("Pulse")
@@ -210,12 +219,7 @@ pub fn run() {
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "toggle" => toggle_widget(app),
-                    "center" => {
-                        if let Some(win) = app.get_webview_window("main") {
-                            let _ = win.show();
-                            let _ = win.center();
-                        }
-                    }
+                    "reset" => dock::reset_position(app),
                     "quit" => app.exit(0),
                     _ => {}
                 })

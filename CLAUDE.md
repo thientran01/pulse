@@ -22,6 +22,13 @@ src-tauri/src/
                 diff-suppressed and unchanged heartbeat ticks skip the snapshot, so a
                 payload arrives only when the player's data actually moved
                 (splits into media_core/ + adapters/ when M5 adds Spotify Web API)
+  dock.rs       corner docking: window lives in one of the 4 work-area corners (12px
+                margin, above the taskbar); free drag snaps to the nearest corner on
+                release (Moved-debounce + GetAsyncKeyState — no drag-end event exists);
+                mode resizes grow/shrink out of the docked corner (200ms EASE.inOut —
+                on-screen morph; the snap glide keeps EASE.out, momentum inheritance;
+                size+origin per frame in one SetWindowPos); corner derived from the
+                window-state-restored position, never stored
   lyrics.rs     LRCLIB get→search fallback, disk cache (bounded, app-data) + session miss set
   audio.rs      WASAPI loopback (cpal input stream on the output device) → FFT →
                 smoothed auto-gained band energies at ~30Hz; capture runs ONLY

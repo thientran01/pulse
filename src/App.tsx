@@ -14,7 +14,8 @@ const SEEK_STEP_MS = 10_000;
 
 type Mode = "pill" | "card" | "expanded";
 
-/** Native window size per mode — the window snaps, the content morphs. */
+/** Native window size per mode — the window grows out of its docked corner
+ * (200ms EASE.inOut on the Rust side) while the content morphs. */
 const MODE_SIZES: Record<Mode, [number, number]> = {
   pill: [300, 48],
   card: [380, 124],

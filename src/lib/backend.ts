@@ -3,9 +3,7 @@
  * plain browser so the UI can be developed and verified with preview tooling.
  */
 import { invoke } from "@tauri-apps/api/core";
-import { LogicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
 import { listen } from "@tauri-apps/api/event";
-import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import { IN_TAURI, type NowPlaying } from "../types";
 import * as posClock from "./posClock";
 
@@ -130,33 +128,15 @@ export const commands = {
   setReactiveEnabled(enabled: boolean): void {
     if (IN_TAURI) void invoke("set_reactive_enabled", { enabled });
   },
-  /** Native window drag — call from mousedown on any non-interactive surface. */
+  /** Native window drag — call from mousedown on any non-interactive surface.
+   * Routed through Rust so a queued corner-snap animation dies first. */
   startDrag(): void {
-    if (IN_TAURI) void getCurrentWindow().startDragging();
+    if (IN_TAURI) void invoke("start_drag");
   },
-  /**
-   * Resize the native window to match the active size mode, then clamp the
-   * position back into the monitor bounds — growing a window parked near the
-   * bottom/right edge (or restored there by window-state) would otherwise
-   * push it off-screen with no chrome to grab.
-   */
+  /** Resize the native window to the mode's logical size, anchored to the
+   * docked corner (Rust owns all positioning — see src-tauri/src/dock.rs). */
   setWindowSize(width: number, height: number): void {
-    if (!IN_TAURI) return;
-    void (async () => {
-      const win = getCurrentWindow();
-      await win.setSize(new LogicalSize(width, height));
-      const monitor = await currentMonitor();
-      if (!monitor) return;
-      const pos = await win.outerPosition();
-      const size = await win.outerSize();
-      const maxX = monitor.position.x + monitor.size.width - size.width;
-      const maxY = monitor.position.y + monitor.size.height - size.height;
-      const nx = Math.min(Math.max(pos.x, monitor.position.x), Math.max(maxX, monitor.position.x));
-      const ny = Math.min(Math.max(pos.y, monitor.position.y), Math.max(maxY, monitor.position.y));
-      if (nx !== pos.x || ny !== pos.y) {
-        await win.setPosition(new PhysicalPosition(nx, ny));
-      }
-    })().catch((e) => console.error("setWindowSize failed:", e));
+    if (IN_TAURI) void invoke("set_window_size", { width, height });
   },
   playPause(): void {
     if (IN_TAURI) {
