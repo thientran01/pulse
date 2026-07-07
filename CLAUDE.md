@@ -45,7 +45,9 @@ hits Spotify). The card shows the controlled app's name for this reason.
 - PRs off `feature/*` branches, self-review + `/quick-review`; never commit to main.
 - M0 support matrix (`docs/smtc-support-matrix.md`) is the source of truth for what Apple Music / Spotify honor over GSMTC — check it before assuming seek/position works.
 
-## Gotchas (M0-verified 2026-07-06 — details in docs/smtc-support-matrix.md)
+## Gotchas (measured 2026-07-06, M0+M1 — details in docs/smtc-support-matrix.md)
+
+- Thumbnail streams: AM's ContentType is a comma-separated list (invalid in a `data:` URL — take the first entry) and `ReadAsync` can return partial data (read chunked to the declared size).
 
 - **Spotify seek/position work natively over SMTC** (as of 1.2.92) — the Web API adapter is only needed for like/unlike. Position is pushed ~every 5s; interpolate between pushes.
 - **Apple Music silently ignores seek** (returns `true`, does nothing, playing or paused) and reports position at 1s granularity. Never trust SMTC command bools — verify by re-reading the timeline.

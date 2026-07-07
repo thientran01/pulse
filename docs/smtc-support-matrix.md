@@ -9,7 +9,7 @@ Behavior is version-dependent — re-run the spike if either app updates signifi
 | Session registers | ✅ while playing/paused | ✅ |
 | Title / artist | ✅ (⚠️ artist quirk, below) | ✅ |
 | Album | ⚠️ empty — packed into artist | ✅ |
-| Album art (thumbnail ref) | ✅ present (byte-read deferred to M1) | ✅ present |
+| Album art (thumbnail ref) | ✅ full byte-read verified (⚠️ quirks below) | ✅ full byte-read verified |
 | Position reported | ✅ 1 s granularity, fresh every poll | ✅ ms precision, pushed ~every 5 s |
 | Play/pause | ✅ | ✅ |
 | Next / prev | ✅ (⚠️ stop quirk, below) | ✅ flags true; playpause verified, next/prev not fired |
@@ -24,6 +24,8 @@ Behavior is version-dependent — re-run the spike if either app updates signifi
 4. **AM deregisters its session when playback stops.** A `prev` fired ~1 s into a track stopped playback and the session vanished from GSMTC (did not return). Session appearance/disappearance is a *normal* state transition — the widget needs an explicit "nothing playing" state and cannot resurrect a closed session via SMTC.
 5. **AM metadata quirk:** `Artist` comes back as `"<artist> — <album>"` (em-dash separated) with `AlbumTitle` empty. The apple_music adapter must split on `" — "` for LRCLIB lookups and display.
 6. **Spotify position is pushed ~every 5 s** — between pushes, interpolate: `position + (now − last_updated)` while status is Playing. AM position is fresh on every poll at 1 s granularity.
+7. *(M1, 2026-07-06)* **AM's thumbnail `ContentType` is a comma-separated LIST** (`image/jpeg,image/jpe,image/jpg`) — commas are invalid inside a `data:` URL; take the first entry. Spotify reports a single `image/png`.
+8. *(M1, 2026-07-06)* **Thumbnail `ReadAsync` may return fewer bytes than requested** — a single read can yield a truncated image that fails to decode. Read chunked until the declared size is reached (and cap the final request to the remainder).
 
 ## Apple Music seek fallbacks tested (2026-07-06, M1)
 

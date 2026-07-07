@@ -107,9 +107,12 @@ fn read_art(session: &Session) -> Option<String> {
         .unwrap_or_else(|| "image/jpeg".into());
     let mut bytes: Vec<u8> = Vec::with_capacity(size as usize);
     while (bytes.len() as u64) < size {
-        let chunk = Buffer::Create(CHUNK).ok()?;
+        // Cap the final request to the declared remainder — some streams are
+        // views into a larger backing store and would return trailing garbage.
+        let want = CHUNK.min((size - bytes.len() as u64) as u32);
+        let chunk = Buffer::Create(want).ok()?;
         let chunk = stream
-            .ReadAsync(&chunk, CHUNK, InputStreamOptions::ReadAhead)
+            .ReadAsync(&chunk, want, InputStreamOptions::ReadAhead)
             .ok()?
             .get()
             .ok()?;
@@ -125,6 +128,7 @@ fn read_art(session: &Session) -> Option<String> {
     if (bytes.len() as u64) < size {
         return None;
     }
+    bytes.truncate(size as usize);
     Some(format!("data:{};base64,{}", mime, B64.encode(bytes)))
 }
 
