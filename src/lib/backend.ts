@@ -129,4 +129,20 @@ export const commands = {
     if (!IN_TAURI) return artId === "mock-art" ? mockArt() : null;
     return invoke<string | null>("media_art", { artId });
   },
+  async lyrics(
+    artist: string,
+    title: string,
+    album: string,
+    durationMs: number,
+  ): Promise<{ synced: string | null; plain: string | null }> {
+    if (!IN_TAURI) {
+      // Mock: a line every 4s across the track so preview exercises karaoke.
+      const lines = Array.from({ length: Math.floor(durationMs / 4000) }, (_, i) => {
+        const t = i * 4;
+        return `[${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}.00]Mock lyric line ${i + 1} — la la la`;
+      });
+      return { synced: lines.join("\n"), plain: null };
+    }
+    return invoke("media_lyrics", { artist, title, album, durationMs });
+  },
 };
