@@ -540,7 +540,7 @@ function ProgressBar({ np }: { np: NowPlaying }) {
               owns the inline transform from then on. */}
           <div
             ref={fillRef}
-            className={`h-full w-full origin-left scale-x-0 rounded-full bg-accent ${
+            className={`h-full w-full origin-left scale-x-0 rounded-full bg-accent will-change-transform ${
               dragFrac === null
                 ? "[transition:transform_90ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]"
                 : "[transition:background-color_220ms_var(--ease-out-tk)]"
@@ -569,7 +569,7 @@ function Hairline({ np }: { np: NowPlaying }) {
     >
       <div
         ref={fillRef}
-        className="h-full w-full origin-left scale-x-0 bg-accent [transition:transform_90ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]"
+        className="h-full w-full origin-left scale-x-0 bg-accent will-change-transform [transition:transform_90ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]"
       />
     </div>
   );
