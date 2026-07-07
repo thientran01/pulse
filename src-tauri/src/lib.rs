@@ -103,11 +103,13 @@ fn media_art(art_id: String, cache: State<ArtCache>) -> Option<String> {
 
 /// One-shot state read for webview mount/reload. Emits are diff-suppressed,
 /// so a freshly loaded webview cannot count on an event ever arriving — it
-/// seeds from this instead. Seq-stamped like emits, but the frontend applies a
-/// seed only before the first event payload (seed/emit seq order across
-/// concurrent snapshots is not linearized).
+/// seeds from this instead. Snapshot + seq happen under the same LastEmit
+/// lock as emits, so seed seq order is linearized with emit seq order and the
+/// frontend clock's seq guard can trust either source.
 #[tauri::command]
-fn now_playing(cache: State<ArtCache>) -> Stamped {
+fn now_playing(app: AppHandle, cache: State<ArtCache>) -> Stamped {
+    let last = app.state::<LastEmit>();
+    let _guard = last.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     Stamped {
         seq: SEQ.fetch_add(1, Ordering::Relaxed),
         now: media::snapshot(&cache),

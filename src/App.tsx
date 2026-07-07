@@ -3,6 +3,7 @@ import { motion, useReducedMotion } from "motion/react";
 import { commands, onNowPlaying } from "./lib/backend";
 import { currentLineIndex, parseLrc, type LyricLine } from "./lib/lrc";
 import { extractAccent } from "./lib/palette";
+import * as posClock from "./lib/posClock";
 import { initReactive } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
 import { Waveform } from "./Waveform";
@@ -25,21 +26,38 @@ function fmt(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-/** Position interpolated from the raw (position, reported-at) pair while
- * playing. Interim naive projection with the same 30s sanity gate the backend
- * used to apply — the monotonic clock kernel (next PR) replaces this and is
- * where the lyric flash-back fix lands. */
+/** Display position from the posClock kernel — monotonic per track while
+ * playing, so lyric/progress consumers can never step backwards on Apple
+ * Music's quantization jitter. The 250ms interval is only a render cadence
+ * (never a position source); kernel notifications land discontinuities
+ * (seeks, pauses, track changes) between ticks. */
 function useLivePosition(np: NowPlaying | null): number {
   const [, force] = useState(0);
+  useEffect(() => posClock.subscribe(() => force((n) => n + 1)), []);
   useEffect(() => {
     if (np?.status !== "playing") return;
     const id = window.setInterval(() => force((n) => n + 1), 250);
     return () => window.clearInterval(id);
   }, [np?.status]);
-  if (!np) return 0;
-  const staleness = np.position_at_ms > 0 ? Date.now() - np.position_at_ms : -1;
-  const drift = np.status === "playing" && staleness >= 0 && staleness < 30_000 ? staleness : 0;
-  return Math.min(np.position_ms + drift, np.duration_ms || Infinity);
+  return np ? posClock.now() : 0;
+}
+
+/** Fields that change what the React tree shows — position fields excluded,
+ * they live in posClock and would otherwise re-render the whole app per emit. */
+const IDENTITY_FIELDS = [
+  "app_id",
+  "player",
+  "title",
+  "artist",
+  "album",
+  "status",
+  "duration_ms",
+  "can_seek",
+  "art_id",
+] as const satisfies readonly (keyof NowPlaying)[];
+
+function sameIdentity(a: NowPlaying | null, b: NowPlaying): boolean {
+  return a !== null && IDENTITY_FIELDS.every((k) => a[k] === b[k]);
 }
 
 function useArt(artId: string | null): string | null {
@@ -476,7 +494,18 @@ function Transport({ np, seekable, playing }: { np: NowPlaying; seekable: boolea
 
 function App() {
   const [np, setNp] = useState<NowPlaying | null>(null);
-  useEffect(() => onNowPlaying(setNp), []);
+  useEffect(
+    () =>
+      onNowPlaying((next) => {
+        // Every payload feeds the clock; only identity changes re-render.
+        // A stale straggler the kernel rejects must not touch React state
+        // either — adopting its identity would pair the new track's clock
+        // with the old track's lyrics.
+        if (!posClock.ingest(next)) return;
+        setNp((prev) => (sameIdentity(prev, next) ? prev : next));
+      }),
+    [],
+  );
   const position = useLivePosition(np);
   const artUrl = useArt(np?.art_id ?? null);
   // A data URL that fails to decode falls back to the note glyph instead of
