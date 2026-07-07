@@ -2,9 +2,9 @@
  * Corner docking: the widget always rests in one of the four corners of the
  * monitor's work area (above the taskbar, MARGIN_LOGICAL from the edges).
  * Drags stay free; on release the window glides to the nearest corner. Mode
- * resizes anchor to the docked corner via a single SetWindowPos (size +
- * position together — Tauri's setSize/setPosition pair paints one frame at
- * the wrong anchor).
+ * resizes grow/shrink out of the docked corner — size and position move in
+ * the same SetWindowPos each frame (Tauri's setSize/setPosition pair paints
+ * one frame at the wrong anchor).
  *
  * Corner persistence is derived, not stored: tauri-plugin-window-state
  * restores the last position, and the first positioning call (or the launch
@@ -206,6 +206,22 @@ fn animate_to(window: &WebviewWindow, from: (i32, i32), target: (i32, i32)) {
         }
         return;
     }
+    spawn_animation(window, move |win, e| {
+        let x = from.0 + (dx as f64 * e).round() as i32;
+        let y = from.1 + (dy as f64 * e).round() as i32;
+        apply_pos(win, x, y, None);
+    });
+}
+
+/// Drive `frame(window, eased_fraction)` at FRAME_MS over SNAP_MS. The frame
+/// closure applies the geometry for its fraction; `frame(_, 1.0)` must land
+/// exactly on the target. Dies mid-flight (no landing) when another
+/// positioning op bumps the epoch; jumps straight to 1.0 under reduced motion.
+fn spawn_animation(
+    window: &WebviewWindow,
+    frame: impl Fn(&WebviewWindow, f64) + Send + 'static,
+) {
+    let dock = window.state::<Dock>();
     let my_epoch = dock.epoch.fetch_add(1, Ordering::SeqCst) + 1;
     dock.animating.store(true, Ordering::SeqCst);
     let window = window.clone();
@@ -223,16 +239,13 @@ fn animate_to(window: &WebviewWindow, from: (i32, i32), target: (i32, i32)) {
                 // Progress from wall-clock, not frame count: Windows timer
                 // granularity (~15.6ms) drops frames instead of slowing down.
                 let t = (start.elapsed().as_secs_f64() * 1000.0 / SNAP_MS as f64).min(1.0);
-                let e = ease_out(t);
-                let x = from.0 + (dx as f64 * e).round() as i32;
-                let y = from.1 + (dy as f64 * e).round() as i32;
-                apply_pos(&window, x, y, None);
+                frame(&window, ease_out(t));
                 if t >= 1.0 {
                     break;
                 }
             }
         } else {
-            apply_pos(&window, target.0, target.1, None);
+            frame(&window, 1.0);
         }
         dock.animating.store(false, Ordering::SeqCst);
     });
@@ -254,12 +267,14 @@ fn snap_to_nearest(window: &WebviewWindow) {
     animate_to(window, (pos.x, pos.y), target);
 }
 
-/// Resize to the mode's logical size, anchored to the docked corner, in one
-/// SetWindowPos. First call after launch derives the corner from wherever
-/// window-state restored us — that IS the startup snap.
+/// Resize to the mode's logical size, growing/shrinking out of the docked
+/// corner — per-frame the size interpolates and the origin is re-derived from
+/// the corner, so the anchored edges stay pixel-fixed while the container
+/// visibly changes size. First call after launch derives the corner from
+/// wherever window-state restored us — that IS the startup snap.
 #[tauri::command]
 pub fn set_window_size(window: WebviewWindow, dock: State<Dock>, width: f64, height: f64) {
-    dock.epoch.fetch_add(1, Ordering::SeqCst); // cancel any in-flight snap
+    dock.epoch.fetch_add(1, Ordering::SeqCst); // cancel any in-flight animation
     let Some(wa) = work_area(&window) else {
         // No monitor info at all — still honor the size so the native window
         // matches the React layout; position keeps its last value.
@@ -270,20 +285,29 @@ pub fn set_window_size(window: WebviewWindow, dock: State<Dock>, width: f64, hei
     let w = (width * scale).round() as i32;
     let h = (height * scale).round() as i32;
     let margin = (MARGIN_LOGICAL * scale).round() as i32;
+    let from = window.outer_size().unwrap_or(tauri::PhysicalSize::new(w as u32, h as u32));
+    let (w0, h0) = (from.width as i32, from.height as i32);
     let corner = {
         let mut c = dock.corner.lock().unwrap_or_else(PoisonError::into_inner);
         *c.get_or_insert_with(|| match window.outer_position() {
-            Ok(pos) => {
-                let size = window.outer_size().unwrap_or(tauri::PhysicalSize::new(w as u32, h as u32));
-                nearest_corner(pos.x + size.width as i32 / 2, pos.y + size.height as i32 / 2, &wa)
-            }
+            Ok(pos) => nearest_corner(pos.x + w0 / 2, pos.y + h0 / 2, &wa),
             Err(_) => Corner::BottomRight,
         })
     };
-    let (x, y) = corner_origin(corner, &wa, w, h, margin);
-    dock.animating.store(true, Ordering::SeqCst);
-    apply_pos(&window, x, y, Some((w, h)));
-    dock.animating.store(false, Ordering::SeqCst);
+    if (w0, h0) == (w, h) {
+        // Same size (launch, usually) — just make sure we're docked.
+        let (x, y) = corner_origin(corner, &wa, w, h, margin);
+        dock.animating.store(true, Ordering::SeqCst);
+        apply_pos(&window, x, y, Some((w, h)));
+        dock.animating.store(false, Ordering::SeqCst);
+        return;
+    }
+    spawn_animation(&window, move |win, e| {
+        let wi = (w0 as f64 + (w - w0) as f64 * e).round() as i32;
+        let hi = (h0 as f64 + (h - h0) as f64 * e).round() as i32;
+        let (xi, yi) = corner_origin(corner, &wa, wi, hi, margin);
+        apply_pos(win, xi, yi, Some((wi, hi)));
+    });
 }
 
 /// Native drag, killing any in-flight snap first so it can't fight the hand.
