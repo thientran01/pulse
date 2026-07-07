@@ -7,6 +7,7 @@ import { LogicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
 import { listen } from "@tauri-apps/api/event";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import { IN_TAURI, type NowPlaying } from "../types";
+import * as posClock from "./posClock";
 
 const MOCK_DURATION = 204_000;
 let mock: NowPlaying = {
@@ -161,7 +162,20 @@ export const commands = {
     if (IN_TAURI) {
       void invoke("media_play_pause");
     } else {
-      pushMock({ status: mock.status === "playing" ? "paused" : "playing", position_at_ms: Date.now() });
+      // Advance the position before re-stamping, like a real player freezing
+      // its timeline at the pause point — a fresh stamp on a stale position
+      // is exactly the regression profile the posClock filters, and the mock
+      // must not fabricate it.
+      const now = Date.now();
+      const advanced =
+        mock.status === "playing"
+          ? Math.min(mock.position_ms + (now - mock.position_at_ms), mock.duration_ms)
+          : mock.position_ms;
+      pushMock({
+        status: mock.status === "playing" ? "paused" : "playing",
+        position_ms: advanced,
+        position_at_ms: now,
+      });
     }
   },
   next(): void {
@@ -170,21 +184,22 @@ export const commands = {
   prev(): void {
     if (IN_TAURI) void invoke("media_prev");
   },
+  // Both seeks rebase the posClock optimistically FIRST (the UI lands on the
+  // target immediately; the kernel's grace window absorbs pre-seek
+  // stragglers), then send the command. seekTo returns null when the player
+  // can't seek (Apple Music) — no command, no optimistic lie. Relative seeks
+  // anchor on the display clock itself and go out absolute, so the player
+  // lands exactly where the UI already is.
   seekRel(deltaMs: number): void {
-    if (IN_TAURI) {
-      void invoke("media_seek_rel", { deltaMs });
-    } else {
-      pushMock({
-        position_ms: Math.min(Math.max(mock.position_ms + deltaMs, 0), mock.duration_ms),
-        position_at_ms: Date.now(),
-      });
-    }
+    commands.seekAbs(posClock.now() + deltaMs);
   },
   seekAbs(positionMs: number): void {
+    const target = posClock.seekTo(positionMs);
+    if (target === null) return;
     if (IN_TAURI) {
-      void invoke("media_seek_abs", { positionMs });
+      void invoke("media_seek_abs", { positionMs: Math.round(target) });
     } else {
-      pushMock({ position_ms: positionMs, position_at_ms: Date.now() });
+      pushMock({ position_ms: Math.round(target), position_at_ms: Date.now() });
     }
   },
   async art(artId: string): Promise<string | null> {
