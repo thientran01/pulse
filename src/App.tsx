@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { commands, onNowPlaying } from "./lib/backend";
+import { currentLineIndex, parseLrc, type LyricLine } from "./lib/lrc";
 import { extractAccent } from "./lib/palette";
 import { DUR, EASE } from "./lib/tokens";
 import type { NowPlaying } from "./types";
@@ -14,7 +15,7 @@ type Mode = "pill" | "card" | "expanded";
 const MODE_SIZES: Record<Mode, [number, number]> = {
   pill: [300, 48],
   card: [380, 124],
-  expanded: [380, 310], // measured content ~292px — headroom for real font metrics
+  expanded: [380, 440], // lyrics home; big-art fallback gets breathing room
 };
 
 function fmt(ms: number): string {
@@ -58,6 +59,103 @@ function useArt(artId: string | null): string | null {
     };
   }, [artId]);
   return artId ? url : null;
+}
+
+type LyricsState = { status: "loading" | "none" } | { status: "synced"; lines: LyricLine[] };
+
+/** Fetch + parse synced lyrics per track; "none" is a definitive miss. */
+function useLyrics(np: NowPlaying | null): LyricsState {
+  const [state, setState] = useState<LyricsState>({ status: "none" });
+  const lastKey = useRef<string | null>(null);
+  const trackable = np && np.player !== "none" && np.title && np.duration_ms > 0;
+  const key = trackable ? `${np.artist}|${np.title}|${np.album}|${np.duration_ms}` : null;
+  useEffect(() => {
+    if (!key || !np) {
+      lastKey.current = null;
+      setState({ status: "none" });
+      return;
+    }
+    if (key === lastKey.current) return;
+    lastKey.current = key;
+    setState({ status: "loading" });
+    let alive = true;
+    void commands.lyrics(np.artist, np.title, np.album, np.duration_ms).then((l) => {
+      if (!alive || lastKey.current !== key) return;
+      const lines = l.synced ? parseLrc(l.synced) : [];
+      setState(lines.length > 0 ? { status: "synced", lines } : { status: "none" });
+    });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  return state;
+}
+
+function LyricsPanel({
+  lines,
+  position,
+  seekable,
+}: {
+  lines: LyricLine[];
+  position: number;
+  seekable: boolean;
+}) {
+  const idx = currentLineIndex(lines, position);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const [offset, setOffset] = useState(0);
+
+  // Center-ish the current line (40% from the top) via a compositor-friendly
+  // translate on the list, not scrollTop.
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    const list = listRef.current;
+    if (!viewport || !list) return;
+    const line = list.children[Math.max(idx, 0)] as HTMLElement | undefined;
+    if (!line) return;
+    const anchor = viewport.clientHeight * 0.4;
+    const target = idx < 0 ? 0 : line.offsetTop + line.offsetHeight / 2 - anchor;
+    setOffset(Math.max(0, target));
+  }, [idx, lines]);
+
+  return (
+    <div ref={viewportRef} className="relative min-h-0 flex-1 overflow-hidden" aria-label="Lyrics">
+      <div
+        ref={listRef}
+        className="flex flex-col gap-1 py-3 will-change-transform [transition:transform_220ms_var(--ease-in-out-tk)]"
+        style={{ transform: `translateY(${-offset}px)` }}
+      >
+        {lines.map((line, i) => {
+          const current = i === idx;
+          const Tag = seekable ? "button" : "div";
+          return (
+            <Tag
+              key={`${line.t}-${i}`}
+              {...(seekable
+                ? { type: "button" as const, onClick: () => commands.seekAbs(line.t), "aria-label": `Seek to ${line.text}` }
+                : {})}
+              className={`relative rounded-md px-3 py-0.5 text-left text-sm leading-snug transition-colors duration-3 ease-out-tk ${
+                current ? "font-medium text-fg" : "text-muted/80"
+              } ${seekable ? "cursor-pointer hover:bg-fg/5" : ""}`}
+            >
+              {/* Accent lives on the marker, never the text (contrast floor is 3:1). */}
+              <span
+                aria-hidden
+                className={`absolute left-0 top-1/2 h-3.5 w-[3px] -translate-y-1/2 rounded-full bg-accent transition-opacity duration-3 ease-out-tk ${
+                  current ? "opacity-100" : "opacity-0"
+                }`}
+              />
+              {line.text}
+            </Tag>
+          );
+        })}
+      </div>
+      {/* Edge fades so lines dissolve instead of clipping. */}
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-6 bg-[linear-gradient(rgb(var(--surface)/0.95),transparent)]" />
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-[linear-gradient(transparent,rgb(var(--surface)/0.95))]" />
+    </div>
+  );
 }
 
 /** Retint the accent layer from the current cover; house accent when absent. */
@@ -298,6 +396,7 @@ function App() {
   const [brokenArtUrl, setBrokenArtUrl] = useState<string | null>(null);
   const shownArt = artUrl !== null && artUrl !== brokenArtUrl ? artUrl : null;
   useArtAccent(shownArt);
+  const lyrics = useLyrics(np);
 
   const [mode, setMode] = useState<Mode>(() => {
     try {
@@ -412,21 +511,45 @@ function App() {
               <ProgressBar np={np} position={position} />
             </div>
           </div>
+        ) : lyrics.status === "synced" ? (
+          <div className="flex h-full flex-col gap-2 px-3 pb-2 pt-3">
+            <div className="flex items-center gap-2.5">
+              <Art url={shownArt} sizeClass="h-[44px] w-[44px] rounded-md" />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium text-fg">{np.title}</p>
+                <p className="truncate text-xs text-muted">{np.artist}</p>
+              </div>
+              <span className="shrink-0 text-[10px] uppercase tracking-wider text-muted">
+                {PLAYER_NAMES[np.player]}
+              </span>
+              <IconButton size="sm" label="Collapse to card" onClick={() => setMode("card")}>
+                {icons.chevronDown}
+              </IconButton>
+            </div>
+            <LyricsPanel lines={lyrics.lines} position={position} seekable={seekable} />
+            <div className="flex justify-center">
+              <Transport np={np} seekable={seekable} playing={playing} />
+            </div>
+            <ProgressBar np={np} position={position} />
+          </div>
         ) : (
-          <div className="flex h-full flex-col items-center gap-2.5 px-4 pb-2 pt-4">
+          <div className="flex h-full flex-col items-center justify-center gap-3 px-4 pb-2 pt-4">
             <div className="absolute right-2 top-2 flex items-center gap-1">
               <span className="text-[10px] uppercase tracking-wider text-muted">{PLAYER_NAMES[np.player]}</span>
               <IconButton size="sm" label="Collapse to card" onClick={() => setMode("card")}>
                 {icons.chevronDown}
               </IconButton>
             </div>
-            <Art url={shownArt} sizeClass="h-[150px] w-[150px] rounded-xl" glow />
+            <Art url={shownArt} sizeClass="h-[190px] w-[190px] rounded-xl" glow />
             <div className="min-w-0 self-stretch text-center">
               <p className="truncate text-sm font-medium text-fg">{np.title}</p>
               <p className="truncate text-xs text-muted">
                 {np.artist}
                 {np.album ? ` — ${np.album}` : ""}
               </p>
+              {lyrics.status === "none" && (
+                <p className="mt-0.5 text-[10px] text-muted/70">No synced lyrics</p>
+              )}
             </div>
             <Transport np={np} seekable={seekable} playing={playing} />
             <div className="self-stretch">

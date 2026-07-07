@@ -1,3 +1,4 @@
+mod lyrics;
 mod media;
 
 use media::ArtCache;
@@ -57,6 +58,24 @@ fn media_seek_abs(app: AppHandle, position_ms: i64) -> bool {
     ok
 }
 
+/// Fetch synced/plain lyrics for a track (LRCLIB + disk cache). Blocking
+/// network call — Tauri runs sync commands on a worker thread.
+#[tauri::command]
+fn media_lyrics(
+    app: AppHandle,
+    artist: String,
+    title: String,
+    album: String,
+    duration_ms: i64,
+) -> lyrics::Lyrics {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map(|d| d.join("lyrics"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("pulse-lyrics"));
+    lyrics::fetch(&dir, &artist, &title, &album, duration_ms)
+}
+
 /// Return the cached art data URL if it matches the requested id.
 #[tauri::command]
 fn media_art(art_id: String, cache: State<ArtCache>) -> Option<String> {
@@ -105,7 +124,8 @@ pub fn run() {
             media_prev,
             media_seek_rel,
             media_seek_abs,
-            media_art
+            media_art,
+            media_lyrics
         ])
         .setup(|app| {
             // Tray: Show/Hide + Quit.
