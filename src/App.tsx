@@ -536,7 +536,10 @@ function App() {
       <motion.div
         key={mode}
         {...morph}
-        className="relative flex h-full flex-col overflow-hidden rounded-xl border border-border/10 bg-surface/95 shadow-[0_2px_6px_rgb(0_0_0/0.25),0_8px_28px_rgb(0_0_0/0.4)]"
+        // Shadow must die out inside the 6px window padding (p-1.5 on the
+        // root) — anything larger hard-clips at the transparent window edge
+        // and reads as a gray box on light surfaces.
+        className="relative flex h-full flex-col overflow-hidden rounded-xl border border-border/10 bg-surface/95 shadow-[0_1px_3px_rgb(0_0_0/0.18),0_3px_6px_rgb(0_0_0/0.12)]"
       >
         {nothing ? (
           <div className="flex h-full w-full items-center justify-center gap-2 text-muted">
