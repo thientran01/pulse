@@ -38,6 +38,14 @@ src/            React widget: pill ↔ card ↔ expanded modes; lib/posClock.ts 
                 in, display clock out; all seek/pause/jitter filtering lives there);
                 expanded = karaoke lyrics view
                 (click-line-to-seek) with big-art fallback; palette.ts accent extraction
+src/icons/      morphing icon system (benji.org/morphing-icons-with-claude, generalized):
+                every icon = 3 strokes × 2 cubics with identical command skeletons, so
+                any icon morphs into any other by tweening d strings — geometry.ts is
+                the data (stroke ORDER is the correspondence map; prev is deliberately
+                order-swapped, don't re-sort), MorphIcon.tsx renders + morphs (slot
+                registry carries the FROM glyph across App's mode-keyed remounts).
+                Mode buttons NAME THE DESTINATION (pill/card/lyrics glyphs), never a
+                direction chevron. Dev sequencer: npm run dev → localhost:1420/?lab
 ```
 
 Design rule: chrome stays neutral (house semantic tokens); the album-art palette is the **accent layer only** — progress fills, the **living separator** (src/Waveform.tsx — a colorless muted middot between artist and album that blooms into five Apple-style accent capsules while music plays and settles back on pause; replaces the em dash in every mode; the ONLY audio-reactive surface; supersedes the art-halo direction and the shell glow blessed 2026-07-06), and the current-lyric **marker** (the lyric line's text stays fg — extracted accents only guarantee 3:1, below the 4.5:1 text floor). No glow anywhere: the card shell shadow is neutral black and non-reactive (lift only), the art carries no shadow. The art never moves; nothing moves except the icon's bars. Accent never colors text or chrome surfaces. Motion uses EASE/DUR tokens — `/emil-pass` binds to them.

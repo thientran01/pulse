@@ -1,5 +1,8 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
+import { PlayerMark } from "./icons/badges";
+import { MorphIcon } from "./icons/MorphIcon";
+import { useSeekTick } from "./icons/useSeekTick";
 import { commands, onNowPlaying } from "./lib/backend";
 import { currentLineIndex, msUntilNextLine, parseLrc, type LyricLine } from "./lib/lrc";
 import { extractAccent } from "./lib/palette";
@@ -289,12 +292,14 @@ function useArtAccent(artUrl: string | null): void {
 function IconButton({
   label,
   onClick,
+  onPointerDown,
   disabled,
   size = "md",
   children,
 }: {
   label: string;
   onClick: () => void;
+  onPointerDown?: () => void;
   disabled?: boolean;
   size?: "sm" | "md";
   children: React.ReactNode;
@@ -306,6 +311,7 @@ function IconButton({
       title={label}
       disabled={disabled}
       onClick={onClick}
+      onPointerDown={onPointerDown}
       className={`grid place-items-center rounded-md text-fg transition duration-2 ease-out-tk hover:bg-fg/10 active:scale-95 disabled:pointer-events-none disabled:opacity-40 ${
         size === "sm" ? "h-7 w-7" : "h-8 w-8"
       }`}
@@ -322,95 +328,131 @@ const PLAYER_NAMES: Record<NowPlaying["player"], string> = {
   none: "",
 };
 
-/** Monochrome source-app marks (muted, tooltip carries the name). */
-const PLAYER_ICONS: Record<NowPlaying["player"], React.ReactNode> = {
-  spotify: (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm4.58 14.42a.72.72 0 0 1-.99.25c-2.7-1.65-6.1-2.02-10.1-1.1a.72.72 0 0 1-.32-1.4c4.37-1 8.13-.57 11.16 1.28.34.2.45.65.25.97Zm1.23-2.72a.9.9 0 0 1-1.24.3c-3.09-1.9-7.8-2.45-11.45-1.34a.9.9 0 1 1-.52-1.72c4.17-1.27 9.36-.65 12.92 1.53.42.26.55.81.29 1.23Zm.1-2.83C14.3 8.72 8.16 8.51 4.62 9.58a1.08 1.08 0 1 1-.62-2.06c4.06-1.23 10.81-1 14.93 1.45a1.08 1.08 0 0 1-1.1 1.86Z" />
-    </svg>
-  ),
-  apple_music: (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
-      <path d="M13.9 1.22a.9.9 0 0 1 .35.72v8.6a2.5 2.5 0 1 1-1.5-2.29V5.02L6.75 6.3v6.02a2.5 2.5 0 1 1-1.5-2.29V3.65a.9.9 0 0 1 .7-.88l7.2-1.7a.9.9 0 0 1 .75.15Z" />
-    </svg>
-  ),
-  other: (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
-      <path d="M6 13.5a2 2 0 1 1-1-1.73V4.6a.8.8 0 0 1 .57-.77l6-1.8A.8.8 0 0 1 12.6 2.8v8.2a2 2 0 1 1-1-1.73V5.06l-5 1.5v6.94Z" />
-    </svg>
-  ),
-  none: null,
-};
-
+/** Monochrome source-app mark (muted, tooltip carries the name). Fades in
+ * over 90ms when the controlled session hops apps; brand marks never morph. */
 function PlayerBadge({ player }: { player: NowPlaying["player"] }) {
+  const reducedMotion = useReducedMotion();
   if (player === "none") return null;
   return (
-    <span
+    <motion.span
+      key={player}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{
+        duration: reducedMotion ? 0 : DUR[1] / 1000,
+        ease: [...EASE.out] as [number, number, number, number],
+      }}
       role="img"
       aria-label={`Controlling ${PLAYER_NAMES[player]}`}
       title={PLAYER_NAMES[player]}
       className="grid shrink-0 place-items-center text-muted"
     >
-      {PLAYER_ICONS[player]}
-    </span>
+      <PlayerMark player={player} />
+    </motion.span>
   );
 }
 
-const icons = {
-  prev: (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
-      <path d="M3 2.5a.5.5 0 0 1 1 0v11a.5.5 0 0 1-1 0v-11ZM13.2 3a.6.6 0 0 1 .8.57v8.86a.6.6 0 0 1-.98.46L6.6 8.46a.6.6 0 0 1 0-.92L13.02 3.1a.6.6 0 0 1 .18-.1Z" />
-    </svg>
-  ),
-  next: (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
-      <path d="M13 2.5a.5.5 0 0 0-1 0v11a.5.5 0 0 0 1 0v-11ZM2.8 3a.6.6 0 0 0-.8.57v8.86a.6.6 0 0 0 .98.46l6.42-4.43a.6.6 0 0 0 0-.92L2.98 3.1a.6.6 0 0 0-.18-.1Z" />
-    </svg>
-  ),
-  play: (
-    <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
-      <path d="M4.5 2.7a.7.7 0 0 1 1.06-.6l8.13 4.7a.7.7 0 0 1 0 1.2l-8.13 4.7a.7.7 0 0 1-1.06-.6V2.7Z" />
-    </svg>
-  ),
-  pause: (
-    <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
-      <path d="M4 2.8c0-.44.36-.8.8-.8h1.4c.44 0 .8.36.8.8v10.4a.8.8 0 0 1-.8.8H4.8a.8.8 0 0 1-.8-.8V2.8Zm5 0c0-.44.36-.8.8-.8h1.4c.44 0 .8.36.8.8v10.4a.8.8 0 0 1-.8.8H9.8a.8.8 0 0 1-.8-.8V2.8Z" />
-    </svg>
-  ),
-  back10: (
-    <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
-      <path d="M8 3a5 5 0 1 1-4.55 2.93" strokeLinecap="round" />
-      <path d="M3.2 2.6v3.3h3.3" strokeLinecap="round" strokeLinejoin="round" />
-      <text x="8" y="10.6" fontSize="5.4" fill="currentColor" stroke="none" textAnchor="middle" fontWeight="700">
-        10
-      </text>
-    </svg>
-  ),
-  fwd10: (
-    <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
-      <path d="M8 3a5 5 0 1 0 4.55 2.93" strokeLinecap="round" />
-      <path d="M12.8 2.6v3.3H9.5" strokeLinecap="round" strokeLinejoin="round" />
-      <text x="8" y="10.6" fontSize="5.4" fill="currentColor" stroke="none" textAnchor="middle" fontWeight="700">
-        10
-      </text>
-    </svg>
-  ),
-  note: (
-    <svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
-      <path d="M6 13.5a2 2 0 1 1-1-1.73V4.6a.8.8 0 0 1 .57-.77l6-1.8A.8.8 0 0 1 12.6 2.8v8.2a2 2 0 1 1-1-1.73V5.06l-5 1.5v6.94Z" />
-    </svg>
-  ),
-  chevronUp: (
-    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
-      <path d="M3.5 10 8 5.5l4.5 4.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  ),
-  chevronDown: (
-    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
-      <path d="M3.5 6 8 10.5 12.5 6" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  ),
-};
+/** Destination-named mode switch: the button shows the glyph of the mode it
+ * takes you TO (pill/card/lyrics), so no chevron ever means two things. Two
+ * stable slots pair layoutId (button glides across the mode remount) with
+ * MorphIcon's registry (the glyph morphs from whatever the slot last showed).
+ * Clocked to dock.rs's 200ms EASE.inOut window resize so window, glide, and
+ * glyph move as one gesture. */
+function ModeButton({
+  to,
+  label,
+  slot,
+  onClick,
+}: {
+  to: "pill" | "card" | "lyrics";
+  label: string;
+  slot: "mode-primary" | "mode-secondary";
+  onClick: () => void;
+}) {
+  const reducedMotion = useReducedMotion();
+  return (
+    <motion.button
+      type="button"
+      layoutId={slot}
+      transition={{
+        layout: {
+          duration: reducedMotion ? 0 : DUR[3] / 1000,
+          ease: [...EASE.inOut] as [number, number, number, number],
+        },
+      }}
+      whileTap={{ scale: reducedMotion ? 1 : 0.95 }}
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      className="grid h-7 w-7 place-items-center rounded-md text-muted transition-colors duration-2 ease-out-tk hover:bg-fg/10 hover:text-fg"
+    >
+      <MorphIcon name={to} size={13} slot={slot} dur={DUR[3]} ease={EASE.inOut} />
+    </motion.button>
+  );
+}
+
+/** The marquee morph, fired optimistically on pointerdown — the morph IS the
+ * press response (SMTC command bools lie; the next emit is the
+ * reconciliation). Diff-suppressed emits mean a silently failed command never
+ * sends a correcting payload, so a timeout falls back to the prop. */
+function PlayPauseButton({
+  playing,
+  iconSize = 18,
+  size = "md",
+}: {
+  playing: boolean;
+  iconSize?: number;
+  size?: "sm" | "md";
+}) {
+  const [optimistic, setOptimistic] = useState<boolean | null>(null);
+  useEffect(() => setOptimistic(null), [playing]);
+  useEffect(() => {
+    if (optimistic === null) return;
+    const t = window.setTimeout(() => setOptimistic(null), 2000);
+    return () => window.clearTimeout(t);
+  }, [optimistic]);
+  const shown = optimistic ?? playing;
+  return (
+    <IconButton
+      size={size}
+      label={shown ? "Pause" : "Play"}
+      onPointerDown={() => setOptimistic(!shown)}
+      onClick={commands.playPause}
+    >
+      <MorphIcon name={shown ? "pause" : "play"} size={iconSize} dur={DUR[2]} ease={EASE.out} />
+    </IconButton>
+  );
+}
+
+function SeekButton({
+  dir,
+  seekable,
+  player,
+}: {
+  dir: -1 | 1;
+  seekable: boolean;
+  player: NowPlaying["player"];
+}) {
+  const { scope, tick } = useSeekTick(dir);
+  return (
+    <IconButton
+      label={
+        seekable
+          ? dir < 0
+            ? "Back 10 seconds"
+            : "Forward 10 seconds"
+          : `Seeking not supported by ${PLAYER_NAMES[player]}`
+      }
+      disabled={!seekable}
+      onPointerDown={() => void tick()}
+      onClick={() => commands.seekRel(dir * SEEK_STEP_MS)}
+    >
+      <span ref={scope} className="grid place-items-center will-change-transform">
+        <MorphIcon name={dir < 0 ? "seekBack" : "seekFwd"} size={17} />
+      </span>
+    </IconButton>
+  );
+}
 
 /** rAF driver shared by the progress surfaces: writes the fill's scaleX every
  * ~90ms (every frame while scrubbing) and the elapsed label + slider aria only
@@ -582,7 +624,11 @@ function Art({ url, size, radiusPx }: { url: string | null; size: number; radius
       className="grid shrink-0 place-items-center overflow-hidden bg-surface-2 text-muted"
       style={{ width: size, height: size, borderRadius: radiusPx }}
     >
-      {url ? <img src={url} alt="" className="h-full w-full object-cover" draggable={false} /> : icons.note}
+      {url ? (
+        <img src={url} alt="" className="h-full w-full object-cover" draggable={false} />
+      ) : (
+        <MorphIcon name="note" size={22} />
+      )}
     </div>
   );
 }
@@ -591,27 +637,13 @@ function Transport({ np, seekable, playing }: { np: NowPlaying; seekable: boolea
   return (
     <div className="flex items-center gap-0.5">
       <IconButton label="Previous track" onClick={commands.prev}>
-        {icons.prev}
+        <MorphIcon name="prev" size={16} />
       </IconButton>
-      <IconButton
-        label={seekable ? "Back 10 seconds" : `Seeking not supported by ${PLAYER_NAMES[np.player]}`}
-        disabled={!seekable}
-        onClick={() => commands.seekRel(-SEEK_STEP_MS)}
-      >
-        {icons.back10}
-      </IconButton>
-      <IconButton label={playing ? "Pause" : "Play"} onClick={commands.playPause}>
-        {playing ? icons.pause : icons.play}
-      </IconButton>
-      <IconButton
-        label={seekable ? "Forward 10 seconds" : `Seeking not supported by ${PLAYER_NAMES[np.player]}`}
-        disabled={!seekable}
-        onClick={() => commands.seekRel(SEEK_STEP_MS)}
-      >
-        {icons.fwd10}
-      </IconButton>
+      <SeekButton dir={-1} seekable={seekable} player={np.player} />
+      <PlayPauseButton playing={playing} />
+      <SeekButton dir={1} seekable={seekable} player={np.player} />
       <IconButton label="Next track" onClick={commands.next}>
-        {icons.next}
+        <MorphIcon name="next" size={16} />
       </IconButton>
     </div>
   );
@@ -698,7 +730,7 @@ function App() {
       >
         {nothing ? (
           <div className="flex h-full w-full items-center justify-center gap-2 text-muted">
-            {icons.note}
+            <MorphIcon name="note" size={22} />
             <span className="text-sm">Nothing playing</span>
           </div>
         ) : mode === "pill" ? (
@@ -710,12 +742,8 @@ function App() {
                 <Waveform trailing={!np.artist} />
                 <span className="font-normal text-muted">{np.artist}</span>
               </p>
-              <IconButton size="sm" label={playing ? "Pause" : "Play"} onClick={commands.playPause}>
-                {playing ? icons.pause : icons.play}
-              </IconButton>
-              <IconButton size="sm" label="Expand to card" onClick={() => setMode("card")}>
-                {icons.chevronUp}
-              </IconButton>
+              <PlayPauseButton size="sm" iconSize={16} playing={playing} />
+              <ModeButton to="card" label="Expand to card" slot="mode-secondary" onClick={() => setMode("card")} />
             </div>
             {/* Non-interactive progress hairline — still announced to AT. */}
             <Hairline np={np} />
@@ -729,12 +757,8 @@ function App() {
                 {/* Windows routes commands to the OS "current" session, which
                     hops between apps — always show which app this card controls. */}
                 <PlayerBadge player={np.player} />
-                <IconButton size="sm" label="Collapse to pill" onClick={() => setMode("pill")}>
-                  {icons.chevronDown}
-                </IconButton>
-                <IconButton size="sm" label="Expand" onClick={() => setMode("expanded")}>
-                  {icons.chevronUp}
-                </IconButton>
+                <ModeButton to="pill" label="Collapse to pill" slot="mode-secondary" onClick={() => setMode("pill")} />
+                <ModeButton to="lyrics" label="Show lyrics" slot="mode-primary" onClick={() => setMode("expanded")} />
               </div>
               <p className="truncate text-xs text-muted">
                 {np.artist}
@@ -761,9 +785,7 @@ function App() {
                 </p>
               </div>
               <PlayerBadge player={np.player} />
-              <IconButton size="sm" label="Collapse to card" onClick={() => setMode("card")}>
-                {icons.chevronDown}
-              </IconButton>
+              <ModeButton to="card" label="Back to card" slot="mode-primary" onClick={() => setMode("card")} />
             </div>
             <LyricsPanel lines={lyrics.lines} seekable={seekable} />
             <div className="flex justify-center">
@@ -779,9 +801,7 @@ function App() {
           >
             <div className="absolute right-2 top-2 flex items-center gap-1">
               <PlayerBadge player={np.player} />
-              <IconButton size="sm" label="Collapse to card" onClick={() => setMode("card")}>
-                {icons.chevronDown}
-              </IconButton>
+              <ModeButton to="card" label="Back to card" slot="mode-primary" onClick={() => setMode("card")} />
             </div>
             <Art url={shownArt} size={190} radiusPx={12} />
             <div className="min-w-0 self-stretch text-center">
