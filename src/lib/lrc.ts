@@ -23,10 +23,14 @@ export function parseLrc(lrc: string): LyricLine[] {
   return out.sort((a, b) => a.t - b.t);
 }
 
+/** The highlight leads the vocal by this much — SMTC positions lag what the
+ * user actually hears. One constant so the index search and the boundary
+ * scheduler can never disagree about where a line starts. */
+export const VOCAL_LEAD_MS = 250;
+
 /** Index of the line active at `positionMs` (-1 before the first line). */
 export function currentLineIndex(lines: LyricLine[], positionMs: number): number {
-  // Small lookahead so the highlight lands with the vocal, not after it.
-  const p = positionMs + 250;
+  const p = positionMs + VOCAL_LEAD_MS;
   let lo = 0;
   let hi = lines.length - 1;
   let ans = -1;
@@ -40,4 +44,14 @@ export function currentLineIndex(lines: LyricLine[], positionMs: number): number
     }
   }
   return ans;
+}
+
+/** Ms of 1x playback until the line after `idx` becomes current, or null when
+ * `idx` is the last line (nothing left to schedule). Guaranteed positive when
+ * `idx === currentLineIndex(lines, positionMs)` — a position at the boundary
+ * already belongs to the next line. */
+export function msUntilNextLine(lines: LyricLine[], idx: number, positionMs: number): number | null {
+  const next = lines[idx + 1];
+  if (!next) return null;
+  return Math.max(next.t - VOCAL_LEAD_MS - positionMs, 0);
 }

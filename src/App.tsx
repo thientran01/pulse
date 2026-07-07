@@ -1,8 +1,9 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { commands, onNowPlaying } from "./lib/backend";
-import { currentLineIndex, parseLrc, type LyricLine } from "./lib/lrc";
+import { currentLineIndex, msUntilNextLine, parseLrc, type LyricLine } from "./lib/lrc";
 import { extractAccent } from "./lib/palette";
+import * as posClock from "./lib/posClock";
 import { initReactive } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
 import { Waveform } from "./Waveform";
@@ -14,7 +15,7 @@ const SEEK_STEP_MS = 10_000;
 type Mode = "pill" | "card" | "expanded";
 
 /** Native window size per mode — the window grows out of its docked corner
- * (200ms EASE.out on the Rust side) while the content morphs. */
+ * (200ms EASE.inOut on the Rust side) while the content morphs. */
 const MODE_SIZES: Record<Mode, [number, number]> = {
   pill: [300, 48],
   card: [380, 124],
@@ -26,17 +27,54 @@ function fmt(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-/** Position interpolated between backend emits while playing. */
-function useLivePosition(np: NowPlaying | null): number {
-  const [, force] = useState(0);
+/** Current lyric line by SCHEDULING, not sampling: one timeout armed for the
+ * next line boundary, recomputed on every kernel anchor event (seek, pause,
+ * track change, accepted push). On fire the index is re-derived from the
+ * clock — never blind-incremented — so throttled webview timers can only
+ * delay a transition, never derail it. Transitions land with timer precision
+ * instead of on a 250ms sampling grid. */
+function useLyricIndex(lines: LyricLine[]): number {
+  const [idx, setIdx] = useState(() => currentLineIndex(lines, posClock.now()));
   useEffect(() => {
-    if (np?.status !== "playing") return;
-    const id = window.setInterval(() => force((n) => n + 1), 250);
-    return () => window.clearInterval(id);
-  }, [np?.status]);
-  if (!np) return 0;
-  const drift = np.status === "playing" ? Date.now() - np.emitted_at_ms : 0;
-  return Math.min(np.position_ms + drift, np.duration_ms || Infinity);
+    let timer: number | undefined;
+    const sync = () => {
+      window.clearTimeout(timer);
+      timer = undefined;
+      const pos = posClock.now();
+      const i = currentLineIndex(lines, pos);
+      setIdx(i); // same value → React bails
+      if (!posClock.isPlaying()) return; // clock frozen — anchor event re-arms
+      const delay = msUntilNextLine(lines, i, pos);
+      if (delay === null) return; // last line — nothing left to schedule
+      // Cap long waits and re-verify on fire, against timer throttling.
+      timer = window.setTimeout(sync, Math.min(delay, 30_000));
+    };
+    sync();
+    const unsubscribe = posClock.subscribe(sync);
+    return () => {
+      unsubscribe();
+      window.clearTimeout(timer);
+    };
+  }, [lines]);
+  return idx;
+}
+
+/** Fields that change what the React tree shows — position fields excluded,
+ * they live in posClock and would otherwise re-render the whole app per emit. */
+const IDENTITY_FIELDS = [
+  "app_id",
+  "player",
+  "title",
+  "artist",
+  "album",
+  "status",
+  "duration_ms",
+  "can_seek",
+  "art_id",
+] as const satisfies readonly (keyof NowPlaying)[];
+
+function sameIdentity(a: NowPlaying | null, b: NowPlaying): boolean {
+  return a !== null && IDENTITY_FIELDS.every((k) => a[k] === b[k]);
 }
 
 function useArt(artId: string | null): string | null {
@@ -99,16 +137,52 @@ function useLyrics(np: NowPlaying | null): LyricsState {
 
 const BROWSE_RESUME_MS = 3500;
 
-function LyricsPanel({
-  lines,
-  position,
+/** One lyric line. Memoized so a line advance reconciles the two rows whose
+ * `current` flipped instead of the whole list; clicks are delegated to the
+ * list container via data-line, so rows carry no per-render closures. */
+const LyricLineRow = memo(function LyricLineRow({
+  text,
+  index,
+  current,
   seekable,
 }: {
-  lines: LyricLine[];
-  position: number;
+  text: string;
+  index: number;
+  current: boolean;
   seekable: boolean;
 }) {
-  const idx = currentLineIndex(lines, position);
+  const Tag = seekable ? "button" : "div";
+  return (
+    <Tag
+      {...(seekable
+        ? {
+            type: "button" as const,
+            "data-line": index,
+            "aria-label": `Seek to ${text}`,
+            // Out of the tab order — dozens of lines would otherwise sit
+            // between the header and transport; keyboard seek lives on
+            // the progress slider.
+            tabIndex: -1,
+          }
+        : {})}
+      className={`relative rounded-md px-3 py-1 text-left text-base leading-normal transition-colors duration-3 ease-out-tk ${
+        current ? "font-medium text-fg" : "text-muted/80"
+      } ${seekable ? "cursor-pointer hover:bg-fg/5" : ""}`}
+    >
+      {/* Accent lives on the marker, never the text (contrast floor is 3:1). */}
+      <span
+        aria-hidden
+        className={`absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-accent transition-opacity duration-3 ease-out-tk ${
+          current ? "opacity-100" : "opacity-0"
+        }`}
+      />
+      {text}
+    </Tag>
+  );
+});
+
+function LyricsPanel({ lines, seekable }: { lines: LyricLine[]; seekable: boolean }) {
+  const idx = useLyricIndex(lines);
   const viewportRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const [autoOffset, setAutoOffset] = useState(0);
@@ -164,47 +238,29 @@ function LyricsPanel({
     >
       <div
         ref={listRef}
+        onClick={(e) => {
+          if (!seekable) return;
+          const row = (e.target as HTMLElement).closest("[data-line]");
+          const line = row ? lines[Number(row.getAttribute("data-line"))] : undefined;
+          if (!line) return;
+          commands.seekAbs(line.t);
+          setManualOffset(null); // hand control back to auto-follow
+          window.clearTimeout(resumeTimer.current);
+        }}
         className={`flex flex-col gap-1 py-4 will-change-transform ${
           browsing ? "" : "[transition:transform_220ms_var(--ease-in-out-tk)]"
         }`}
         style={{ transform: `translateY(${-offset}px)` }}
       >
-        {lines.map((line, i) => {
-          const current = i === idx;
-          const Tag = seekable ? "button" : "div";
-          return (
-            <Tag
-              key={`${line.t}-${i}`}
-              {...(seekable
-                ? {
-                    type: "button" as const,
-                    onClick: () => {
-                      commands.seekAbs(line.t);
-                      setManualOffset(null); // hand control back to auto-follow
-                      window.clearTimeout(resumeTimer.current);
-                    },
-                    "aria-label": `Seek to ${line.text}`,
-                    // Out of the tab order — dozens of lines would otherwise sit
-                    // between the header and transport; keyboard seek lives on
-                    // the progress slider.
-                    tabIndex: -1,
-                  }
-                : {})}
-              className={`relative rounded-md px-3 py-1 text-left text-base leading-normal transition-colors duration-3 ease-out-tk ${
-                current ? "font-medium text-fg" : "text-muted/80"
-              } ${seekable ? "cursor-pointer hover:bg-fg/5" : ""}`}
-            >
-              {/* Accent lives on the marker, never the text (contrast floor is 3:1). */}
-              <span
-                aria-hidden
-                className={`absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-accent transition-opacity duration-3 ease-out-tk ${
-                  current ? "opacity-100" : "opacity-0"
-                }`}
-              />
-              {line.text}
-            </Tag>
-          );
-        })}
+        {lines.map((line, i) => (
+          <LyricLineRow
+            key={`${line.t}-${i}`}
+            text={line.text}
+            index={i}
+            current={i === idx}
+            seekable={seekable}
+          />
+        ))}
       </div>
     </div>
   );
@@ -356,13 +412,77 @@ const icons = {
   ),
 };
 
-function ProgressBar({ np, position }: { np: NowPlaying; position: number }) {
+/** rAF driver shared by the progress surfaces: writes the fill's scaleX every
+ * ~90ms (every frame while scrubbing) and the elapsed label + slider aria only
+ * on integer-second changes — position never enters React state (the Waveform
+ * pattern). Paused frames cost one compare; a hidden window stops rAF cold.
+ * React never renders the rAF-owned transform/aria/label, so re-renders can't
+ * reset them to stale values. */
+function useProgressDom(
+  durationMs: number,
+  active: boolean,
+  bar: React.RefObject<HTMLDivElement | null>,
+  fill: React.RefObject<HTMLDivElement | null>,
+  time?: React.RefObject<HTMLSpanElement | null>,
+  drag?: React.RefObject<number | null>,
+): void {
+  useLayoutEffect(() => {
+    let raf = 0;
+    let last = 0;
+    let lastFrac = -1;
+    let lastSec = -1;
+    const write = () => {
+      const dragFrac = drag?.current ?? null;
+      const pos = dragFrac !== null ? dragFrac * durationMs : posClock.now();
+      const frac = durationMs > 0 ? Math.min(pos / durationMs, 1) : 0;
+      if (fill.current && Math.abs(frac - lastFrac) > 0.0004) {
+        lastFrac = frac;
+        fill.current.style.transform = `scaleX(${frac})`;
+      }
+      const sec = Math.floor(pos / 1000);
+      if (sec !== lastSec) {
+        lastSec = sec;
+        if (time?.current) time.current.textContent = fmt(pos);
+        bar.current?.setAttribute("aria-valuenow", String(Math.round(pos)));
+        bar.current?.setAttribute("aria-valuetext", `${fmt(pos)} of ${fmt(durationMs)}`);
+      }
+    };
+    write(); // before first paint — no mount sweep from scale-x-0
+    if (!active) {
+      // Frozen clock: no loop at all (the pre-PR paused cost was zero, keep
+      // it zero). Kernel notifications repaint paused seeks/scrubs.
+      return posClock.subscribe(write);
+    }
+    const loop = (t: number) => {
+      raf = requestAnimationFrame(loop);
+      // ~10fps is plenty for playback; every frame while scrubbing.
+      if (drag?.current == null && t - last < 90) return;
+      last = t;
+      write();
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [durationMs, active, bar, fill, time, drag]);
+}
+
+function ProgressBar({ np }: { np: NowPlaying }) {
   const barRef = useRef<HTMLDivElement>(null);
+  const fillRef = useRef<HTMLDivElement>(null);
+  const timeRef = useRef<HTMLSpanElement>(null);
   // While dragging, the bar tracks the pointer; the seek commits on release.
+  // Mirrored into a ref so the rAF loop reads it without effect churn.
   const [dragFrac, setDragFrac] = useState<number | null>(null);
+  const dragRef = useRef<number | null>(null);
+  dragRef.current = dragFrac;
   const seekable = np.can_seek && np.duration_ms > 0;
-  const shownMs = dragFrac !== null ? dragFrac * np.duration_ms : position;
-  const frac = np.duration_ms > 0 ? shownMs / np.duration_ms : 0;
+  useProgressDom(
+    np.duration_ms,
+    np.status === "playing" || dragFrac !== null,
+    barRef,
+    fillRef,
+    timeRef,
+    dragRef,
+  );
 
   const fracFromPointer = (clientX: number): number => {
     const r = barRef.current!.getBoundingClientRect();
@@ -371,15 +491,16 @@ function ProgressBar({ np, position }: { np: NowPlaying; position: number }) {
 
   return (
     <div className="flex items-center gap-2">
-      <span className="w-9 text-right text-[11px] tabular-nums text-muted">{fmt(shownMs)}</span>
+      {/* No JSX children: the rAF driver owns this text (a rendered child
+          would let drag re-renders clobber the drag-preview time). The
+          pre-paint write() populates it at mount. */}
+      <span ref={timeRef} className="w-9 text-right text-[11px] tabular-nums text-muted" />
       <div
         ref={barRef}
         role={seekable ? "slider" : "progressbar"}
         aria-label="Track position"
         aria-valuemin={0}
         aria-valuemax={np.duration_ms}
-        aria-valuenow={Math.round(shownMs)}
-        aria-valuetext={`${fmt(shownMs)} of ${fmt(np.duration_ms)}`}
         tabIndex={seekable ? 0 : -1}
         onKeyDown={(e) => {
           if (!seekable) return;
@@ -415,17 +536,42 @@ function ProgressBar({ np, position }: { np: NowPlaying; position: number }) {
             dragFrac !== null ? "h-[5px]" : seekable ? "h-[3px] group-hover:h-[5px]" : "h-[3px]"
           }`}
         >
+          {/* Fill scales on the compositor instead of animating width (layout).
+              scale-x-0 is only the pre-first-write baseline — the rAF driver
+              owns the inline transform from then on. */}
           <div
-            className={`h-full rounded-full bg-accent ${
+            ref={fillRef}
+            className={`h-full w-full origin-left scale-x-0 rounded-full bg-accent will-change-transform ${
               dragFrac === null
-                ? "[transition:width_90ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]"
+                ? "[transition:transform_90ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]"
                 : "[transition:background-color_220ms_var(--ease-out-tk)]"
             }`}
-            style={{ width: `${Math.min(frac * 100, 100)}%` }}
           />
         </div>
       </div>
       <span className="w-9 text-[11px] tabular-nums text-muted">{fmt(np.duration_ms)}</span>
+    </div>
+  );
+}
+
+/** Non-interactive pill progress hairline — same rAF driver, aria only. */
+function Hairline({ np }: { np: NowPlaying }) {
+  const barRef = useRef<HTMLDivElement>(null);
+  const fillRef = useRef<HTMLDivElement>(null);
+  useProgressDom(np.duration_ms, np.status === "playing", barRef, fillRef);
+  return (
+    <div
+      ref={barRef}
+      role="progressbar"
+      aria-label="Track position"
+      aria-valuemin={0}
+      aria-valuemax={np.duration_ms}
+      className="absolute inset-x-0 bottom-0 h-[2px] bg-fg/10"
+    >
+      <div
+        ref={fillRef}
+        className="h-full w-full origin-left scale-x-0 bg-accent will-change-transform [transition:transform_90ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]"
+      />
     </div>
   );
 }
@@ -473,8 +619,18 @@ function Transport({ np, seekable, playing }: { np: NowPlaying; seekable: boolea
 
 function App() {
   const [np, setNp] = useState<NowPlaying | null>(null);
-  useEffect(() => onNowPlaying(setNp), []);
-  const position = useLivePosition(np);
+  useEffect(
+    () =>
+      onNowPlaying((next) => {
+        // Every payload feeds the clock; only identity changes re-render.
+        // A stale straggler the kernel rejects must not touch React state
+        // either — adopting its identity would pair the new track's clock
+        // with the old track's lyrics.
+        if (!posClock.ingest(next)) return;
+        setNp((prev) => (sameIdentity(prev, next) ? prev : next));
+      }),
+    [],
+  );
   const artUrl = useArt(np?.art_id ?? null);
   // A data URL that fails to decode falls back to the note glyph instead of
   // the browser's broken-image icon.
@@ -530,8 +686,6 @@ function App() {
     commands.startDrag();
   };
 
-  const frac = np && np.duration_ms > 0 ? Math.min(position / np.duration_ms, 1) : 0;
-
   return (
     <div className="h-screen p-1.5" onMouseDown={onDragStart}>
       <motion.div
@@ -564,20 +718,7 @@ function App() {
               </IconButton>
             </div>
             {/* Non-interactive progress hairline — still announced to AT. */}
-            <div
-              role="progressbar"
-              aria-label="Track position"
-              aria-valuemin={0}
-              aria-valuemax={np.duration_ms}
-              aria-valuenow={Math.round(position)}
-              aria-valuetext={`${fmt(position)} of ${fmt(np.duration_ms)}`}
-              className="absolute inset-x-0 bottom-0 h-[2px] bg-fg/10"
-            >
-              <div
-                className="h-full bg-accent [transition:width_90ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]"
-                style={{ width: `${frac * 100}%` }}
-              />
-            </div>
+            <Hairline np={np} />
           </>
         ) : mode === "card" ? (
           <div className="flex h-full items-center gap-3 px-3">
@@ -603,7 +744,7 @@ function App() {
               <div className="mt-0.5">
                 <Transport np={np} seekable={seekable} playing={playing} />
               </div>
-              <ProgressBar np={np} position={position} />
+              <ProgressBar np={np} />
             </div>
           </div>
         ) : lyrics.status === "synced" ? (
@@ -624,11 +765,11 @@ function App() {
                 {icons.chevronDown}
               </IconButton>
             </div>
-            <LyricsPanel lines={lyrics.lines} position={position} seekable={seekable} />
+            <LyricsPanel lines={lyrics.lines} seekable={seekable} />
             <div className="flex justify-center">
               <Transport np={np} seekable={seekable} playing={playing} />
             </div>
-            <ProgressBar np={np} position={position} />
+            <ProgressBar np={np} />
           </motion.div>
         ) : (
           <motion.div
@@ -656,7 +797,7 @@ function App() {
             </div>
             <Transport np={np} seekable={seekable} playing={playing} />
             <div className="self-stretch">
-              <ProgressBar np={np} position={position} />
+              <ProgressBar np={np} />
             </div>
           </motion.div>
         )}

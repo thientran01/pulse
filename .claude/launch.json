@@ -4,8 +4,8 @@
     {
       "name": "pulse-frontend",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--", "--port", "5188"],
-      "port": 5188
+      "runtimeArgs": ["run", "dev"],
+      "autoPort": true
     }
   ]
 }

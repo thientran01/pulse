@@ -16,19 +16,27 @@ Full plan: `C:\Users\Thien\.claude\plans\i-want-to-start-buzzing-wreath.md` (mil
 src-tauri/src/
   media.rs      GSMTC watcher → now-playing events + transport/seek commands + art cache;
                 change events (SessionWatch) wake a 500ms heartbeat poll, so track/art/
-                status changes land in ~50ms while position staleness stays poll-bounded
+                status changes land in ~50ms. Emits carry the RAW (position_ms,
+                position_at_ms=LastUpdatedTime) pair + seq — Rust never projects a
+                UI-visible position; the frontend owns the clock. Emits are
+                diff-suppressed and unchanged heartbeat ticks skip the snapshot, so a
+                payload arrives only when the player's data actually moved
                 (splits into media_core/ + adapters/ when M5 adds Spotify Web API)
   dock.rs       corner docking: window lives in one of the 4 work-area corners (12px
                 margin, above the taskbar); free drag snaps to the nearest corner on
                 release (Moved-debounce + GetAsyncKeyState — no drag-end event exists);
-                mode resizes grow/shrink out of the docked corner (200ms EASE.out,
+                mode resizes grow/shrink out of the docked corner (200ms EASE.inOut —
+                on-screen morph; the snap glide keeps EASE.out, momentum inheritance;
                 size+origin per frame in one SetWindowPos); corner derived from the
                 window-state-restored position, never stored
   lyrics.rs     LRCLIB get→search fallback, disk cache (bounded, app-data) + session miss set
   audio.rs      WASAPI loopback (cpal input stream on the output device) → FFT →
                 smoothed auto-gained band energies at ~30Hz; capture runs ONLY
                 while visible AND playing (stream dropped otherwise)
-src/            React widget: pill ↔ card ↔ expanded modes; expanded = karaoke lyrics view
+src/            React widget: pill ↔ card ↔ expanded modes; lib/posClock.ts is the ONE
+                owner of playback position (monotonic per track while playing — raw pairs
+                in, display clock out; all seek/pause/jitter filtering lives there);
+                expanded = karaoke lyrics view
                 (click-line-to-seek) with big-art fallback; palette.ts accent extraction
 ```
 
