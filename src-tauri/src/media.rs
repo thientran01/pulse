@@ -140,8 +140,20 @@ impl SessionWatch {
         // position staleness at the same interval the frontend interpolates
         // over. Events buy latency only where polling is visibly slow —
         // track/art/status changes.
-        if let (Ok(t_props), Ok(t_play)) = (t_props, t_play) {
-            self.watched = Some((session, id, [t_props, t_play]));
+        match (t_props, t_play) {
+            (Ok(t_props), Ok(t_play)) => {
+                self.watched = Some((session, id, [t_props, t_play]));
+            }
+            // Partial registration: remove the half that landed, or the next
+            // iteration (watched stayed None) re-registers on this same
+            // session and the orphaned handler compounds every heartbeat.
+            (Ok(t_props), Err(_)) => {
+                let _ = session.RemoveMediaPropertiesChanged(t_props);
+            }
+            (Err(_), Ok(t_play)) => {
+                let _ = session.RemovePlaybackInfoChanged(t_play);
+            }
+            (Err(_), Err(_)) => {}
         }
     }
 }
