@@ -27,8 +27,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 /// Gap between the window and the work-area edges, in logical px.
 const MARGIN_LOGICAL: f64 = 12.0;
-/// Snap-glide duration. Sibling of DUR[3] in src/lib/tokens.ts — keep in feel.
-const SNAP_MS: u64 = 180;
+/// Snap-glide duration = DUR[3] in src/lib/tokens.ts. Keep in sync.
+const SNAP_MS: u64 = 200;
 /// A drag is considered released once Moved events go quiet this long.
 const DEBOUNCE_MS: u64 = 200;
 /// Animation frame pacing.
@@ -77,8 +77,15 @@ struct WorkArea {
     h: i32,
 }
 
+/// Work area of the window's monitor, falling back to the primary monitor —
+/// a position persisted on a now-disconnected monitor must still resolve
+/// somewhere visible so the corner math can pull the window back on-screen.
 fn work_area(window: &WebviewWindow) -> Option<WorkArea> {
-    let monitor = window.current_monitor().ok().flatten()?;
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten())?;
     let r = monitor.work_area();
     Some(WorkArea {
         x: r.position.x,
@@ -154,14 +161,48 @@ fn snap_animation_enabled() -> bool {
     on.as_bool()
 }
 
-/// Glide the window to `target` over SNAP_MS with a cubic ease-out. Cancelled
-/// (mid-flight, no landing) when any other positioning op bumps the epoch.
+/// EASE.out from src/lib/tokens.ts — cubic-bezier(0.16, 1, 0.3, 1), solved by
+/// bisection on the x-spline. Keep the control points in sync with tokens.ts.
+fn ease_out(p: f64) -> f64 {
+    const X1: f64 = 0.16;
+    const X2: f64 = 0.3;
+    const Y1: f64 = 1.0;
+    const Y2: f64 = 1.0;
+    fn bez(a: f64, b: f64, t: f64) -> f64 {
+        3.0 * a * t * (1.0 - t) * (1.0 - t) + 3.0 * b * t * t * (1.0 - t) + t * t * t
+    }
+    if p <= 0.0 {
+        return 0.0;
+    }
+    if p >= 1.0 {
+        return 1.0;
+    }
+    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+    for _ in 0..24 {
+        let mid = (lo + hi) / 2.0;
+        if bez(X1, X2, mid) < p {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    bez(Y1, Y2, (lo + hi) / 2.0)
+}
+
+/// Glide the window to `target` over SNAP_MS with the EASE.out curve.
+/// Cancelled (mid-flight, no landing) when any other positioning op bumps the
+/// epoch.
 fn animate_to(window: &WebviewWindow, from: (i32, i32), target: (i32, i32)) {
     let dock = window.state::<Dock>();
     let (dx, dy) = (target.0 - from.0, target.1 - from.1);
     if dx * dx + dy * dy <= 4 {
+        // Too close to glide — but this is still a positioning op: cancel any
+        // older in-flight animation and suppress the self-inflicted Moved.
+        dock.epoch.fetch_add(1, Ordering::SeqCst);
         if (dx, dy) != (0, 0) {
+            dock.animating.store(true, Ordering::SeqCst);
             apply_pos(window, target.0, target.1, None);
+            dock.animating.store(false, Ordering::SeqCst);
         }
         return;
     }
@@ -182,7 +223,7 @@ fn animate_to(window: &WebviewWindow, from: (i32, i32), target: (i32, i32)) {
                 // Progress from wall-clock, not frame count: Windows timer
                 // granularity (~15.6ms) drops frames instead of slowing down.
                 let t = (start.elapsed().as_secs_f64() * 1000.0 / SNAP_MS as f64).min(1.0);
-                let e = 1.0 - (1.0 - t).powi(3);
+                let e = ease_out(t);
                 let x = from.0 + (dx as f64 * e).round() as i32;
                 let y = from.1 + (dy as f64 * e).round() as i32;
                 apply_pos(&window, x, y, None);
@@ -219,7 +260,12 @@ fn snap_to_nearest(window: &WebviewWindow) {
 #[tauri::command]
 pub fn set_window_size(window: WebviewWindow, dock: State<Dock>, width: f64, height: f64) {
     dock.epoch.fetch_add(1, Ordering::SeqCst); // cancel any in-flight snap
-    let Some(wa) = work_area(&window) else { return };
+    let Some(wa) = work_area(&window) else {
+        // No monitor info at all — still honor the size so the native window
+        // matches the React layout; position keeps its last value.
+        let _ = window.set_size(tauri::LogicalSize::new(width, height));
+        return;
+    };
     let scale = window.scale_factor().unwrap_or(1.0);
     let w = (width * scale).round() as i32;
     let h = (height * scale).round() as i32;
