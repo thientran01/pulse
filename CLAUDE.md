@@ -26,7 +26,10 @@ src-tauri/src/
   audio.rs      WASAPI loopback (cpal input stream on the output device) → FFT →
                 smoothed auto-gained band energies at ~30Hz; capture runs ONLY
                 while visible AND playing (stream dropped otherwise)
-src/            React widget: pill ↔ card ↔ expanded modes; expanded = karaoke lyrics view
+src/            React widget: pill ↔ card ↔ expanded modes; lib/posClock.ts is the ONE
+                owner of playback position (monotonic per track while playing — raw pairs
+                in, display clock out; all seek/pause/jitter filtering lives there);
+                expanded = karaoke lyrics view
                 (click-line-to-seek) with big-art fallback; palette.ts accent extraction
 ```
 
