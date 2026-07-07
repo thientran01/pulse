@@ -114,8 +114,11 @@ fn now_playing(cache: State<ArtCache>) -> Stamped {
     }
 }
 
-/// Monotonic stamp on every now-playing payload — lets the frontend clock
-/// drop stale/out-of-order payloads instead of trusting IPC delivery order.
+/// Monotonic stamp on every now-playing payload. No consumer yet — the
+/// position clock kernel (next PR) uses it to drop stale/out-of-order
+/// payloads instead of trusting IPC delivery order. Ordering invariant
+/// established here: seq is assigned in the same critical section as the
+/// snapshot AND the emit, so higher seq == later snapshot == later emit.
 static SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Serialize, Clone)]
@@ -133,9 +136,12 @@ struct LastEmit(Mutex<Option<media::NowPlaying>>);
 
 fn emit_now(app: &AppHandle) -> media::NowPlaying {
     let cache = app.state::<ArtCache>();
-    let np = media::snapshot(&cache);
     let last = app.state::<LastEmit>();
+    // Snapshot INSIDE the lock: concurrent callers (media loop, commands,
+    // hotkeys, tray) serialize here, so an older snapshot can never be
+    // emitted after — or seq-stamped above — a newer one.
     let mut last = last.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let np = media::snapshot(&cache);
     if last.as_ref() != Some(&np) {
         let stamped = Stamped {
             seq: SEQ.fetch_add(1, Ordering::Relaxed),
@@ -289,7 +295,7 @@ pub fn run() {
                         let p = if std::mem::take(&mut force_snapshot) || probing || tick != last_tick {
                             emit_now(&handle).status == "playing"
                         } else {
-                            tick.as_ref().is_some_and(|k| k.2 == "playing")
+                            tick.as_ref().is_some_and(|k| k.3 == "playing")
                         };
                         last_tick = tick;
                         p

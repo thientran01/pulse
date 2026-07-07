@@ -114,7 +114,20 @@ fn manager() -> Option<Manager> {
 }
 
 pub fn current_session() -> Option<Session> {
-    manager()?.GetCurrentSession().ok()
+    match manager()?.GetCurrentSession() {
+        Ok(s) => Some(s),
+        // windows-rs maps a null return ("no current session" — a normal
+        // state, e.g. Apple Music stopped) to an Err carrying S_OK. Any real
+        // failure code means the cached manager's connection died (service
+        // restart, sleep/resume) — drop it so the next call re-requests,
+        // otherwise the app would stay dark until restart.
+        Err(e) => {
+            if !e.code().is_ok() {
+                *MANAGER.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            }
+            None
+        }
+    }
 }
 
 /// Wake signals sent from WinRT event handlers to the media loop.
@@ -486,11 +499,14 @@ fn playback_status(session: &Session) -> &'static str {
     playback_info(session).0
 }
 
-/// Cheap heartbeat probe: (app_id, timeline LastUpdatedTime ticks, status).
-/// The media loop skips the full snapshot (metadata marshal + art work + emit)
-/// when this triple hasn't moved since the previous tick. Metadata-only
+/// Cheap heartbeat probe: (app_id, timeline Position + LastUpdatedTime ticks,
+/// status). The media loop skips the full snapshot (metadata marshal + art
+/// work + emit) when this hasn't moved since the previous tick. Position is
+/// included on its own because a player may move it without re-stamping
+/// LastUpdatedTime (unverified for programmatic Spotify seeks) — the post-seek
+/// UI bound must stay one heartbeat, not one push cadence. Metadata-only
 /// changes still snapshot: MediaPropertiesChanged wakes force one.
-pub type TickKey = (String, i64, &'static str);
+pub type TickKey = (String, i64, i64, &'static str);
 
 pub fn tick_key() -> Option<TickKey> {
     let session = current_session()?;
@@ -498,12 +514,16 @@ pub fn tick_key() -> Option<TickKey> {
         .SourceAppUserModelId()
         .map(|h| h.to_string())
         .unwrap_or_default();
-    let updated = session
+    let (position, updated) = session
         .GetTimelineProperties()
-        .and_then(|t| t.LastUpdatedTime())
-        .map(|d| d.UniversalTime)
-        .unwrap_or(0);
-    Some((app_id, updated, playback_status(&session)))
+        .map(|t| {
+            (
+                t.Position().map(|d| d.Duration).unwrap_or(0),
+                t.LastUpdatedTime().map(|d| d.UniversalTime).unwrap_or(0),
+            )
+        })
+        .unwrap_or((0, 0));
+    Some((app_id, position, updated, playback_status(&session)))
 }
 
 /// True while the art cache is inside its distrust window for the current key.

@@ -1,5 +1,6 @@
 export interface NowPlaying {
-  /** Monotonic per-payload stamp — consumers drop out-of-order payloads. */
+  /** Monotonic per-payload stamp (higher = later snapshot). Unused today —
+   *  the position clock kernel (next PR) drops out-of-order payloads by it. */
   seq: number;
   app_id: string;
   player: "apple_music" | "spotify" | "other" | "none";
