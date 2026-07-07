@@ -1,15 +1,17 @@
-//! GSMTC media core: polls the current Windows media session and exposes
-//! transport commands. Capability quirks per player are documented in
-//! docs/smtc-support-matrix.md — notably Apple Music ignores seek and packs
-//! "artist — album" into the artist field.
+//! GSMTC media core: watches the current Windows media session (change events
+//! plus a heartbeat poll) and exposes transport commands. Capability quirks
+//! per player are documented in docs/smtc-support-matrix.md — notably Apple
+//! Music ignores seek and packs "artist — album" into the artist field.
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use serde::Serialize;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::mpsc::Sender;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+use windows::Foundation::TypedEventHandler;
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession as Session,
     GlobalSystemMediaTransportControlsSessionManager as Manager,
@@ -65,6 +67,83 @@ fn manager() -> windows::core::Result<Manager> {
 
 pub fn current_session() -> Option<Session> {
     manager().ok()?.GetCurrentSession().ok()
+}
+
+/// Wake signals sent from WinRT event handlers to the media loop.
+pub enum Wake {
+    /// Session content changed (metadata/thumbnail/playback) — snapshot now.
+    Event,
+    /// The OS swapped the current session — re-subscribe, then snapshot.
+    SessionChanged,
+}
+
+/// Subscribes to GSMTC change events and forwards them to the media loop as
+/// [`Wake`]s. The loop stays the only place that snapshots and emits — the
+/// WinRT handlers (which fire on the OS threadpool) only ever poke the
+/// channel, so going event-driven adds no new concurrency into snapshot().
+pub struct SessionWatch {
+    manager: Manager,
+    tx: Sender<Wake>,
+    /// (session, app_id, [media_props_token, playback_info_token])
+    watched: Option<(Session, String, [i64; 2])>,
+}
+
+impl SessionWatch {
+    /// None when GSMTC is unavailable — the caller falls back to pure polling.
+    pub fn new(tx: Sender<Wake>) -> Option<Self> {
+        let manager = manager().ok()?;
+        let session_tx = tx.clone();
+        manager
+            .CurrentSessionChanged(&TypedEventHandler::new(move |_, _| {
+                let _ = session_tx.send(Wake::SessionChanged);
+                Ok(())
+            }))
+            .ok()?;
+        Some(Self { manager, tx, watched: None })
+    }
+
+    /// Attach change handlers to the CURRENT session if it isn't the watched
+    /// one. `force` re-attaches even when the app id matches — a player can
+    /// re-register a fresh session under the same id (Apple Music does, on
+    /// every stop/start), leaving handlers on the dead one. Missed events are
+    /// never fatal: the heartbeat poll still covers everything within 500ms.
+    pub fn resubscribe(&mut self, force: bool) {
+        let current = self.manager.GetCurrentSession().ok();
+        let current_id = current
+            .as_ref()
+            .and_then(|s| s.SourceAppUserModelId().ok())
+            .map(|h| h.to_string());
+        let watched_id = self.watched.as_ref().map(|(_, id, _)| id.as_str());
+        if !force && current_id.as_deref() == watched_id {
+            return;
+        }
+        if let Some((old, _, [t_props, t_play])) = self.watched.take() {
+            // The old session may already be deregistered — best effort.
+            let _ = old.RemoveMediaPropertiesChanged(t_props);
+            let _ = old.RemovePlaybackInfoChanged(t_play);
+        }
+        let (Some(session), Some(id)) = (current, current_id) else {
+            return;
+        };
+        let props_tx = self.tx.clone();
+        let t_props = session.MediaPropertiesChanged(&TypedEventHandler::new(move |_, _| {
+            let _ = props_tx.send(Wake::Event);
+            Ok(())
+        }));
+        let play_tx = self.tx.clone();
+        let t_play = session.PlaybackInfoChanged(&TypedEventHandler::new(move |_, _| {
+            let _ = play_tx.send(Wake::Event);
+            Ok(())
+        }));
+        // Timeline events are deliberately NOT subscribed: Apple Music fires
+        // one per second for position, and the heartbeat already bounds
+        // position staleness at the same interval the frontend interpolates
+        // over. Events buy latency only where polling is visibly slow —
+        // track/art/status changes.
+        if let (Ok(t_props), Ok(t_play)) = (t_props, t_play) {
+            self.watched = Some((session, id, [t_props, t_play]));
+        }
+    }
 }
 
 fn player_kind(app_id: &str) -> &'static str {

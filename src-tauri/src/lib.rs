@@ -13,6 +13,10 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 const POLL_INTERVAL_MS: u64 = 500;
+// After a GSMTC event wakes the media loop, wait this long and drain the
+// channel before snapshotting — players fire several events per track change
+// (title, then artist, then thumbnail) and one emit should cover the burst.
+const EVENT_SETTLE_MS: u64 = 30;
 // Keep in sync with SEEK_STEP_MS in src/App.tsx (UI buttons) — this one drives
 // the global hotkeys.
 const SEEK_STEP_MS: i64 = 10_000;
@@ -211,25 +215,53 @@ pub fn run() {
             audio::spawn(app.handle().clone(), audio_switch.clone());
             let ui_reactive = app.state::<UiReactive>().0.clone();
 
-            // Media poll loop → "now-playing" events. Skips all work while the
+            // Media loop → "now-playing" events: a heartbeat poll plus GSMTC
+            // change events that cut the wait short, so track changes,
+            // play/pause, and thumbnail attaches reach the UI within ~50ms
+            // instead of up to a full interval later. Skips all work while the
             // widget is hidden (toggle_widget emits fresh state on show).
             // NOTE: is_visible() is "not hidden/minimized", not "unoccluded" —
             // a fully covered widget still captures. Occlusion detection isn't
             // exposed through Tauri; accepted for v1.
             let handle = app.handle().clone();
-            std::thread::spawn(move || loop {
-                let visible = handle
-                    .get_webview_window("main")
-                    .and_then(|w| w.is_visible().ok())
-                    .unwrap_or(true);
-                let playing = if visible {
-                    emit_now(&handle).status == "playing"
-                } else {
-                    false
-                };
-                let reactive = ui_reactive.load(Ordering::Relaxed);
-                audio_switch.store(visible && playing && reactive, Ordering::Relaxed);
-                std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
+            std::thread::spawn(move || {
+                let (wake_tx, wake_rx) = std::sync::mpsc::channel::<media::Wake>();
+                // None → GSMTC unavailable; the loop degrades to pure polling.
+                let mut watch = media::SessionWatch::new(wake_tx);
+                let mut resubscribe = true;
+                loop {
+                    if let Some(w) = watch.as_mut() {
+                        w.resubscribe(std::mem::take(&mut resubscribe));
+                    }
+                    let visible = handle
+                        .get_webview_window("main")
+                        .and_then(|w| w.is_visible().ok())
+                        .unwrap_or(true);
+                    let playing = if visible {
+                        emit_now(&handle).status == "playing"
+                    } else {
+                        false
+                    };
+                    let reactive = ui_reactive.load(Ordering::Relaxed);
+                    audio_switch.store(visible && playing && reactive, Ordering::Relaxed);
+                    use std::sync::mpsc::RecvTimeoutError;
+                    match wake_rx.recv_timeout(Duration::from_millis(POLL_INTERVAL_MS)) {
+                        Ok(first) => {
+                            let mut changed = matches!(first, media::Wake::SessionChanged);
+                            std::thread::sleep(Duration::from_millis(EVENT_SETTLE_MS));
+                            while let Ok(w) = wake_rx.try_recv() {
+                                changed |= matches!(w, media::Wake::SessionChanged);
+                            }
+                            resubscribe = changed;
+                        }
+                        Err(RecvTimeoutError::Timeout) => {}
+                        // Only reachable when SessionWatch never constructed
+                        // (it owns the last sender) — plain sleep poll.
+                        Err(RecvTimeoutError::Disconnected) => {
+                            std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
+                        }
+                    }
+                }
             });
             Ok(())
         })
