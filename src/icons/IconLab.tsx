@@ -79,6 +79,7 @@ function PlayPauseDemo() {
         <button
           key={s}
           type="button"
+          aria-label={playing ? "Pause" : "Play"}
           onClick={() => setPlaying((p) => !p)}
           className="grid place-items-center rounded-md p-2 text-fg transition-colors duration-2 ease-out-tk hover:bg-fg/10 active:scale-95"
         >
@@ -95,6 +96,7 @@ function SeekDemo({ dir }: { dir: -1 | 1 }) {
   return (
     <button
       type="button"
+      aria-label={dir < 0 ? "Seek tick back" : "Seek tick forward"}
       onPointerDown={() => void tick()}
       className="grid h-8 w-8 place-items-center rounded-md text-fg transition-colors duration-2 ease-out-tk hover:bg-fg/10"
     >
@@ -111,7 +113,11 @@ function SeekDemo({ dir }: { dir: -1 | 1 }) {
 function ModeDemo() {
   const [mode, setMode] = useState<"pill" | "card" | "expanded">("card");
   const reduced = useReducedMotion() ?? false;
-  const layoutT = { layout: { duration: reduced ? 0 : DUR[3] / 1000, ease: INOUT } };
+  const layoutT = {
+    layout: { duration: reduced ? 0 : DUR[3] / 1000, ease: INOUT },
+    // Keep whileTap's scale on the tokens, not motion's default spring.
+    scale: { duration: reduced ? 0 : DUR[1] / 1000, ease: [...EASE.out] as [number, number, number, number] },
+  };
   const btn = (to: MorphName, slot: string, onClick: () => void, label: string) => (
     <motion.button
       key={slot}
@@ -138,10 +144,10 @@ function ModeDemo() {
     >
       <div className="flex items-center justify-end gap-1">
         <span className="mr-auto pl-1 text-xs text-muted">{mode}</span>
-        {mode === "pill" && btn("card", "mode-secondary", () => setMode("card"), "Expand to card")}
-        {mode === "card" && btn("pill", "mode-secondary", () => setMode("pill"), "Collapse to pill")}
-        {mode === "card" && btn("lyrics", "mode-primary", () => setMode("expanded"), "Show lyrics")}
-        {mode === "expanded" && btn("card", "mode-primary", () => setMode("card"), "Back to card")}
+        {mode === "pill" && btn("expand", "mode-secondary", () => setMode("card"), "Expand to card")}
+        {mode === "card" && btn("contract", "mode-secondary", () => setMode("pill"), "Collapse to pill")}
+        {mode === "card" && btn("mic", "mode-primary", () => setMode("expanded"), "Show lyrics")}
+        {mode === "expanded" && btn("contract", "mode-primary", () => setMode("card"), "Back to card")}
       </div>
     </motion.div>
   );

@@ -44,11 +44,13 @@ src/icons/      morphing icon system (benji.org/morphing-icons-with-claude, gene
                 the data (stroke ORDER is the correspondence map; prev is deliberately
                 order-swapped, don't re-sort), MorphIcon.tsx renders + morphs (slot
                 registry carries the FROM glyph across App's mode-keyed remounts).
-                Mode buttons NAME THE DESTINATION (pill/card/lyrics glyphs), never a
-                direction chevron. Dev sequencer: npm run dev → localhost:1420/?lab
+                Mode buttons: expand/contract corner brackets for the size ladder +
+                a mic for the lyrics view — action verbs, not container pictograms
+                (v1 pill/card/lyrics pictograms read as abstract shapes at 13px) and
+                never a direction chevron. Dev sequencer: npm run dev → /?lab
 ```
 
-Design rule: chrome stays neutral (house semantic tokens); the album-art palette is the **accent layer only** — progress fills, the **living separator** (src/Waveform.tsx — a colorless muted middot between artist and album that blooms into five Apple-style accent capsules while music plays and settles back on pause; replaces the em dash in every mode; the ONLY audio-reactive surface; supersedes the art-halo direction and the shell glow blessed 2026-07-06), and the current-lyric **marker** (the lyric line's text stays fg — extracted accents only guarantee 3:1, below the 4.5:1 text floor). No glow anywhere: the card shell shadow is neutral black and non-reactive (lift only), the art carries no shadow. The art never moves; nothing moves except the icon's bars. Accent never colors text or chrome surfaces. Motion uses EASE/DUR tokens — `/emil-pass` binds to them.
+Design rule: chrome stays neutral (house semantic tokens); the album-art palette is the **accent layer only** — progress fills, the **living separator** (src/Waveform.tsx — a colorless muted middot between artist and album that blooms into five Apple-style accent capsules while music plays and settles back on pause; replaces the em dash in every mode; the ONLY audio-reactive surface; supersedes the art-halo direction and the shell glow blessed 2026-07-06), and the current-lyric **marker** (the lyric line's text stays fg — extracted accents only guarantee 3:1, below the 4.5:1 text floor). No glow anywhere: the card shell shadow is neutral black and non-reactive (lift only), the art carries no shadow. The art never moves; nothing moves *ambiently* except the separator's bars — interactive icon glyphs may morph in response to input (press, mode change), per src/icons/. Accent never colors text or chrome surfaces. Motion uses EASE/DUR tokens — `/emil-pass` binds to them.
 
 ## Global hotkeys (M1 defaults, constants in src-tauri/src/lib.rs)
 

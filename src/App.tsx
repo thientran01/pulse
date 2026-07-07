@@ -298,8 +298,8 @@ function IconButton({
   children,
 }: {
   label: string;
-  onClick: () => void;
-  onPointerDown?: () => void;
+  onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
+  onPointerDown?: (e: React.PointerEvent<HTMLButtonElement>) => void;
   disabled?: boolean;
   size?: "sm" | "md";
   children: React.ReactNode;
@@ -352,19 +352,20 @@ function PlayerBadge({ player }: { player: NowPlaying["player"] }) {
   );
 }
 
-/** Destination-named mode switch: the button shows the glyph of the mode it
- * takes you TO (pill/card/lyrics), so no chevron ever means two things. Two
- * stable slots pair layoutId (button glides across the mode remount) with
- * MorphIcon's registry (the glyph morphs from whatever the slot last showed).
- * Clocked to dock.rs's 200ms EASE.inOut window resize so window, glide, and
- * glyph move as one gesture. */
+/** Mode switch buttons: expand/contract corner brackets for the size ladder,
+ * a mic for the lyrics view — action verbs, not container pictograms (v1's
+ * pill/card/lyrics glyphs read as abstract shapes at 13px). Two stable slots
+ * pair layoutId (button glides across the mode remount) with MorphIcon's
+ * registry (the glyph morphs from whatever the slot last showed — expand
+ * folds into contract as the window grows). Clocked to dock.rs's 200ms
+ * EASE.inOut window resize so window, glide, and glyph move as one gesture. */
 function ModeButton({
   to,
   label,
   slot,
   onClick,
 }: {
-  to: "pill" | "card" | "lyrics";
+  to: "expand" | "contract" | "mic";
   label: string;
   slot: "mode-primary" | "mode-secondary";
   onClick: () => void;
@@ -378,6 +379,12 @@ function ModeButton({
         layout: {
           duration: reducedMotion ? 0 : DUR[3] / 1000,
           ease: [...EASE.inOut] as [number, number, number, number],
+        },
+        // Without this, whileTap's scale runs on motion's default spring —
+        // press feedback must ride the tokens like every other button.
+        scale: {
+          duration: reducedMotion ? 0 : DUR[1] / 1000,
+          ease: [...EASE.out] as [number, number, number, number],
         },
       }}
       whileTap={{ scale: reducedMotion ? 1 : 0.95 }}
@@ -416,8 +423,16 @@ function PlayPauseButton({
     <IconButton
       size={size}
       label={shown ? "Pause" : "Play"}
-      onPointerDown={() => setOptimistic(!shown)}
-      onClick={commands.playPause}
+      // Primary button only — a right/middle click or an aborted press never
+      // produces the click that fires the command, and the icon would sit
+      // wrong until the 2s fallback.
+      onPointerDown={(e) => e.button === 0 && setOptimistic(!shown)}
+      onClick={(e) => {
+        // Keyboard activation (e.detail === 0) never fires pointerdown —
+        // give Enter/Space the same optimistic morph pointer users get.
+        if (e.detail === 0) setOptimistic(!shown);
+        commands.playPause();
+      }}
     >
       <MorphIcon name={shown ? "pause" : "play"} size={iconSize} dur={DUR[2]} ease={EASE.out} />
     </IconButton>
@@ -444,8 +459,11 @@ function SeekButton({
           : `Seeking not supported by ${PLAYER_NAMES[player]}`
       }
       disabled={!seekable}
-      onPointerDown={() => void tick()}
-      onClick={() => commands.seekRel(dir * SEEK_STEP_MS)}
+      onPointerDown={(e) => e.button === 0 && void tick()}
+      onClick={(e) => {
+        if (e.detail === 0) void tick(); // keyboard gets the tick too
+        commands.seekRel(dir * SEEK_STEP_MS);
+      }}
     >
       <span ref={scope} className="grid place-items-center will-change-transform">
         <MorphIcon name={dir < 0 ? "seekBack" : "seekFwd"} size={17} />
@@ -743,7 +761,7 @@ function App() {
                 <span className="font-normal text-muted">{np.artist}</span>
               </p>
               <PlayPauseButton size="sm" iconSize={16} playing={playing} />
-              <ModeButton to="card" label="Expand to card" slot="mode-secondary" onClick={() => setMode("card")} />
+              <ModeButton to="expand" label="Expand to card" slot="mode-secondary" onClick={() => setMode("card")} />
             </div>
             {/* Non-interactive progress hairline — still announced to AT. */}
             <Hairline np={np} />
@@ -757,8 +775,8 @@ function App() {
                 {/* Windows routes commands to the OS "current" session, which
                     hops between apps — always show which app this card controls. */}
                 <PlayerBadge player={np.player} />
-                <ModeButton to="pill" label="Collapse to pill" slot="mode-secondary" onClick={() => setMode("pill")} />
-                <ModeButton to="lyrics" label="Show lyrics" slot="mode-primary" onClick={() => setMode("expanded")} />
+                <ModeButton to="contract" label="Collapse to pill" slot="mode-secondary" onClick={() => setMode("pill")} />
+                <ModeButton to="mic" label="Show lyrics" slot="mode-primary" onClick={() => setMode("expanded")} />
               </div>
               <p className="truncate text-xs text-muted">
                 {np.artist}
@@ -785,7 +803,7 @@ function App() {
                 </p>
               </div>
               <PlayerBadge player={np.player} />
-              <ModeButton to="card" label="Back to card" slot="mode-primary" onClick={() => setMode("card")} />
+              <ModeButton to="contract" label="Collapse to card" slot="mode-primary" onClick={() => setMode("card")} />
             </div>
             <LyricsPanel lines={lyrics.lines} seekable={seekable} />
             <div className="flex justify-center">
@@ -801,7 +819,7 @@ function App() {
           >
             <div className="absolute right-2 top-2 flex items-center gap-1">
               <PlayerBadge player={np.player} />
-              <ModeButton to="card" label="Back to card" slot="mode-primary" onClick={() => setMode("card")} />
+              <ModeButton to="contract" label="Collapse to card" slot="mode-primary" onClick={() => setMode("card")} />
             </div>
             <Art url={shownArt} size={190} radiusPx={12} />
             <div className="min-w-0 self-stretch text-center">

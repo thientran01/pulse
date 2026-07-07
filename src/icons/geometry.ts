@@ -3,7 +3,7 @@
  * Every icon is exactly 3 strokes; every stroke is one path with the identical
  * command skeleton "M x,y C … C …" (7 coordinate pairs), so motion tweens any
  * icon into any other by interpolating the numbers in place — no flubber.
- * ViewBox 16, strokeWidth 1.5, round caps/joins; straight lines are degenerate
+ * ViewBox 16, strokeWidth 1.75, round caps/joins; straight lines are degenerate
  * cubics (control points at exactly 1/3 and 2/3, so straight→straight tweens
  * stay straight at every frame).
  *
@@ -26,14 +26,17 @@ export type MorphName =
   | "next"
   | "seekBack"
   | "seekFwd"
-  | "pill"
-  | "card"
-  | "lyrics"
+  | "expand"
+  | "contract"
+  | "mic"
   | "note";
 
 export type Stroke = { d: string; o: 0 | 1 };
 
-export const STROKE_WIDTH = 1.5;
+/** 1.75 (was 1.5): the set read too sharp/thin at product sizes. The seek
+ * arrowhead wings were lengthened 2.4 → 3.0 units to keep the tip weld from
+ * clogging at this weight (the audit flagged >1.6 as the clog threshold). */
+export const STROKE_WIDTH = 1.75;
 
 export const ICONS: Record<MorphName, [Stroke, Stroke, Stroke]> = {
   // Outline triangle; centroid (not bbox) centered so it isn't left-heavy.
@@ -66,37 +69,41 @@ export const ICONS: Record<MorphName, [Stroke, Stroke, Stroke]> = {
   // (counterclockwise = rewind). No numeral — tooltip + time jump carry ±10s.
   seekBack: [
     { d: "M 3.4,9.0 C 4.1,13.0 9.0,14.3 11.6,11.2 C 14.2,8.1 12.0,3.5 8.0,3.5", o: 1 },
-    { d: "M 10.0,2.1 C 9.3,2.6 8.7,3.0 8.0,3.5 C 8.7,4.0 9.3,4.4 10.0,4.9", o: 1 },
+    { d: "M 10.5,1.8 C 9.7,2.4 8.8,2.9 8.0,3.5 C 8.8,4.1 9.7,4.6 10.5,5.2", o: 1 },
     { d: "M 8.0,3.5 C 8.0,3.5 8.0,3.5 8.0,3.5 C 8.0,3.5 8.0,3.5 8.0,3.5", o: 0 },
   ],
   // Exact horizontal mirror (x → 16−x) of seekBack.
   seekFwd: [
     { d: "M 12.6,9.0 C 11.9,13.0 7.0,14.3 4.4,11.2 C 1.8,8.1 4.0,3.5 8.0,3.5", o: 1 },
-    { d: "M 6.0,2.1 C 6.7,2.6 7.3,3.0 8.0,3.5 C 7.3,4.0 6.7,4.4 6.0,4.9", o: 1 },
+    { d: "M 5.5,1.8 C 6.3,2.4 7.2,2.9 8.0,3.5 C 7.2,4.1 6.3,4.6 5.5,5.2", o: 1 },
     { d: "M 8.0,3.5 C 8.0,3.5 8.0,3.5 8.0,3.5 C 8.0,3.5 8.0,3.5 8.0,3.5", o: 0 },
   ],
-  // Containers are cut at their side midpoints (2.5,8)/(13.5,8) into a top
-  // arch (L→R) and bottom arch (R→L). Identical cut + draw direction means
-  // pill↔card is pure vertical inflation with both welds perfectly still.
-  pill: [
-    { d: "M 2.5,8.0 C 2.5,6.3 4.9,5.0 8.0,5.0 C 11.1,5.0 13.5,6.3 13.5,8.0", o: 1 },
-    { d: "M 13.5,8.0 C 13.5,9.7 11.1,11.0 8.0,11.0 C 4.9,11.0 2.5,9.7 2.5,8.0", o: 1 },
-    { d: "M 8.0,11.0 C 8.0,11.0 8.0,11.0 8.0,11.0 C 8.0,11.0 8.0,11.0 8.0,11.0", o: 0 },
+  // Size-ladder pair (v2 — the v1 pill/card/lyrics container pictograms read
+  // as abstract shapes at 13px): the fullscreen-bracket idiom. expand = two
+  // corner brackets on the NE/SW diagonal, corners OUT; contract = the same
+  // brackets flipped in place, corners pointing at the center with shorter
+  // legs receding outward. Contract's corners must stay well apart —
+  // (10,6)/(6,10), non-overlapping leg ranges — or the four axis-aligned
+  // legs visually compose into a plus sign (the failure of a first draft
+  // whose inner corners sat at (9.2,6.8)/(6.8,9.2)).
+  expand: [
+    { d: "M 8.6,3.2 C 10.0,3.2 11.4,3.2 12.8,3.2 C 12.8,4.6 12.8,6.0 12.8,7.4", o: 1 },
+    { d: "M 7.4,12.8 C 6.0,12.8 4.6,12.8 3.2,12.8 C 3.2,11.4 3.2,10.0 3.2,8.6", o: 1 },
+    { d: "M 12.8,3.2 C 12.8,3.2 12.8,3.2 12.8,3.2 C 12.8,3.2 12.8,3.2 12.8,3.2", o: 0 },
   ],
-  // The caption line (stroke 2) is what separates "card" from an empty frame
-  // at 13px — and it is the stroke that becomes lyrics' current-line.
-  card: [
-    { d: "M 2.5,8.0 C 2.5,5.0 4.6,3.5 8.0,3.5 C 11.4,3.5 13.5,5.0 13.5,8.0", o: 1 },
-    { d: "M 13.5,8.0 C 13.5,11.0 11.4,12.5 8.0,12.5 C 4.6,12.5 2.5,11.0 2.5,8.0", o: 1 },
-    { d: "M 5.2,9.8 C 6.1,9.8 7.1,9.8 8.0,9.8 C 8.9,9.8 9.9,9.8 10.8,9.8", o: 1 },
+  contract: [
+    { d: "M 10.0,3.0 C 10.0,4.0 10.0,5.0 10.0,6.0 C 11.0,6.0 12.0,6.0 13.0,6.0", o: 1 },
+    { d: "M 6.0,13.0 C 6.0,12.0 6.0,11.0 6.0,10.0 C 5.0,10.0 4.0,10.0 3.0,10.0", o: 1 },
+    { d: "M 10.0,6.0 C 10.0,6.0 10.0,6.0 10.0,6.0 C 10.0,6.0 10.0,6.0 10.0,6.0", o: 0 },
   ],
-  // Karaoke stack, not a hamburger: centered lines, ragged widths 7/10/5.4,
-  // the long MIDDLE line is the current lyric. Bottom line drawn R→L to
-  // match card's bottom arch direction (zero twist when the arch flattens).
-  lyrics: [
-    { d: "M 4.5,4.0 C 5.7,4.0 6.8,4.0 8.0,4.0 C 9.2,4.0 10.3,4.0 11.5,4.0", o: 1 },
-    { d: "M 10.7,12.0 C 9.8,12.0 8.9,12.0 8.0,12.0 C 7.1,12.0 6.2,12.0 5.3,12.0", o: 1 },
-    { d: "M 3.0,8.0 C 4.7,8.0 6.3,8.0 8.0,8.0 C 9.7,8.0 11.3,8.0 13.0,8.0", o: 1 },
+  // Lyrics view = karaoke = mic (the Spotify-trained association). Head is a
+  // closed 2-cubic ellipse (same construction as note's head) — wide enough
+  // to stay HOLLOW at 13px (a narrower head sealed shut into a lollipop) —
+  // stand is a half-circle arc, stem drops from the arc. All 3 strokes live.
+  mic: [
+    { d: "M 8.0,3.2 C 10.9,3.2 10.9,8.2 8.0,8.2 C 5.1,8.2 5.1,3.2 8.0,3.2", o: 1 },
+    { d: "M 4.6,7.2 C 4.6,9.1 6.1,10.6 8.0,10.6 C 9.9,10.6 11.4,9.1 11.4,7.2", o: 1 },
+    { d: "M 8.0,10.6 C 8.0,11.0 8.0,11.4 8.0,11.8 C 8.0,12.2 8.0,12.6 8.0,13.0", o: 1 },
   ],
   // Eighth note: stem = spine (maps rigidly onto play's left edge), flag =
   // action (curl opens into the apex chevron), notehead = detail (two 180°
