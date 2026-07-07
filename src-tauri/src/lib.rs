@@ -32,22 +32,29 @@ const HK_NEXT: &str = "ctrl+alt+n";
 const HK_PREV: &str = "ctrl+alt+p";
 const HK_TOGGLE: &str = "ctrl+alt+m";
 
+// Every command that touches GSMTC (or the network) is `async` — NOT for
+// concurrency, but to move it OFF the main thread. Tauri runs sync commands
+// on the webview IPC (main/STA) thread, where WinRT's blocking `.get()` can
+// never observe its completion (the STA is parked in the wait) — a cold-cache
+// snapshot there deadlocks the whole app. Async commands run on the async
+// runtime's worker pool, where blocking waits complete normally.
+
 #[tauri::command]
-fn media_play_pause(app: AppHandle) -> bool {
+async fn media_play_pause(app: AppHandle) -> bool {
     let ok = media::play_pause();
     emit_now(&app);
     ok
 }
 
 #[tauri::command]
-fn media_next(app: AppHandle) -> bool {
+async fn media_next(app: AppHandle) -> bool {
     let ok = media::next();
     emit_now(&app);
     ok
 }
 
 #[tauri::command]
-fn media_prev(app: AppHandle) -> bool {
+async fn media_prev(app: AppHandle) -> bool {
     let ok = media::prev();
     emit_now(&app);
     ok
@@ -59,12 +66,12 @@ fn media_prev(app: AppHandle) -> bool {
 // The next heartbeat/event delivers the post-seek timeline within ~500ms.
 
 #[tauri::command]
-fn media_seek_rel(delta_ms: i64) -> bool {
+async fn media_seek_rel(delta_ms: i64) -> bool {
     media::seek_rel_ms(delta_ms)
 }
 
 #[tauri::command]
-fn media_seek_abs(position_ms: i64) -> bool {
+async fn media_seek_abs(position_ms: i64) -> bool {
     media::seek_abs_ms(position_ms)
 }
 
@@ -78,9 +85,9 @@ fn set_reactive_enabled(enabled: bool, state: State<UiReactive>) {
 }
 
 /// Fetch synced/plain lyrics for a track (LRCLIB + disk cache). Blocking
-/// network call — Tauri runs sync commands on a worker thread.
+/// network call — async so it runs on the worker pool, never the main thread.
 #[tauri::command]
-fn media_lyrics(
+async fn media_lyrics(
     app: AppHandle,
     artist: String,
     title: String,
@@ -98,8 +105,8 @@ fn media_lyrics(
 /// Return the cached art data URL if it matches the requested id
 /// (`"{key}:{rev}"` — rev bumps when probing catches a stale first read).
 #[tauri::command]
-fn media_art(art_id: String, cache: State<ArtCache>) -> Option<String> {
-    media::art_url(&cache, &art_id)
+async fn media_art(app: AppHandle, art_id: String) -> Option<String> {
+    media::art_url(&app.state::<ArtCache>(), &art_id)
 }
 
 /// One-shot state read for webview mount/reload. Emits are diff-suppressed,
@@ -108,7 +115,8 @@ fn media_art(art_id: String, cache: State<ArtCache>) -> Option<String> {
 /// lock as emits, so seed seq order is linearized with emit seq order and the
 /// frontend clock's seq guard can trust either source.
 #[tauri::command]
-fn now_playing(app: AppHandle, cache: State<ArtCache>) -> Stamped {
+async fn now_playing(app: AppHandle) -> Stamped {
+    let cache = app.state::<ArtCache>();
     let last = app.state::<LastEmit>();
     let _guard = last.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     Stamped {
