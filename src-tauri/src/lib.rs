@@ -84,8 +84,10 @@ fn set_reactive_enabled(enabled: bool, state: State<UiReactive>) {
     state.0.store(enabled, Ordering::Relaxed);
 }
 
-/// Fetch synced/plain lyrics for a track (LRCLIB + disk cache). Blocking
-/// network call — async so it runs on the worker pool, never the main thread.
+/// Fetch synced/plain lyrics for a track (LRCLIB + disk cache). Worst case
+/// ~15s of blocking network I/O (three sequential 5s-timeout calls), so the
+/// fetch runs on tokio's dedicated blocking pool — an async worker occupied
+/// that long would contend with every other command on the small shared pool.
 #[tauri::command]
 async fn media_lyrics(
     app: AppHandle,
@@ -99,7 +101,16 @@ async fn media_lyrics(
         .app_data_dir()
         .map(|d| d.join("lyrics"))
         .unwrap_or_else(|_| std::env::temp_dir().join("pulse-lyrics"));
-    lyrics::fetch(&dir, &artist, &title, &album, duration_ms)
+    tauri::async_runtime::spawn_blocking(move || {
+        lyrics::fetch(&dir, &artist, &title, &album, duration_ms)
+    })
+    .await
+    // Join error = the fetch panicked; degrade to a miss, not a dead IPC
+    // call — but say so, or a release build swallows the panic invisibly.
+    .unwrap_or_else(|e| {
+        eprintln!("lyrics fetch panicked: {e}");
+        lyrics::Lyrics::default()
+    })
 }
 
 /// Return the cached art data URL if it matches the requested id

@@ -191,7 +191,7 @@ export const commands = {
     title: string,
     album: string,
     durationMs: number,
-  ): Promise<{ synced: string | null; plain: string | null }> {
+  ): Promise<Lyrics> {
     if (!IN_TAURI) {
       // Mock: a line every 4s across the track so preview exercises karaoke.
       const lines = Array.from({ length: Math.floor(durationMs / 4000) }, (_, i) => {
@@ -200,6 +200,45 @@ export const commands = {
       });
       return { synced: lines.join("\n"), plain: null };
     }
-    return invoke("media_lyrics", { artist, title, album, durationMs });
+    return lyricsSingleFlight(() => invoke("media_lyrics", { artist, title, album, durationMs }));
   },
 };
+
+type Lyrics = { synced: string | null; plain: string | null };
+const LYRICS_MISS: Lyrics = { synced: null, plain: null };
+
+let lyricsInFlight = false;
+let lyricsQueued: {
+  start: () => Promise<Lyrics>;
+  resolve: (l: Lyrics | Promise<Lyrics>) => void;
+} | null = null;
+
+/**
+ * Single-flight gate for lyric fetches: a fetch can block for ~15s (LRCLIB
+ * with fallbacks), and useLyrics fires one per track change WITHOUT awaiting
+ * the previous — rapid track-skipping would otherwise fan out concurrent
+ * invokes. At most one runs; a burst collapses to first + latest, and each
+ * displaced request resolves as a miss (its caller's track key is already
+ * stale, so the result is dropped anyway — see useLyrics' lastKey guard).
+ */
+function lyricsSingleFlight(start: () => Promise<Lyrics>): Promise<Lyrics> {
+  if (lyricsInFlight) {
+    lyricsQueued?.resolve(LYRICS_MISS); // displaced — its track is history
+    return new Promise<Lyrics>((resolve) => {
+      lyricsQueued = { start, resolve };
+    });
+  }
+  lyricsInFlight = true;
+  const settle = () => {
+    lyricsInFlight = false;
+    const next = lyricsQueued;
+    lyricsQueued = null;
+    if (next) next.resolve(lyricsSingleFlight(next.start));
+  };
+  return start()
+    .catch(() => LYRICS_MISS)
+    .then((l) => {
+      settle();
+      return l;
+    });
+}
