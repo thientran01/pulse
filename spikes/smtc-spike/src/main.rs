@@ -33,6 +33,115 @@ const APPCOMMAND_MEDIA_FAST_FORWARD: isize = 49;
 const APPCOMMAND_MEDIA_REWIND: isize = 50;
 
 static mut FOUND_HWND: Option<HWND> = None;
+static mut ALL_TITLED: Vec<(isize, String)> = Vec::new();
+
+unsafe extern "system" fn enum_all_cb(hwnd: HWND, _l: LPARAM) -> BOOL {
+    if IsWindowVisible(hwnd).as_bool() {
+        let mut buf = [0u16; 256];
+        let n = GetWindowTextW(hwnd, &mut buf);
+        if n > 0 {
+            let title = String::from_utf16_lossy(&buf[..n as usize]);
+            ALL_TITLED.push((hwnd.0 as isize, title));
+        }
+    }
+    BOOL(1)
+}
+
+/// Windows plausibly belonging to Apple Music (main window + MiniPlayer).
+fn am_windows() -> Vec<(isize, String)> {
+    unsafe {
+        ALL_TITLED = Vec::new();
+        let _ = EnumWindows(Some(enum_all_cb), LPARAM(0));
+        ALL_TITLED
+            .iter()
+            .filter(|(_, t)| t.contains("Apple Music") || t.contains("MiniPlayer"))
+            .cloned()
+            .collect()
+    }
+}
+
+mod uia {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    };
+    use windows::Win32::System::Variant::{VARIANT, VT_I4};
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationRangeValuePattern,
+        TreeScope_Descendants, UIA_RangeValuePatternId, UIA_SliderControlTypeId,
+        UIA_ControlTypePropertyId,
+    };
+
+    /// VT_I4 VARIANT — windows-rs 0.61's Win32 VARIANT has no From impls.
+    fn variant_i32(value: i32) -> VARIANT {
+        let mut v = VARIANT::default();
+        unsafe {
+            (*v.Anonymous.Anonymous).vt = VT_I4;
+            (*v.Anonymous.Anonymous).Anonymous.lVal = value;
+        }
+        v
+    }
+
+    pub struct SliderInfo {
+        pub name: String,
+        pub automation_id: String,
+        pub min: f64,
+        pub max: f64,
+        pub value: f64,
+        pub read_only: bool,
+    }
+
+    pub fn init() -> windows::core::Result<IUIAutomation> {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+        }
+    }
+
+    pub fn find_sliders(
+        uia: &IUIAutomation,
+        hwnd: isize,
+    ) -> windows::core::Result<Vec<(IUIAutomationElement, SliderInfo)>> {
+        unsafe {
+            let root = uia.ElementFromHandle(HWND(hwnd as _))?;
+            let cond = uia.CreatePropertyCondition(
+                UIA_ControlTypePropertyId,
+                &variant_i32(UIA_SliderControlTypeId.0),
+            )?;
+            let found = root.FindAll(TreeScope_Descendants, &cond)?;
+            let mut out = Vec::new();
+            for i in 0..found.Length()? {
+                let el = found.GetElement(i)?;
+                let name = el.CurrentName().map(|s| s.to_string()).unwrap_or_default();
+                let automation_id = el.CurrentAutomationId().map(|s| s.to_string()).unwrap_or_default();
+                let Ok(unk) = el.GetCurrentPattern(UIA_RangeValuePatternId) else {
+                    continue;
+                };
+                let Ok(range) = windows::core::Interface::cast::<IUIAutomationRangeValuePattern>(&unk) else {
+                    continue;
+                };
+                let info = SliderInfo {
+                    name,
+                    automation_id,
+                    min: range.CurrentMinimum().unwrap_or(f64::NAN),
+                    max: range.CurrentMaximum().unwrap_or(f64::NAN),
+                    value: range.CurrentValue().unwrap_or(f64::NAN),
+                    read_only: range.CurrentIsReadOnly().map(|b| b.as_bool()).unwrap_or(true),
+                };
+                out.push((el, info));
+            }
+            Ok(out)
+        }
+    }
+
+    pub fn set_value(el: &IUIAutomationElement, value: f64) -> windows::core::Result<()> {
+        unsafe {
+            let unk = el.GetCurrentPattern(UIA_RangeValuePatternId)?;
+            let range: IUIAutomationRangeValuePattern = windows::core::Interface::cast(&unk)?;
+            range.SetValue(value)
+        }
+    }
+}
 
 unsafe extern "system" fn enum_cb(hwnd: HWND, _l: LPARAM) -> BOOL {
     if IsWindowVisible(hwnd).as_bool() {
@@ -238,6 +347,109 @@ fn main() -> windows::core::Result<()> {
                 tail.get(1).cloned().unwrap_or_default(),
                 tail.first().cloned().unwrap_or_default(),
             );
+        }
+        Some("uialist") => {
+            let u = uia::init().expect("UIA init failed");
+            for (hwnd, title) in am_windows() {
+                println!("window {hwnd:#x} \"{title}\"");
+                match uia::find_sliders(&u, hwnd) {
+                    Ok(sliders) if sliders.is_empty() => println!("  (no RangeValue sliders)"),
+                    Ok(sliders) => {
+                        for (_, s) in sliders {
+                            println!(
+                                "  slider name={:?} id={:?} min={} max={} value={} read_only={}",
+                                s.name, s.automation_id, s.min, s.max, s.value, s.read_only
+                            );
+                        }
+                    }
+                    Err(e) => println!("  UIA error: {e}"),
+                }
+            }
+        }
+        Some("uiaseek") => {
+            // uiaseek <delta-secs> — pick the scrubber (max ≈ SMTC duration),
+            // SetValue, verify via the SMTC timeline.
+            let delta: f64 = args.get(1).and_then(|s| s.parse().ok()).expect("delta secs");
+            let s = find_session(&m, "applemusic").expect("no Apple Music session");
+            let t = s.GetTimelineProperties()?;
+            let dur_s = t.EndTime()?.Duration as f64 / TICKS_PER_SEC as f64;
+            let before = t.Position()?.Duration;
+            let before_s = before as f64 / TICKS_PER_SEC as f64;
+
+            let u = uia::init().expect("UIA init failed");
+            let mut done = false;
+            for (hwnd, title) in am_windows() {
+                let Ok(sliders) = uia::find_sliders(&u, hwnd) else { continue };
+                for (el, info) in sliders {
+                    let looks_like_scrubber = !info.read_only
+                        && info.max > 30.0
+                        && (info.max - dur_s).abs() < 3.0;
+                    println!(
+                        "window \"{title}\" slider {:?}/{:?} max={} (dur={dur_s:.0}) -> scrubber? {looks_like_scrubber}",
+                        info.name, info.automation_id, info.max
+                    );
+                    if !looks_like_scrubber || done {
+                        continue;
+                    }
+                    let target = (info.value + delta).clamp(info.min, info.max);
+                    println!("SetValue {:.1} -> {:.1}", info.value, target);
+                    match uia::set_value(&el, target) {
+                        Ok(()) => done = true,
+                        Err(e) => println!("SetValue failed: {e}"),
+                    }
+                }
+            }
+            if !done {
+                println!("no scrubber accepted SetValue");
+            }
+            sleep(Duration::from_millis(1200));
+            let after = s.GetTimelineProperties()?.Position()?.Duration;
+            println!("smtc before: {}", fmt_ticks(before));
+            println!(
+                "smtc after:  {}  (moved {:+.1}s incl ~1.2s playback, wanted {delta:+.1}s from {before_s:.1}s)",
+                fmt_ticks(after),
+                (after - before) as f64 / TICKS_PER_SEC as f64
+            );
+        }
+        Some("uiaseek2") => {
+            // uiaseek2 <delta-secs> <window-title-match> — seek via ONE window's
+            // scrubber; read back slider value + SMTC at +0.3s and +1.5s.
+            let delta: f64 = args.get(1).and_then(|s| s.parse().ok()).expect("delta secs");
+            let title_match = args.get(2).map(String::as_str).expect("window match");
+            let s = find_session(&m, "applemusic").expect("no Apple Music session");
+            println!("status: {:?}", s.GetPlaybackInfo()?.PlaybackStatus()?);
+            let u = uia::init().expect("UIA init failed");
+            let win = am_windows()
+                .into_iter()
+                .find(|(_, t)| t.to_lowercase().contains(&title_match.to_lowercase()))
+                .expect("no matching AM window");
+            println!("targeting window \"{}\"", win.1);
+            let sliders = uia::find_sliders(&u, win.0).expect("find_sliders failed");
+            let (el, info) = sliders
+                .into_iter()
+                .find(|(_, i)| !i.read_only && i.max > 30.0)
+                .expect("no writable scrubber in this window");
+            let target = (info.value + delta).clamp(info.min, info.max);
+            let smtc_before = s.GetTimelineProperties()?.Position()?.Duration;
+            println!(
+                "slider {:?} value {:.1} -> SetValue {:.1} | smtc {}",
+                info.automation_id, info.value, target, fmt_ticks(smtc_before)
+            );
+            uia::set_value(&el, target).expect("SetValue failed");
+            for wait_ms in [300u64, 1200] {
+                sleep(Duration::from_millis(wait_ms));
+                let slider_now = uia::find_sliders(&u, win.0)
+                    .ok()
+                    .and_then(|v| v.into_iter().find(|(_, i)| !i.read_only && i.max > 30.0))
+                    .map(|(_, i)| i.value)
+                    .unwrap_or(f64::NAN);
+                let smtc_now = s.GetTimelineProperties()?.Position()?.Duration;
+                println!(
+                    "  +{}ms: slider={slider_now:.1} smtc={}",
+                    wait_ms,
+                    fmt_ticks(smtc_now)
+                );
+            }
         }
         Some("amappcmd") => {
             let s = find_session(&m, "applemusic").expect("no Apple Music session");

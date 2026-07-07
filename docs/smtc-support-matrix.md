@@ -40,8 +40,27 @@ SetForegroundWindow grant — the flick itself works; `set_foreground=true`):
 | Synthesize Alt+Ctrl+←/→ (Apple's documented in-song seek) | ❌ swallowed / ≤1s effect, even with KEYEVENTF_EXTENDEDKEY and a Ctrl-tap (not Alt-tap) foreground grant |
 
 **Verdict:** keystroke injection is unusable for AM seek. M1 ships AM with a display-only
-progress bar (±10s buttons capability-gated off). Next candidate: UI Automation
-RangeValuePattern on AM's scrubber slider (no focus needed, absolute seek) — spun off as its own task.
+progress bar (±10s buttons capability-gated off).
+
+## UIA scrubber-slider fallback tested (2026-07-06, post-v1 spike)
+
+Both AM windows expose their scrubber via UIA with a writable RangeValuePattern
+(`smtc-spike uialist` / `uiaseek2`, AM 1.1540):
+
+| Window | Slider | Range | RangeValue.SetValue result |
+|---|---|---|---|
+| "Apple Music" (main) | `LCDScrubber` | 0..duration s | ✅ returns S_OK → ❌ **silently ignored** (slider keeps advancing with playback, SMTC unmoved) |
+| "MiniPlayer" | `Scrubber` | 0..duration s | ✅ returns S_OK → thumb **visually moves**, then **snaps back ~1s later**; SMTC never moves |
+
+AM's seek is wired to the pointer **drag gesture**, not the slider's value property —
+programmatic value writes are reverted by the app's own re-sync.
+
+**Final verdict: Apple Music on Windows has no working programmatic seek path.**
+SMTC `TryChangePlaybackPosition` ignored · synthesized keyboard accelerators swallowed
+or track-skip · UIA RangeValue fail-silent/revert. The only remaining route is real
+pointer emulation on a visible window (steals the cursor — rejected by design).
+`can_seek` stays false for AM until Apple fixes their SMTC handler; re-run
+`smtc-spike seekrel applemusic -10` after AM updates to check.
 
 ## Raw spike commands
 
