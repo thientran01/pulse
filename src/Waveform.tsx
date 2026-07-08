@@ -38,7 +38,9 @@ type Phase = "alive" | "dots" | "three" | "one" | "rest";
 /** Bars → dots retraction; also the survivor's grow-to-middot beat, which
  * must run its full height/width transition before the rest handoff. */
 const DOTS_MS = 220; // DUR[4]
-/** Each vanishing pair. */
+/** Beat spacing between vanishing pairs. Their fades run 200ms (DUR[3]) on
+ * this 140ms beat, so the outer pair is still dissolving when the inner
+ * pair starts — a cascade, not discrete steps. */
 const DROP_MS = 140; // DUR[2]
 
 /** Wake state survives mode-switch remounts (the mode-keyed subtree tears
@@ -56,7 +58,7 @@ function barClass(phase: Phase, i: number): string {
   // The survivor grows to the middot's 3px once it's alone, so the final
   // layer handoff is pixel-perfect.
   const size = mid && (phase === "one" || phase === "rest") ? "h-[3px] w-[3px]" : "h-[2px] w-[2px]";
-  return `${size} ${dropped ? "opacity-0" : "opacity-100"} [transition:height_220ms_var(--ease-out-tk),width_220ms_var(--ease-out-tk),transform_220ms_var(--ease-out-tk),opacity_140ms_var(--ease-out-tk)]`;
+  return `${size} ${dropped ? "opacity-0 blur-[1.5px]" : "opacity-100 blur-0"} [transition:height_220ms_var(--ease-out-tk),width_220ms_var(--ease-out-tk),transform_220ms_var(--ease-out-tk),opacity_200ms_var(--ease-out-tk),filter_200ms_var(--ease-out-tk)]`;
 }
 
 export function Waveform({ trailing }: { trailing?: boolean }) {
