@@ -21,7 +21,7 @@ type Mode = "pill" | "card" | "expanded";
  * (200ms EASE.inOut on the Rust side) while the content morphs. */
 const MODE_SIZES: Record<Mode, [number, number]> = {
   pill: [300, 48],
-  card: [380, 124],
+  card: [380, 164], // art row + centered transport + full-width progress
   expanded: [380, 440], // lyrics home; big-art fallback gets breathing room
 };
 
@@ -1028,27 +1028,32 @@ function App() {
             <Hairline np={np} />
           </>
         ) : mode === "card" ? (
-          <div className="flex h-full items-center gap-3 px-3">
-            <Art url={shownArt} size={72} radiusPx={8} />
-            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <div className="flex items-center gap-1">
-                <p className="min-w-0 flex-1 truncate text-[15px] font-medium text-fg">{np.title}</p>
-                {/* Windows routes commands to the OS "current" session, which
-                    hops between apps — always show which app this card controls. */}
-                <PlayerBadge player={np.player} />
-                <ModeButton to="contract" label="Collapse to pill" slot="mode-secondary" onClick={() => setMode("pill")} />
-                <ModeButton to="mic" label="Show lyrics" slot="mode-primary" onClick={() => setMode("expanded")} />
+          <div className="flex h-full flex-col gap-1 px-3 pb-1.5 pt-2.5">
+            <div className="flex min-h-0 flex-1 items-center gap-3">
+              <Art url={shownArt} size={72} radiusPx={8} />
+              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <div className="flex items-center gap-1">
+                  <p className="min-w-0 flex-1 truncate text-[15px] font-medium text-fg">{np.title}</p>
+                  {/* Windows routes commands to the OS "current" session, which
+                      hops between apps — always show which app this card controls. */}
+                  <PlayerBadge player={np.player} />
+                  <ModeButton to="contract" label="Collapse to pill" slot="mode-secondary" onClick={() => setMode("pill")} />
+                  <ModeButton to="mic" label="Show lyrics" slot="mode-primary" onClick={() => setMode("expanded")} />
+                </div>
+                <p className="truncate text-xs text-muted">
+                  {np.artist}
+                  <Waveform trailing={!np.album} />
+                  {np.album}
+                </p>
               </div>
-              <p className="truncate text-xs text-muted">
-                {np.artist}
-                <Waveform trailing={!np.album} />
-                {np.album}
-              </p>
-              <div className="mt-0.5">
-                <Transport np={np} seekable={seekable} playing={playing} />
-              </div>
-              <ProgressBar np={np} />
             </div>
+            {/* Same bottom-chrome seats as ExpandedView — centered transport
+                over a full-width progress bar — so the card↔expanded morph
+                keeps them in place. */}
+            <div className="flex justify-center">
+              <Transport np={np} seekable={seekable} playing={playing} />
+            </div>
+            <ProgressBar np={np} />
           </div>
         ) : (
           <ExpandedView
