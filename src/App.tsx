@@ -259,7 +259,10 @@ function LyricsPanel({
           // highlight to the successor whenever the gap to it is under the
           // lead. [t - lead, next.t - lead) is the only interval guaranteed to
           // highlight the clicked line — and the runway into the vocal is what
-          // a click-to-sing-along wants anyway.
+          // a click-to-sing-along wants anyway. (The 0-clamp voids the
+          // guarantee for lines inside the first lead-width of the track —
+          // there is no earlier position to seek to; a neighboring intro line
+          // may highlight instead.)
           commands.seekAbs(Math.max(line.t - leadMs, 0));
           setManualOffset(null); // hand control back to auto-follow
           window.clearTimeout(resumeTimer.current);

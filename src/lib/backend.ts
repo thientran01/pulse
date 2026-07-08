@@ -179,8 +179,10 @@ export const commands = {
       const now = Date.now();
       if (mock.status === "playing") {
         // Pause: freeze the hidden truth; AM's frozen-timeline push reports
-        // the floor with a fresh stamp.
-        amTruth = { pos: Math.min(amTruth.pos + (now - amTruth.at), MOCK_DURATION), at: now };
+        // the floor with a fresh stamp. Wrap like the playing tick does — a
+        // clamp here pins a near-boundary pause at exactly track-end until the
+        // next tick's % corrects it.
+        amTruth = { pos: (amTruth.pos + (now - amTruth.at)) % MOCK_DURATION, at: now };
         pushMock({
           status: "paused",
           position_ms: Math.floor(amTruth.pos / 1000) * 1000,
