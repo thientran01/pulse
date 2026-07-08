@@ -63,22 +63,25 @@ pointer emulation on a visible window (steals the cursor — rejected by design)
 `can_seek` stays false for AM until Apple fixes their SMTC handler; re-run
 `smtc-spike seekrel applemusic -10` after AM updates to check.
 
-## How the frontend consumes these timelines (PRs #15–#18 + PR 4, 2026-07-07)
+## How the frontend consumes these timelines (PRs #15–#18, #22, #23)
 
 The per-player timing quirks above land in exactly two frontend tables — keep them in
 sync with this matrix if a player update changes its push profile:
 
 | Constant | Where | apple_music | spotify | Meaning |
 |---|---|---|---|---|
-| `JITTER_BAND_MS` | `src/lib/posClock.ts` | 1200 | 400 | Backward deltas under this are quantization jitter — held, not adopted |
-| `VOCAL_LEAD_MS` | `src/lib/lrc.ts` | 550* | 50* | Lyric highlight leads the reported position by this much |
+| `JITTER_BAND_MS` | `src/lib/posClock.ts` | 2000 | 400 | Backward deltas under this are quantization jitter — held, not adopted (AM sized from the #22 soak's measured ~1.5s tail, finding 9) |
+| `VOCAL_LEAD_MS` | `src/lib/lrc.ts` | 0* | 50* | Lyric highlight leads the reported position by this much |
 
-\* pre-soak guesses — tune during the live soak (PR 4) and update this table with the
-final values.
+\* AM starts at 0 because the #22 soak showed its clock rides ~0.5–1s HOT
+(freeze-at-max + the 2s band ratchet the display above the floored reports) — the ride
+already acts as the lead. Both values are untuned: measure against real vocals and
+update this table with the finals.
 
 The backend emits raw `(position_ms, position_at_ms)` pairs and never projects;
 `posClock.ts` is the one monotonic display clock. AM's 1s-floored positions are why a
-fresh pair can project up to ~1s behind the running clock — reproduce this in a plain
+fresh pair projects behind the running clock (~1s from quantization alone; ~1.5s with
+stamp/delivery lag, finding 9) — reproduce the quantization component in a plain
 browser with `npm run dev` → `/?am` (mock switches to the AM profile: floored positions,
 irregular push cadence, pause-era stamp on resume, `can_seek: false`).
 

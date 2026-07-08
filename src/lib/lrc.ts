@@ -33,7 +33,10 @@ export function parseLrc(lrc: string): LyricLine[] {
  * search and the boundary scheduler can never disagree about where a line
  * starts. */
 export const VOCAL_LEAD_MS: Record<NowPlaying["player"], number> = {
-  apple_music: 550, // soak-tune: ~1s position floor, so the lag centers ~500ms
+  // The #22 soak showed the AM clock rides ~0.5–1s HOT (freeze-at-max +
+  // 2000ms band ratchet the display above the floored reports) — that ride
+  // already IS the lead. Start at 0; measure live before adding any.
+  apple_music: 0,
   spotify: 50, // soak-tune: ms-precise timeline, lead only covers render lag
   other: 250,
   none: 250, // unreachable (no lyrics without a session) — table completeness
