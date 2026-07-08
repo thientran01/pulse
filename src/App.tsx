@@ -4,7 +4,7 @@ import { PlayerMark } from "./icons/badges";
 import { MorphIcon } from "./icons/MorphIcon";
 import { useSeekTick } from "./icons/useSeekTick";
 import { commands, onNowPlaying } from "./lib/backend";
-import { currentLineIndex, msUntilNextLine, parseLrc, type LyricLine } from "./lib/lrc";
+import { currentLineIndex, msUntilNextLine, parseLrc, VOCAL_LEAD_MS, type LyricLine } from "./lib/lrc";
 import { extractAccent } from "./lib/palette";
 import * as posClock from "./lib/posClock";
 import { initReactive } from "./lib/reactive";
@@ -36,18 +36,18 @@ function fmt(ms: number): string {
  * clock — never blind-incremented — so throttled webview timers can only
  * delay a transition, never derail it. Transitions land with timer precision
  * instead of on a 250ms sampling grid. */
-function useLyricIndex(lines: LyricLine[]): number {
-  const [idx, setIdx] = useState(() => currentLineIndex(lines, posClock.now()));
+function useLyricIndex(lines: LyricLine[], leadMs: number): number {
+  const [idx, setIdx] = useState(() => currentLineIndex(lines, posClock.now(), leadMs));
   useEffect(() => {
     let timer: number | undefined;
     const sync = () => {
       window.clearTimeout(timer);
       timer = undefined;
       const pos = posClock.now();
-      const i = currentLineIndex(lines, pos);
+      const i = currentLineIndex(lines, pos, leadMs);
       setIdx(i); // same value → React bails
       if (!posClock.isPlaying()) return; // clock frozen — anchor event re-arms
-      const delay = msUntilNextLine(lines, i, pos);
+      const delay = msUntilNextLine(lines, i, pos, leadMs);
       if (delay === null) return; // last line — nothing left to schedule
       // Cap long waits and re-verify on fire, against timer throttling.
       timer = window.setTimeout(sync, Math.min(delay, 30_000));
@@ -58,7 +58,7 @@ function useLyricIndex(lines: LyricLine[]): number {
       unsubscribe();
       window.clearTimeout(timer);
     };
-  }, [lines]);
+  }, [lines, leadMs]);
   return idx;
 }
 
@@ -184,8 +184,16 @@ const LyricLineRow = memo(function LyricLineRow({
   );
 });
 
-function LyricsPanel({ lines, seekable }: { lines: LyricLine[]; seekable: boolean }) {
-  const idx = useLyricIndex(lines);
+function LyricsPanel({
+  lines,
+  seekable,
+  leadMs,
+}: {
+  lines: LyricLine[];
+  seekable: boolean;
+  leadMs: number;
+}) {
+  const idx = useLyricIndex(lines, leadMs);
   const viewportRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const [autoOffset, setAutoOffset] = useState(0);
@@ -246,7 +254,13 @@ function LyricsPanel({ lines, seekable }: { lines: LyricLine[]; seekable: boolea
           const row = (e.target as HTMLElement).closest("[data-line]");
           const line = row ? lines[Number(row.getAttribute("data-line"))] : undefined;
           if (!line) return;
-          commands.seekAbs(line.t);
+          // Land the lead ahead of the line start: the highlight maps position
+          // p to the line whose t ≤ p + lead, so seeking to t itself flips the
+          // highlight to the successor whenever the gap to it is under the
+          // lead. [t - lead, next.t - lead) is the only interval guaranteed to
+          // highlight the clicked line — and the runway into the vocal is what
+          // a click-to-sing-along wants anyway.
+          commands.seekAbs(Math.max(line.t - leadMs, 0));
           setManualOffset(null); // hand control back to auto-follow
           window.clearTimeout(resumeTimer.current);
         }}
@@ -808,7 +822,7 @@ function App() {
               <PlayerBadge player={np.player} />
               <ModeButton to="contract" label="Collapse to card" slot="mode-primary" onClick={() => setMode("card")} />
             </div>
-            <LyricsPanel lines={lyrics.lines} seekable={seekable} />
+            <LyricsPanel lines={lyrics.lines} seekable={seekable} leadMs={VOCAL_LEAD_MS[np.player]} />
             <div className="flex justify-center">
               <Transport np={np} seekable={seekable} playing={playing} />
             </div>

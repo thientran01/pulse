@@ -1,3 +1,5 @@
+import type { NowPlaying } from "../types";
+
 export interface LyricLine {
   /** Line start in ms. */
   t: number;
@@ -24,13 +26,22 @@ export function parseLrc(lrc: string): LyricLine[] {
 }
 
 /** The highlight leads the vocal by this much — SMTC positions lag what the
- * user actually hears. One constant so the index search and the boundary
- * scheduler can never disagree about where a line starts. */
-export const VOCAL_LEAD_MS = 250;
+ * user actually hears, by a per-player amount: Apple Music floors its pushed
+ * positions to whole seconds (up to ~1s behind the audio), Spotify pushes
+ * ms-precise pairs. Values are pre-soak guesses — tune during the live soak.
+ * One table, threaded as a parameter to both functions below, so the index
+ * search and the boundary scheduler can never disagree about where a line
+ * starts. */
+export const VOCAL_LEAD_MS: Record<NowPlaying["player"], number> = {
+  apple_music: 550, // soak-tune: ~1s position floor, so the lag centers ~500ms
+  spotify: 50, // soak-tune: ms-precise timeline, lead only covers render lag
+  other: 250,
+  none: 250, // unreachable (no lyrics without a session) — table completeness
+};
 
 /** Index of the line active at `positionMs` (-1 before the first line). */
-export function currentLineIndex(lines: LyricLine[], positionMs: number): number {
-  const p = positionMs + VOCAL_LEAD_MS;
+export function currentLineIndex(lines: LyricLine[], positionMs: number, leadMs: number): number {
+  const p = positionMs + leadMs;
   let lo = 0;
   let hi = lines.length - 1;
   let ans = -1;
@@ -50,8 +61,13 @@ export function currentLineIndex(lines: LyricLine[], positionMs: number): number
  * `idx` is the last line (nothing left to schedule). Guaranteed positive when
  * `idx === currentLineIndex(lines, positionMs)` — a position at the boundary
  * already belongs to the next line. */
-export function msUntilNextLine(lines: LyricLine[], idx: number, positionMs: number): number | null {
+export function msUntilNextLine(
+  lines: LyricLine[],
+  idx: number,
+  positionMs: number,
+  leadMs: number,
+): number | null {
   const next = lines[idx + 1];
   if (!next) return null;
-  return Math.max(next.t - VOCAL_LEAD_MS - positionMs, 0);
+  return Math.max(next.t - leadMs - positionMs, 0);
 }
