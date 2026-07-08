@@ -21,7 +21,7 @@ type Mode = "pill" | "card" | "expanded";
  * (200ms EASE.inOut on the Rust side) while the content morphs. */
 const MODE_SIZES: Record<Mode, [number, number]> = {
   pill: [300, 48],
-  card: [380, 152], // art row + centered transport + full-width progress
+  card: [380, 138], // art row + centered transport + full-width progress
   expanded: [380, 440], // lyrics home; big-art fallback gets breathing room
 };
 
@@ -1029,16 +1029,13 @@ function App() {
           </>
         ) : mode === "card" ? (
           <div className="flex h-full flex-col gap-1 px-3 pb-1 pt-3">
-            {/* Art anchors the left, spanning title through transport: its top
-                aligns with the title, its bottom with the media controls. The
-                right column stretches to the art's height so mt-auto can seat
-                the transport's bottom edge on the art's. */}
-            <div className="flex gap-3">
-              <Art url={shownArt} size={100} radiusPx={10} />
+            {/* items-end seats the art's bottom edge level with the transport
+                row (the column's last child) — the art hangs low-left, level
+                with the controls, instead of islanding in the top corner. */}
+            <div className="flex items-end gap-3">
+              <Art url={shownArt} size={64} radiusPx={8} />
               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                {/* -mt-1 optically aligns the title's cap line (not its line
-                    box) with the art's top edge. */}
-                <div className="-mt-1 flex items-center gap-1">
+                <div className="flex items-center gap-1">
                   <p className="min-w-0 flex-1 truncate text-[15px] font-medium text-fg">{np.title}</p>
                   {/* Windows routes commands to the OS "current" session, which
                       hops between apps — always show which app this card controls. */}
@@ -1051,7 +1048,7 @@ function App() {
                   <Waveform trailing={!np.album} />
                   {np.album}
                 </p>
-                <div className="mt-auto flex justify-center">
+                <div className="mt-1 flex justify-center">
                   <Transport np={np} seekable={seekable} playing={playing} />
                 </div>
               </div>
