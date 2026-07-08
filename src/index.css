@@ -77,7 +77,49 @@ body {
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important; /* staggered delays = discrete pops */
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+  }
+}
+
+/* Lyrics arrival cascade: rows radiate outward from the current line — each
+ * row's --cascade-delay is its distance from the mount anchor (see
+ * CASCADE_* in App.tsx). Inert without .lyrics-entering on the list, which
+ * LyricsPanel removes once the entrance settles. */
+@keyframes lyric-cascade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.lyrics-entering [data-cascade] {
+  animation: lyric-cascade-in 200ms var(--ease-out-tk) both;
+  animation-delay: var(--cascade-delay, 0ms);
+}
+
+/* The accent marker ignites LAST — color as the closing beat, the separator
+ * ladder's grammar. Scoped to the ANCHOR row only: a mid-entrance line
+ * advance ignites the new row's marker instantly instead of inheriting the
+ * hold. 600ms ≈ cascade base + capped stagger + row animation; keep in sync
+ * with ENTRANCE_DONE_MS in App.tsx. */
+.lyrics-entering [data-anchor] [data-marker] {
+  transition-delay: 600ms;
+}
+
+/* Caption fade for the big-art view's reserved slot ("Finding lyrics…" /
+ * "No synced lyrics") — an animation, not a transition, so it runs on mount. */
+@keyframes caption-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
   }
 }

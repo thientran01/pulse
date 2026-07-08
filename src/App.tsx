@@ -1,5 +1,5 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { motion, useReducedMotion } from "motion/react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { PlayerMark } from "./icons/badges";
 import { MorphIcon } from "./icons/MorphIcon";
 import { useSeekTick } from "./icons/useSeekTick";
@@ -105,14 +105,26 @@ function useArt(artId: string | null): string | null {
   return artId ? url : null;
 }
 
-type LyricsState = { status: "loading" | "none" } | { status: "synced"; lines: LyricLine[] };
+type LyricsState =
+  | { status: "loading" | "none" }
+  | { status: "synced"; lines: LyricLine[]; key: string };
+
+/** The track identity a lyric fetch is keyed on. Consumers compare a synced
+ * state's stamped key against the CURRENT track's key before rendering —
+ * useLyrics flips to "loading" one render after a track change, and that
+ * one-render gap would otherwise pair the new track's header with the old
+ * track's lines (and freeze that ghost into an exit animation). */
+function lyricsKeyOf(np: NowPlaying | null): string | null {
+  return np && np.player !== "none" && np.title && np.duration_ms > 0
+    ? `${np.artist}|${np.title}|${np.album}|${np.duration_ms}`
+    : null;
+}
 
 /** Fetch + parse synced lyrics per track; "none" is a definitive miss. */
 function useLyrics(np: NowPlaying | null): LyricsState {
   const [state, setState] = useState<LyricsState>({ status: "none" });
   const lastKey = useRef<string | null>(null);
-  const trackable = np && np.player !== "none" && np.title && np.duration_ms > 0;
-  const key = trackable ? `${np.artist}|${np.title}|${np.album}|${np.duration_ms}` : null;
+  const key = lyricsKeyOf(np);
   useEffect(() => {
     if (!key || !np) {
       lastKey.current = null;
@@ -128,7 +140,7 @@ function useLyrics(np: NowPlaying | null): LyricsState {
       // Cap far beyond any real song (~100 lines) — a pathological LRC file
       // shouldn't turn into thousands of DOM nodes.
       const lines = l.synced ? parseLrc(l.synced).slice(0, 600) : [];
-      setState(lines.length > 0 ? { status: "synced", lines } : { status: "none" });
+      setState(lines.length > 0 ? { status: "synced", lines, key } : { status: "none" });
     });
     return () => {
       alive = false;
@@ -140,6 +152,22 @@ function useLyrics(np: NowPlaying | null): LyricsState {
 
 const BROWSE_RESUME_MS = 3500;
 
+/** Arrival cascade (index.css `.lyrics-entering`): rows radiate outward from
+ * the current line. The step is per-row stagger spacing (like the settle
+ * ladder's beat constants, it lives off the DUR scale deliberately — it's
+ * spacing, not a duration); distance caps so far rows arrive together
+ * instead of trailing forever. */
+const CASCADE_STEP_MS = 30;
+const CASCADE_CAP = 10;
+/** Head start so the art view's exhale clears before rows land. */
+const CASCADE_BASE_MS = 90; // DUR[1]
+/** base + cap*step + row animation (200ms) + slack; also bounds the anchor
+ * marker's ignite — keep in sync with the 600ms transition-delay in
+ * index.css. The class is removed only AFTER every row animation has
+ * finished — ripping it off mid-cascade would snap fill-mode-held rows to
+ * full opacity in one frame. */
+const ENTRANCE_DONE_MS = 800;
+
 /** One lyric line. Memoized so a line advance reconciles the two rows whose
  * `current` flipped instead of the whole list; clicks are delegated to the
  * list container via data-line, so rows carry no per-render closures. */
@@ -148,11 +176,21 @@ const LyricLineRow = memo(function LyricLineRow({
   index,
   current,
   seekable,
+  cascadeDelayMs,
+  anchor,
 }: {
   text: string;
   index: number;
   current: boolean;
   seekable: boolean;
+  /** Stable per mount — distance from the line that was current when the
+   * panel mounted. Inert until the container carries .lyrics-entering. */
+  cascadeDelayMs: number;
+  /** The mount anchor: the ONLY row whose marker is held back for the
+   * closing ignite beat. Scoping the hold here (not to whatever row is
+   * current) means a mid-entrance line advance ignites the new row's marker
+   * instantly — no JS disarm, no engine-dependent delay retargeting. */
+  anchor: boolean;
 }) {
   const Tag = seekable ? "button" : "div";
   return (
@@ -168,6 +206,9 @@ const LyricLineRow = memo(function LyricLineRow({
             tabIndex: -1,
           }
         : {})}
+      data-cascade
+      {...(anchor ? { "data-anchor": true } : {})}
+      style={{ "--cascade-delay": `${cascadeDelayMs}ms` } as React.CSSProperties}
       className={`relative rounded-md px-3 py-1 text-left text-base leading-normal transition-colors duration-3 ease-out-tk ${
         current ? "font-medium text-fg" : "text-muted/80"
       } ${seekable ? "cursor-pointer hover:bg-fg/5" : ""}`}
@@ -175,6 +216,7 @@ const LyricLineRow = memo(function LyricLineRow({
       {/* Accent lives on the marker, never the text (contrast floor is 3:1). */}
       <span
         aria-hidden
+        data-marker
         className={`absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-accent transition-opacity duration-3 ease-out-tk ${
           current ? "opacity-100" : "opacity-0"
         }`}
@@ -188,10 +230,15 @@ function LyricsPanel({
   lines,
   seekable,
   leadMs,
+  entrance = false,
 }: {
   lines: LyricLine[];
   seekable: boolean;
   leadMs: number;
+  /** True when this mount is a real within-expanded arrival (the user was
+   * watching the big-art fallback) — plays the anchor-outward cascade and
+   * holds the accent marker back as the closing beat. */
+  entrance?: boolean;
 }) {
   const idx = useLyricIndex(lines, leadMs);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -200,6 +247,26 @@ function LyricsPanel({
   // Wheel-scrolling pauses auto-follow; it resumes after a short idle.
   const [manualOffset, setManualOffset] = useState<number | null>(null);
   const resumeTimer = useRef<number | undefined>(undefined);
+
+  // The anchor line at mount — cascade delays radiate from it, stable across
+  // re-renders so a mid-entrance line advance can't reshuffle delays. The
+  // entrance ends by timeout only (after every row animation has finished);
+  // the marker-hold is scoped to the anchor row via data-anchor, so nothing
+  // needs disarming when the song advances mid-cascade.
+  const entranceIdx = useRef(idx);
+  const [entering, setEntering] = useState(entrance);
+  useEffect(() => {
+    if (!entering) return;
+    const t = window.setTimeout(() => setEntering(false), ENTRANCE_DONE_MS);
+    return () => window.clearTimeout(t);
+  }, [entering]);
+
+  // The mount anchor must not animate: the offsetTop/clientHeight reads in
+  // the layout effect force a reflow at translateY(0) BEFORE the offset
+  // lands, which arms the transform transition and slides the whole list
+  // ~hundreds of px on mount. Transition class only after the first paint.
+  const [anchored, setAnchored] = useState(false);
+  useEffect(() => setAnchored(true), []);
 
   const maxOffset = (): number => {
     const viewport = viewportRef.current;
@@ -268,8 +335,8 @@ function LyricsPanel({
           window.clearTimeout(resumeTimer.current);
         }}
         className={`flex flex-col gap-1 py-4 will-change-transform ${
-          browsing ? "" : "[transition:transform_220ms_var(--ease-in-out-tk)]"
-        }`}
+          browsing || !anchored ? "" : "[transition:transform_220ms_var(--ease-in-out-tk)]"
+        } ${entering ? "lyrics-entering" : ""}`}
         style={{ transform: `translateY(${-offset}px)` }}
       >
         {lines.map((line, i) => (
@@ -279,6 +346,11 @@ function LyricsPanel({
             index={i}
             current={i === idx}
             seekable={seekable}
+            anchor={i === Math.max(entranceIdx.current, 0)}
+            cascadeDelayMs={
+              CASCADE_BASE_MS +
+              Math.min(Math.abs(i - Math.max(entranceIdx.current, 0)), CASCADE_CAP) * CASCADE_STEP_MS
+            }
           />
         ))}
       </div>
@@ -693,6 +765,175 @@ function Transport({ np, seekable, playing }: { np: NowPlaying; seekable: boolea
   );
 }
 
+/** How soon after entering expanded a lyrics resolve still counts as "already
+ * there": inside this window the swap renders plain (no arrival cascade), so
+ * the inner choreography never stacks on the mode morph's tail. */
+const SNAP_WINDOW_MS = 300;
+/** Entrance delay on the entering view so the exit visibly leads — the
+ * overlap reads as one gesture (off the DUR scale deliberately: it's an
+ * offset between beats, not a duration). */
+const EXIT_LEAD_MS = 40;
+
+/**
+ * Expanded mode: big-art fallback while lyrics fetch, karaoke view once they
+ * land. Transport, progress, badge and the collapse button are HOISTED out of
+ * the swap — chrome holds perfectly still (and the rAF-driven progress fill
+ * never remounts mid-write); only the content region crossfades. The arrival
+ * is choreographed (art exhales with the house blur, rows cascade outward
+ * from the current line, the accent marker ignites last); the reverse — a
+ * track change — exits fast and plain: continuity is earned by content
+ * identity, and the outgoing view's art/lyrics belong to the outgoing track.
+ */
+function ExpandedView({
+  np,
+  artUrl,
+  lyrics,
+  seekable,
+  playing,
+  onCollapse,
+}: {
+  np: NowPlaying;
+  artUrl: string | null;
+  lyrics: LyricsState;
+  seekable: boolean;
+  playing: boolean;
+  onCollapse: () => void;
+}) {
+  const reducedMotion = useReducedMotion();
+  // Key-stamped gate: never render the new track's header over the old
+  // track's lines during useLyrics' one-render loading gap (see lyricsKeyOf).
+  const lyricsLive = lyrics.status === "synced" && lyrics.key === lyricsKeyOf(np);
+
+  // The arrival cascade is earned by a real wait: the art view must have been
+  // on screen past the snap window. Stamped in an effect (post-commit), read
+  // on the later render the swap triggers. The clock restarts per TRACK, not
+  // just per lyricsLive edge — a none→loading track change keeps lyricsLive
+  // false throughout, and the stale timestamp would let the next track's
+  // instant resolve wrongly earn the cascade.
+  const trackKey = lyricsKeyOf(np);
+  const artShownAt = useRef<number | null>(null);
+  useEffect(() => {
+    artShownAt.current = null;
+  }, [trackKey]);
+  useEffect(() => {
+    if (lyricsLive) {
+      artShownAt.current = null;
+    } else if (artShownAt.current === null) {
+      artShownAt.current = performance.now();
+    }
+  });
+  const celebrate =
+    !reducedMotion &&
+    artShownAt.current !== null &&
+    performance.now() - artShownAt.current > SNAP_WINDOW_MS;
+
+  const swap = {
+    initial: reducedMotion ? {} : { opacity: 0 },
+    animate: { opacity: 1, filter: "blur(0px)" },
+    transition: {
+      duration: reducedMotion ? 0 : DUR[3] / 1000,
+      delay: reducedMotion ? 0 : EXIT_LEAD_MS / 1000,
+      ease: [...EASE.out] as [number, number, number, number],
+    },
+  };
+  const exitFast = {
+    duration: reducedMotion ? 0 : DUR[2] / 1000,
+    ease: [...EASE.out] as [number, number, number, number],
+  };
+
+  return (
+    <div className="relative flex h-full flex-col gap-2 px-3 pb-2 pt-3">
+      {/* Pinned chrome — identical seat in both states, so it never moves.
+          top-5 centers the 28px buttons on the lyrics header's 44px art row
+          (pt-3 + (44-28)/2), where they used to live inline. */}
+      <div className="absolute right-2 top-5 z-10 flex items-center gap-1">
+        <PlayerBadge player={np.player} />
+        <ModeButton to="contract" label="Collapse to card" slot="mode-primary" onClick={onCollapse} />
+      </div>
+      <div className="relative min-h-0 flex-1">
+        <AnimatePresence initial={false}>
+          {lyricsLive ? (
+            <motion.div
+              // Keyed per TRACK: a fast resolve landing inside the previous
+              // lyrics view's 140ms exit window would otherwise re-adopt the
+              // exiting fiber — stale LyricsPanel state (entrance, anchored
+              // transition) would animate a slide to the new track's offset.
+              key={`lyrics:${lyrics.key}`}
+              {...swap}
+              // pointerEvents dies at exit start — a stray click during the
+              // reverse fade must not seek the NEW track to a dead line.
+              exit={{ opacity: 0, pointerEvents: "none", transition: exitFast }}
+              className="absolute inset-0 flex flex-col gap-2"
+            >
+              <div className="flex items-center gap-2.5 pr-16">
+                <Art url={artUrl} size={44} radiusPx={6} />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[15px] font-medium text-fg">{np.title}</p>
+                  <p className="truncate text-[13px] text-muted">
+                    {np.artist}
+                    <Waveform trailing />
+                  </p>
+                </div>
+              </div>
+              <LyricsPanel
+                lines={lyrics.lines}
+                seekable={seekable}
+                leadMs={VOCAL_LEAD_MS[np.player]}
+                entrance={celebrate}
+              />
+            </motion.div>
+          ) : (
+            <motion.div
+              key="art"
+              {...swap}
+              // The art dissolves IN PLACE — the house exit language (blur +
+              // opacity, zero transforms; the art never moves, even to leave).
+              exit={{
+                opacity: 0,
+                filter: reducedMotion ? "blur(0px)" : "blur(1.5px)",
+                transition: exitFast,
+              }}
+              className="absolute inset-0 flex flex-col items-center justify-center gap-3"
+            >
+              <Art url={artUrl} size={190} radiusPx={12} />
+              <div className="min-w-0 self-stretch text-center">
+                <p className="truncate text-sm font-medium text-fg">{np.title}</p>
+                <p className="truncate text-xs text-muted">
+                  {np.artist}
+                  <Waveform trailing={!np.album} />
+                  {np.album}
+                </p>
+                {/* Height-reserved caption slot: the caption fading in must
+                    not re-center the column and shift the art (it did — every
+                    lyrics miss nudged the 190px cover ~7px). "Finding
+                    lyrics…" waits 400ms so fast fetches never flash it, and
+                    turns the eventual arrival into an answered question. */}
+                <p className="mt-0.5 h-[15px] text-[10px] text-muted">
+                  {lyrics.status !== "synced" && (
+                    <span
+                      key={lyrics.status}
+                      className={`inline-block animate-[caption-in_200ms_var(--ease-out-tk)_both] ${
+                        lyrics.status === "loading" ? "[animation-delay:400ms]" : ""
+                      }`}
+                    >
+                      {lyrics.status === "loading" ? "Finding lyrics…" : "No synced lyrics"}
+                    </span>
+                  )}
+                </p>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+      {/* Hoisted chrome: one seat for both states. */}
+      <div className="flex justify-center">
+        <Transport np={np} seekable={seekable} playing={playing} />
+      </div>
+      <ProgressBar np={np} />
+    </div>
+  );
+}
+
 function App() {
   const [np, setNp] = useState<NowPlaying | null>(null);
   useEffect(
@@ -741,12 +982,6 @@ function App() {
     animate: { opacity: 1, scale: 1 },
     transition: { duration: reducedMotion ? 0 : DUR[3] / 1000, ease: [...EASE.out] as [number, number, number, number] },
   };
-  const contentFade = {
-    initial: reducedMotion ? {} : { opacity: 0 },
-    animate: { opacity: 1 },
-    transition: { duration: reducedMotion ? 0 : DUR[3] / 1000, ease: [...EASE.out] as [number, number, number, number] },
-  };
-
   const nothing = !np || np.player === "none";
   const playing = np?.status === "playing";
   // AM can't seek over SMTC (support matrix) — buttons gate on capability.
@@ -815,55 +1050,15 @@ function App() {
               <ProgressBar np={np} />
             </div>
           </div>
-        ) : lyrics.status === "synced" ? (
-          // Keyed fade so the big-art→lyrics swap dissolves instead of snapping
-          // when a fetch resolves mid-view.
-          <motion.div key="lyrics-view" {...contentFade} className="flex h-full flex-col gap-2 px-3 pb-2 pt-3">
-            <div className="flex items-center gap-2.5">
-              <Art url={shownArt} size={44} radiusPx={6} />
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-[15px] font-medium text-fg">{np.title}</p>
-                <p className="truncate text-[13px] text-muted">
-                  {np.artist}
-                  <Waveform trailing />
-                </p>
-              </div>
-              <PlayerBadge player={np.player} />
-              <ModeButton to="contract" label="Collapse to card" slot="mode-primary" onClick={() => setMode("card")} />
-            </div>
-            <LyricsPanel lines={lyrics.lines} seekable={seekable} leadMs={VOCAL_LEAD_MS[np.player]} />
-            <div className="flex justify-center">
-              <Transport np={np} seekable={seekable} playing={playing} />
-            </div>
-            <ProgressBar np={np} />
-          </motion.div>
         ) : (
-          <motion.div
-            key="art-view"
-            {...contentFade}
-            className="flex h-full flex-col items-center justify-center gap-3 px-4 pb-2 pt-4"
-          >
-            <div className="absolute right-2 top-2 flex items-center gap-1">
-              <PlayerBadge player={np.player} />
-              <ModeButton to="contract" label="Collapse to card" slot="mode-primary" onClick={() => setMode("card")} />
-            </div>
-            <Art url={shownArt} size={190} radiusPx={12} />
-            <div className="min-w-0 self-stretch text-center">
-              <p className="truncate text-sm font-medium text-fg">{np.title}</p>
-              <p className="truncate text-xs text-muted">
-                {np.artist}
-                <Waveform trailing={!np.album} />
-                {np.album}
-              </p>
-              {lyrics.status === "none" && (
-                <p className="mt-0.5 text-[10px] text-muted">No synced lyrics</p>
-              )}
-            </div>
-            <Transport np={np} seekable={seekable} playing={playing} />
-            <div className="self-stretch">
-              <ProgressBar np={np} />
-            </div>
-          </motion.div>
+          <ExpandedView
+            np={np}
+            artUrl={shownArt}
+            lyrics={lyrics}
+            seekable={seekable}
+            playing={playing}
+            onCollapse={() => setMode("card")}
+          />
         )}
       </motion.div>
       {/* Broken-art detector — OUTSIDE the mode-keyed subtree so the data URL

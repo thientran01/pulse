@@ -17,6 +17,11 @@ const MOCK_DURATION = 204_000;
  * posClock filter regressions reproduce in preview without a live player. */
 const AM_PROFILE = !IN_TAURI && new URLSearchParams(window.location.search).has("am");
 
+/** `?lyrics=<ms>` delays the mock lyric fetch (LRCLIB takes seconds live) and
+ * `?lyrics=none` forces a miss — both for exercising the expanded view's
+ * art ↔ lyrics arrival transition in preview. */
+const LYRICS_PARAM = IN_TAURI ? null : new URLSearchParams(window.location.search).get("lyrics");
+
 /** The AM profile's hidden ms-precise timeline. Payloads only ever carry its
  * floor — the lost fraction is what makes pushes project backwards, so the
  * truth must live outside the payload (re-deriving it from a floored
@@ -27,13 +32,20 @@ let amTruth = { pos: 63_400, at: Date.now() };
  * replays the same way every run. */
 const AM_PUSH_MS = [1000, 700, 1300, 900, 1100];
 
+/** Small ring the mock's next/prev walk, so preview can exercise track-change
+ * flows (lyrics refetch, the expanded view's reverse transition). */
+const MOCK_TRACKS = [
+  { title: "Savior", artist: "THE BOYZ", album: "THE BOYZ" },
+  { title: "Instagram", artist: "DEAN", album: "Instagram - Single" },
+  { title: "WHERE YOU AT?", artist: "STAYC", album: "2:LOVE - EP" },
+];
+let mockTrack = 0;
+
 let mock: NowPlaying = {
   seq: 1,
   app_id: AM_PROFILE ? "Mock.AppleMusic" : "Mock.Player",
   player: AM_PROFILE ? "apple_music" : "spotify",
-  title: "Savior",
-  artist: "THE BOYZ",
-  album: "THE BOYZ",
+  ...MOCK_TRACKS[0],
   status: "playing",
   position_ms: 63_000,
   duration_ms: MOCK_DURATION,
@@ -41,6 +53,13 @@ let mock: NowPlaying = {
   can_seek: !AM_PROFILE,
   art_id: "mock-art",
 };
+
+function mockSkip(dir: 1 | -1): void {
+  mockTrack = (mockTrack + dir + MOCK_TRACKS.length) % MOCK_TRACKS.length;
+  const now = Date.now();
+  amTruth = { pos: 0, at: now };
+  pushMock({ ...MOCK_TRACKS[mockTrack], status: "playing", position_ms: 0, position_at_ms: now });
+}
 
 /** Mutate the mock payload, advancing the seq stamp like the backend does. */
 function pushMock(patch: Partial<NowPlaying>): void {
@@ -215,9 +234,11 @@ export const commands = {
   },
   next(): void {
     if (IN_TAURI) void invoke("media_next");
+    else mockSkip(1);
   },
   prev(): void {
     if (IN_TAURI) void invoke("media_prev");
+    else mockSkip(-1);
   },
   // Both seeks rebase the posClock optimistically FIRST (the UI lands on the
   // target immediately; the kernel's grace window absorbs pre-seek
@@ -248,10 +269,13 @@ export const commands = {
     durationMs: number,
   ): Promise<Lyrics> {
     if (!IN_TAURI) {
+      const delayMs = LYRICS_PARAM && LYRICS_PARAM !== "none" ? Number(LYRICS_PARAM) || 0 : 0;
+      if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+      if (LYRICS_PARAM === "none") return LYRICS_MISS;
       // Mock: a line every 4s across the track so preview exercises karaoke.
       const lines = Array.from({ length: Math.floor(durationMs / 4000) }, (_, i) => {
         const t = i * 4;
-        return `[${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}.00]Mock lyric line ${i + 1} — la la la`;
+        return `[${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}.00]Mock lyric line ${i + 1} — la la la (${title})`;
       });
       return { synced: lines.join("\n"), plain: null };
     }
