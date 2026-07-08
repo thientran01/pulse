@@ -214,8 +214,8 @@ let lyricsQueued: {
 } | null = null;
 
 /**
- * Single-flight gate for lyric fetches: a fetch can block for ~15s (LRCLIB
- * with fallbacks), and useLyrics fires one per track change WITHOUT awaiting
+ * Single-flight gate for lyric fetches: a fetch can block for ~45s (LRCLIB
+ * with fallbacks, 15s timeout each), and useLyrics fires one per track change WITHOUT awaiting
  * the previous — rapid track-skipping would otherwise fan out concurrent
  * invokes. At most one runs; a burst collapses to first + latest, and each
  * displaced request resolves as a miss (its caller's track key is already

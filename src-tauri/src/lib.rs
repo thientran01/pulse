@@ -85,7 +85,7 @@ fn set_reactive_enabled(enabled: bool, state: State<UiReactive>) {
 }
 
 /// Fetch synced/plain lyrics for a track (LRCLIB + disk cache). Worst case
-/// ~15s of blocking network I/O (three sequential 5s-timeout calls), so the
+/// ~45s of blocking network I/O (three sequential 15s-timeout calls), so the
 /// fetch runs on tokio's dedicated blocking pool — an async worker occupied
 /// that long would contend with every other command on the small shared pool.
 #[tauri::command]
