@@ -21,7 +21,7 @@ type Mode = "pill" | "card" | "expanded";
  * (200ms EASE.inOut on the Rust side) while the content morphs. */
 const MODE_SIZES: Record<Mode, [number, number]> = {
   pill: [300, 48],
-  card: [380, 170], // art row + centered transport + full-width progress
+  card: [380, 152], // art row + centered transport + full-width progress
   expanded: [380, 440], // lyrics home; big-art fallback gets breathing room
 };
 
@@ -1028,9 +1028,9 @@ function App() {
             <Hairline np={np} />
           </>
         ) : mode === "card" ? (
-          <div className="flex h-full flex-col gap-1 px-3 pb-1.5 pt-4">
+          <div className="flex h-full flex-col gap-1 px-3 pb-1.5 pt-3">
             <div className="flex min-h-0 flex-1 items-center gap-3">
-              <Art url={shownArt} size={72} radiusPx={8} />
+              <Art url={shownArt} size={64} radiusPx={8} />
               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                 <div className="flex items-center gap-1">
                   <p className="min-w-0 flex-1 truncate text-[15px] font-medium text-fg">{np.title}</p>
