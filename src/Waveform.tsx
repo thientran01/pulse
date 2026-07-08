@@ -1,10 +1,13 @@
 /*
  * The living separator: at rest it's a colorless middot between artist and
  * album — a plain typographic separator. When music plays it blooms into
- * five Apple-style accent capsules bouncing on live spectrum bins, and
- * settles back to the dot on pause. The app's ONLY audio-reactive surface.
- * State morphs use the house EASE token; per-frame motion is DOM spans +
- * scaleY transforms only (compositor-friendly) at ~30fps.
+ * five Apple-style accent capsules bouncing on live spectrum bins. On pause
+ * it settles in beats: the bars retract into five dots, the dots vanish in
+ * pairs from the outside in (reverse-reading as one dot having multiplied),
+ * and the survivor drains to gray as the very last event. The app's ONLY
+ * audio-reactive surface. State morphs use the house EASE token; per-frame
+ * motion is DOM spans + scaleY transforms only (compositor-friendly) at
+ * ~30fps.
  */
 import { useEffect, useRef, useState } from "react";
 import { type AudioBands } from "./lib/backend";
@@ -23,14 +26,43 @@ const IDLE_EPS = 0.004;
 const WAKE_LEVEL = 0.02;
 const SLEEP_MS = 500;
 
+/**
+ * Settle phases, in order. "alive" is the audio-reactive waveform; the rest
+ * are the collapse beats: bars retract into five equal dots ("dots"), the
+ * outermost pair fades ("three"), the inner pair fades while the middle dot
+ * grows to resting size ("one"), then the bars layer hands off to the
+ * resting middot ("rest") — an invisible swap, since the middle dot and the
+ * middot are pixel-identical at that moment — and the color drain fires.
+ */
+type Phase = "alive" | "dots" | "three" | "one" | "rest";
+/** Bars → dots retraction. */
+const DOTS_MS = 220;
+/** Each vanishing pair. */
+const DROP_MS = 160;
+
 /** Wake state survives mode-switch remounts (the mode-keyed subtree tears
  * the component down) so the separator doesn't re-bloom from the dot on
  * every pill/card/expanded change. */
 let lastAlive = false;
 
+/** Per-bar geometry/visibility for a phase. Transform is deliberately NOT
+ * transitioned while alive — the rAF loop owns it per frame. */
+function barClass(phase: Phase, i: number): string {
+  if (phase === "alive")
+    return "h-[9px] w-[2px] [transition:height_220ms_var(--ease-out-tk),width_220ms_var(--ease-out-tk),opacity_160ms_var(--ease-out-tk)]";
+  const mid = i === 2;
+  const dropped = phase === "three" ? i === 0 || i === 4 : phase !== "dots" && !mid;
+  // The survivor grows to the middot's 3px once it's alone, so the final
+  // layer handoff is pixel-perfect.
+  const size = mid && (phase === "one" || phase === "rest") ? "h-[3px] w-[3px]" : "h-[2px] w-[2px]";
+  return `${size} ${dropped ? "opacity-0" : "opacity-100"} [transition:height_220ms_var(--ease-out-tk),width_220ms_var(--ease-out-tk),transform_220ms_var(--ease-out-tk),opacity_160ms_var(--ease-out-tk)]`;
+}
+
 export function Waveform({ trailing }: { trailing?: boolean }) {
   const barsRef = useRef<Array<HTMLSpanElement | null>>([]);
-  const [alive, setAlive] = useState(lastAlive);
+  const [phase, setPhase] = useState<Phase>(lastAlive ? "alive" : "rest");
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
 
   useEffect(() => {
     const envs = Array.from({ length: BARS }, () => new Envelope(40, 500));
@@ -39,9 +71,20 @@ export function Waveform({ trailing }: { trailing?: boolean }) {
     let running = false;
     let last = 0;
     let sleepTimer: number | null = null;
+    const seqTimers: number[] = [];
+    const clearSeq = () => {
+      for (const t of seqTimers.splice(0)) window.clearTimeout(t);
+    };
 
     const frame = (now: number) => {
       raf = requestAnimationFrame(frame);
+      // The settle sequence owns the bars once it starts; CSS transitions
+      // animate them, so per-frame transform writes must stop.
+      if (phaseRef.current !== "alive") {
+        running = false;
+        cancelAnimationFrame(raf);
+        return;
+      }
       if (now - last < 33) return; // ~30fps
       const dt = Math.min(now - last, 100);
       last = now;
@@ -79,17 +122,23 @@ export function Waveform({ trailing }: { trailing?: boolean }) {
           window.clearTimeout(sleepTimer);
           sleepTimer = null;
         }
+        clearSeq();
         lastAlive = true;
-        setAlive(true);
+        setPhase("alive");
         start();
       } else {
         // Quiet: let the bars decay, and fall back to the dot if it holds.
         // Pause emits a single zero payload, so this must be wall-clock.
-        if (sleepTimer === null) {
+        // Only arm from "alive" — zero payloads keep arriving while paused,
+        // and re-arming mid-collapse would restart the sequence.
+        if (sleepTimer === null && phaseRef.current === "alive") {
           sleepTimer = window.setTimeout(() => {
             sleepTimer = null;
             lastAlive = false;
-            setAlive(false);
+            setPhase("dots");
+            seqTimers.push(window.setTimeout(() => setPhase("three"), DOTS_MS));
+            seqTimers.push(window.setTimeout(() => setPhase("one"), DOTS_MS + DROP_MS));
+            seqTimers.push(window.setTimeout(() => setPhase("rest"), DOTS_MS + DROP_MS * 2));
           }, SLEEP_MS);
         }
         if (b.level > 0.001) start();
@@ -99,10 +148,13 @@ export function Waveform({ trailing }: { trailing?: boolean }) {
     return () => {
       unsub();
       if (sleepTimer !== null) window.clearTimeout(sleepTimer);
+      clearSeq();
       running = false;
       cancelAnimationFrame(raf);
     };
   }, []);
+
+  const atRest = phase === "rest";
 
   // `trailing`: nothing follows this separator (lyrics view; empty album) —
   // there is nothing to separate, so rest state renders NOTHING (no dangling
@@ -110,30 +162,33 @@ export function Waveform({ trailing }: { trailing?: boolean }) {
   return (
     <span
       className={`relative inline-flex h-[11px] items-center align-middle [transition:width_220ms_var(--ease-out-tk),margin_220ms_var(--ease-out-tk)] ${
-        alive ? "mx-1.5 w-[18px]" : trailing ? "mx-0 w-0" : "mx-1.5 w-[5px]"
+        atRest ? (trailing ? "mx-0 w-0" : "mx-1.5 w-[5px]") : "mx-1.5 w-[18px]"
       }`}
     >
       {/* AT hears the separator only when it actually separates two things. */}
       {!trailing && <span className="sr-only"> — </span>}
-      {/* Resting state: a colorless middot — just a separator. Settle
-          choreography: the bloom collapses into a still-accent dot first,
-          and the color drains to muted as the LAST beat (drain delay =
-          morph + a short hold), so losing the color reads as its own event. */}
+      {/* Resting state: a colorless middot — just a separator. It swaps in
+          INSTANTLY over the survivor dot (identical pixels, so no crossfade
+          is needed and none is wanted — a fade would ghost while the
+          container width shrinks), still accent, then drains to muted as
+          the LAST beat so losing the color reads as its own event. */}
       {!trailing && (
         <span
           aria-hidden
           className={`absolute left-1/2 top-1/2 h-[3px] w-[3px] -translate-x-1/2 -translate-y-1/2 rounded-full ${
-            alive
-              ? "bg-accent opacity-0 [transition:opacity_220ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]"
-              : "bg-muted opacity-100 [transition:opacity_220ms_var(--ease-out-tk),background-color_260ms_var(--ease-out-tk)_300ms]"
+            atRest
+              ? "bg-muted opacity-100 [transition:background-color_260ms_var(--ease-out-tk)_300ms]"
+              : "bg-accent opacity-0 [transition:opacity_220ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]"
           }`}
         />
       )}
-      {/* Playing state: the dot blooms into the waveform. */}
+      {/* Playing state: the waveform, which collapses through the phase
+          beats on settle. Hidden instantly at rest (the middot took over);
+          fades back in on bloom. */}
       <span
         aria-hidden
-        className={`flex h-full w-full items-center justify-between overflow-hidden [transition:opacity_220ms_var(--ease-out-tk)] ${
-          alive ? "opacity-100" : "opacity-0"
+        className={`flex h-full w-full items-center justify-between overflow-hidden ${
+          atRest ? "opacity-0" : "opacity-100 [transition:opacity_220ms_var(--ease-out-tk)]"
         }`}
       >
         {Array.from({ length: BARS }, (_, i) => (
@@ -142,8 +197,8 @@ export function Waveform({ trailing }: { trailing?: boolean }) {
             ref={(el) => {
               barsRef.current[i] = el;
             }}
-            className="h-[9px] w-[2px] origin-center rounded-full bg-accent will-change-transform"
-            style={{ transform: `scaleY(${REST})` }}
+            className={`origin-center rounded-full bg-accent will-change-transform ${barClass(phase, i)}`}
+            style={{ transform: phase === "alive" ? `scaleY(${REST})` : "scale(1)" }}
           />
         ))}
       </span>
