@@ -8,10 +8,29 @@ import { IN_TAURI, type NowPlaying } from "../types";
 import * as posClock from "./posClock";
 
 const MOCK_DURATION = 204_000;
+
+/** `?am` flips the browser mock from its ms-precise Spotify-like profile to
+ * Apple Music's pathological one (docs/smtc-support-matrix.md): positions
+ * floored to whole seconds on an irregular ~1s push cadence — a fresh pair
+ * can project up to ~1s BEHIND the running clock, the flash-back ingredient —
+ * plus a resume payload that re-sends the pause-era stamp, and can_seek=false.
+ * posClock filter regressions reproduce in preview without a live player. */
+const AM_PROFILE = !IN_TAURI && new URLSearchParams(window.location.search).has("am");
+
+/** The AM profile's hidden ms-precise timeline. Payloads only ever carry its
+ * floor — the lost fraction is what makes pushes project backwards, so the
+ * truth must live outside the payload (re-deriving it from a floored
+ * position, like the Spotify-ish tick does, would advance in clean 1s steps
+ * and never jitter). */
+let amTruth = { pos: 63_400, at: Date.now() };
+/** Irregular so floored positions carry varying fractions, fixed so a repro
+ * replays the same way every run. */
+const AM_PUSH_MS = [1000, 700, 1300, 900, 1100];
+
 let mock: NowPlaying = {
   seq: 1,
-  app_id: "Mock.Player",
-  player: "spotify",
+  app_id: AM_PROFILE ? "Mock.AppleMusic" : "Mock.Player",
+  player: AM_PROFILE ? "apple_music" : "spotify",
   title: "Savior",
   artist: "THE BOYZ",
   album: "THE BOYZ",
@@ -19,7 +38,7 @@ let mock: NowPlaying = {
   position_ms: 63_000,
   duration_ms: MOCK_DURATION,
   position_at_ms: Date.now(),
-  can_seek: true,
+  can_seek: !AM_PROFILE,
   art_id: "mock-art",
 };
 
@@ -63,6 +82,21 @@ export function onNowPlaying(cb: (np: NowPlaying) => void): () => void {
     return () => {
       un.then((f) => f());
     };
+  }
+  if (AM_PROFILE) {
+    let i = 0;
+    let timer = 0;
+    const push = () => {
+      if (mock.status === "playing") {
+        const now = Date.now();
+        amTruth = { pos: (amTruth.pos + (now - amTruth.at)) % MOCK_DURATION, at: now };
+        pushMock({ position_ms: Math.floor(amTruth.pos / 1000) * 1000, position_at_ms: now });
+      }
+      cb(mock);
+      timer = window.setTimeout(push, AM_PUSH_MS[i++ % AM_PUSH_MS.length]);
+    };
+    push();
+    return () => window.clearTimeout(timer);
   }
   const tick = () => {
     if (mock.status === "playing") {
@@ -141,6 +175,25 @@ export const commands = {
   playPause(): void {
     if (IN_TAURI) {
       void invoke("media_play_pause");
+    } else if (AM_PROFILE) {
+      const now = Date.now();
+      if (mock.status === "playing") {
+        // Pause: freeze the hidden truth; AM's frozen-timeline push reports
+        // the floor with a fresh stamp.
+        amTruth = { pos: Math.min(amTruth.pos + (now - amTruth.at), MOCK_DURATION), at: now };
+        pushMock({
+          status: "paused",
+          position_ms: Math.floor(amTruth.pos / 1000) * 1000,
+          position_at_ms: now,
+        });
+      } else {
+        // Resume: AM's first playing payload re-sends the PAUSE-ERA pair
+        // untouched — the exact payload posClock must refuse to
+        // staleness-project (doing so would leap the clock forward by the
+        // pause length, then snap back on the next fresh push).
+        amTruth = { ...amTruth, at: now };
+        pushMock({ status: "playing" });
+      }
     } else {
       // Advance the position before re-stamping, like a real player freezing
       // its timeline at the pause point — a fresh stamp on a stale position
