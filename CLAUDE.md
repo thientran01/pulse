@@ -73,8 +73,10 @@ tooltip/aria-label) for this reason.
 ## Commands
 
 - `npm run tauri dev` — run the app (requires Rust MSVC toolchain + VS Build Tools, both installed)
-- `npm run tauri build` — release build
+- `npm run tauri build` — release build → NSIS per-user installer at `src-tauri/target/release/bundle/nsis/Pulse_<version>_x64-setup.exe` (unsigned; SmartScreen warns on other machines)
 - `npm run dev` — frontend only (no Tauri window, limited use)
+
+Installed app: single-instance (relaunching surfaces the running widget), tray has an opt-in "Start at login" toggle (tauri-plugin-autostart, HKCU Run key — registers the current exe's path, so toggling from a dev build points it at the dev exe). App icon source: five living-separator capsules on a dark rounded square; regenerate the set with `npx tauri icon <1024px.png>`.
 
 ## Workflow
 

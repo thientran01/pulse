@@ -1,7 +1,31 @@
-# Tauri + React + Typescript
+# Pulse
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+An always-on-top mini music player for Windows. Reads and controls whatever is playing — Apple Music, Spotify, browsers — through the Windows system media API (GSMTC), with synced lyrics, album-art adaptive accents, audio-reactive visuals, and global hotkeys.
 
-## Recommended IDE Setup
+## Install
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+Grab `Pulse_x.y.z_x64-setup.exe` from a release build and run it — per-user install, no admin required. Pulse lives in the system tray; the widget docks to a corner of your screen and stays on top.
+
+> The installer is currently unsigned, so Windows SmartScreen will warn on first run ("More info" → "Run anyway").
+
+**Hotkeys:** `Ctrl+Alt+K` play/pause · `Ctrl+Alt+←/→` seek ±10s · `Ctrl+Alt+N/P` next/previous · `Ctrl+Alt+M` show/hide
+
+**Tray menu:** Show/Hide · Reset position · Start at login (opt-in) · Quit
+
+## Build from source
+
+Requires Node 20+, Rust (MSVC toolchain), and the VS Build Tools.
+
+```sh
+npm install
+npm run tauri dev     # run the app
+npm run tauri build   # installer → src-tauri/target/release/bundle/nsis/
+```
+
+## Player support
+
+What each player honors over GSMTC is measured, not assumed — see [docs/smtc-support-matrix.md](docs/smtc-support-matrix.md). Notably: Spotify supports seek natively; Apple Music has no working programmatic seek path at all.
+
+## Stack
+
+Tauri v2 (Rust) · React 19 + TypeScript + Vite · Tailwind v4 · WASAPI loopback + FFT for the audio-reactive layer · LRCLIB for synced lyrics.

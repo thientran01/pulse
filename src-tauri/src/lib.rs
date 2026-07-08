@@ -9,9 +9,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 const POLL_INTERVAL_MS: u64 = 500;
@@ -193,6 +194,27 @@ fn toggle_widget(app: &AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Registered first so a second launch (Start menu, installer's "run
+        // app" checkbox) hands off before any other plugin does work: the new
+        // process exits and the running widget surfaces instead.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.set_focus();
+                // This callback runs in a WndProc on the main/STA thread
+                // (SendMessageW from the second process) — emit_now touches
+                // GSMTC, which must never block there (see the async-command
+                // note above). Defer it to the async pool like the commands.
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    emit_now(&app);
+                });
+            }
+        }))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_window_state::Builder::new()
@@ -229,16 +251,44 @@ pub fn run() {
             // positions persisted on a now-disconnected monitor; this is the
             // belt-and-braces path for a chromeless, taskbar-less window.
             let reset = MenuItem::with_id(app, "reset", "Reset position", true, None::<&str>)?;
+            // Opt-in launch-at-login, default off. The plugin writes the HKCU
+            // Run key with the CURRENT exe's path — enabling from a dev build
+            // registers the dev exe until re-toggled from the installed app.
+            let autostart_on = app.autolaunch().is_enabled().unwrap_or(false);
+            let autostart = CheckMenuItem::with_id(
+                app,
+                "autostart",
+                "Start at login",
+                true,
+                autostart_on,
+                None::<&str>,
+            )?;
             let quit = MenuItem::with_id(app, "quit", "Quit Pulse", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_hide, &reset, &quit])?;
+            let menu = Menu::with_items(app, &[&show_hide, &reset, &autostart, &quit])?;
+            let autostart_item = autostart.clone();
             TrayIconBuilder::with_id("pulse-tray")
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("Pulse")
                 .menu(&menu)
                 .show_menu_on_left_click(true)
-                .on_menu_event(|app, event| match event.id.as_ref() {
+                .on_menu_event(move |app, event| match event.id.as_ref() {
                     "toggle" => toggle_widget(app),
                     "reset" => dock::reset_position(app),
+                    "autostart" => {
+                        let al = app.autolaunch();
+                        let result = if al.is_enabled().unwrap_or(false) {
+                            al.disable()
+                        } else {
+                            al.enable()
+                        };
+                        if let Err(e) = result {
+                            eprintln!("autostart toggle failed: {e}");
+                        }
+                        // The menu item flips itself on click; re-sync it to
+                        // the registry's actual state so a failed toggle
+                        // doesn't leave the checkmark lying.
+                        let _ = autostart_item.set_checked(al.is_enabled().unwrap_or(false));
+                    }
                     "quit" => app.exit(0),
                     _ => {}
                 })
