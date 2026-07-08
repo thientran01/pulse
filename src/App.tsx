@@ -527,7 +527,7 @@ function useProgressDom(
         bar.current?.setAttribute("aria-valuetext", `${fmt(pos)} of ${fmt(durationMs)}`);
       }
     };
-    write(); // before first paint — no mount sweep from scale-x-0
+    write(); // before first paint — the fill has NO baseline style (see JSX)
     if (!active) {
       // Frozen clock: no loop at all (the pre-PR paused cost was zero, keep
       // it zero). Kernel notifications repaint paused seeks/scrubs.
@@ -617,11 +617,16 @@ function ProgressBar({ np }: { np: NowPlaying }) {
           }`}
         >
           {/* Fill scales on the compositor instead of animating width (layout).
-              scale-x-0 is only the pre-first-write baseline — the rAF driver
-              owns the inline transform from then on. */}
+              The rAF driver's pre-paint write() styles this before the first
+              frame, so it needs NO baseline — and must have none: a Tailwind
+              scale-x-0 class compiles to the native CSS `scale` property in
+              v4, which MULTIPLIES with the driver's inline transform and
+              pinned this fill at zero width forever (found live 2026-07-08);
+              an inline style baseline would let drag re-renders clobber the
+              driver's writes (the PR-3 label lesson). */}
           <div
             ref={fillRef}
-            className={`h-full w-full origin-left scale-x-0 rounded-full bg-accent will-change-transform ${
+            className={`h-full w-full origin-left rounded-full bg-accent will-change-transform ${
               dragFrac === null
                 ? "[transition:transform_90ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]"
                 : "[transition:background-color_220ms_var(--ease-out-tk)]"
@@ -648,9 +653,10 @@ function Hairline({ np }: { np: NowPlaying }) {
       aria-valuemax={np.duration_ms}
       className="absolute inset-x-0 bottom-0 h-[2px] bg-fg/10"
     >
+      {/* Same no-baseline rule as ProgressBar's fill — see the comment there. */}
       <div
         ref={fillRef}
-        className="h-full w-full origin-left scale-x-0 bg-accent will-change-transform [transition:transform_90ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]"
+        className="h-full w-full origin-left bg-accent will-change-transform [transition:transform_90ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]"
       />
     </div>
   );

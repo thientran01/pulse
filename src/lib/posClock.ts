@@ -215,3 +215,13 @@ export function seekTo(targetMs: number): number | null {
   notify();
   return target;
 }
+
+/* Dev-only HMR discipline: this module's state (anchor, seq guard, subscriber
+ * set) cannot survive a hot swap — a mixed-generation module graph leaves
+ * consumers subscribed to a dead instance while payloads feed a fresh one
+ * (seen live 2026-07-08: highlight and fill frozen mid-session until a manual
+ * reload). Escalate any update of THIS module to a full reload; the mount
+ * seed then rebuilds everything. Production builds strip this block. */
+if (import.meta.hot) {
+  import.meta.hot.accept(() => import.meta.hot?.invalidate());
+}
