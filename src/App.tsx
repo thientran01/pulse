@@ -21,7 +21,7 @@ type Mode = "pill" | "card" | "expanded";
  * (200ms EASE.inOut on the Rust side) while the content morphs. */
 const MODE_SIZES: Record<Mode, [number, number]> = {
   pill: [300, 48],
-  card: [380, 138], // art row + centered transport + full-width progress
+  card: [380, 132], // art block + centered transport + full-width progress, no slack
   expanded: [380, 440], // lyrics home; big-art fallback gets breathing room
 };
 
@@ -1028,30 +1028,31 @@ function App() {
             <Hairline np={np} />
           </>
         ) : mode === "card" ? (
-          <div className="flex h-full flex-col gap-1 px-3 pb-1 pt-3">
-            {/* items-end seats the art's bottom edge level with the transport
-                row (the column's last child) — the art hangs low-left, level
-                with the controls, instead of islanding in the top corner. */}
-            <div className="flex items-end gap-3">
-              <Art url={shownArt} size={64} radiusPx={8} />
-              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <div className="flex items-center gap-1">
-                  <p className="min-w-0 flex-1 truncate text-[15px] font-medium text-fg">{np.title}</p>
-                  {/* Windows routes commands to the OS "current" session, which
-                      hops between apps — always show which app this card controls. */}
-                  <PlayerBadge player={np.player} />
-                  <ModeButton to="contract" label="Collapse to pill" slot="mode-secondary" onClick={() => setMode("pill")} />
-                  <ModeButton to="mic" label="Show lyrics" slot="mode-primary" onClick={() => setMode("expanded")} />
-                </div>
-                <p className="truncate text-xs text-muted">
-                  {np.artist}
-                  <Waveform trailing={!np.album} />
-                  {np.album}
-                </p>
-                <div className="mt-1 flex justify-center">
-                  <Transport np={np} seekable={seekable} playing={playing} />
-                </div>
-              </div>
+          <div className="relative flex h-full flex-col gap-0.5 px-3 pb-1.5 pt-3">
+            {/* One shared centerline: transport and progress are full-width
+                rows, so both center on the card itself. The art is seated
+                absolutely at the padding corner — its top on the title row's
+                top edge, its bottom flush with the transport row (80 = title
+                row 28 + artist 16 + transport 32 + two 2px gaps); the text
+                rows clear it with pl-[92px] (80 + the 12px gutter). */}
+            <div className="absolute left-3 top-3">
+              <Art url={shownArt} size={80} radiusPx={8} />
+            </div>
+            <div className="flex h-7 items-center gap-1 pl-[92px]">
+              <p className="min-w-0 flex-1 truncate text-[15px] font-medium text-fg">{np.title}</p>
+              {/* Windows routes commands to the OS "current" session, which
+                  hops between apps — always show which app this card controls. */}
+              <PlayerBadge player={np.player} />
+              <ModeButton to="contract" label="Collapse to pill" slot="mode-secondary" onClick={() => setMode("pill")} />
+              <ModeButton to="mic" label="Show lyrics" slot="mode-primary" onClick={() => setMode("expanded")} />
+            </div>
+            <p className="truncate pl-[92px] text-xs leading-4 text-muted">
+              {np.artist}
+              <Waveform trailing={!np.album} />
+              {np.album}
+            </p>
+            <div className="flex justify-center">
+              <Transport np={np} seekable={seekable} playing={playing} />
             </div>
             <ProgressBar np={np} />
           </div>
