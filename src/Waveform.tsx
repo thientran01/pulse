@@ -115,12 +115,17 @@ export function Waveform({ trailing }: { trailing?: boolean }) {
     >
       {/* AT hears the separator only when it actually separates two things. */}
       {!trailing && <span className="sr-only"> — </span>}
-      {/* Resting state: a colorless middot — just a separator. */}
+      {/* Resting state: a colorless middot — just a separator. Settle
+          choreography: the bloom collapses into a still-accent dot first,
+          and the color drains to muted as the LAST beat (drain delay =
+          morph + a short hold), so losing the color reads as its own event. */}
       {!trailing && (
         <span
           aria-hidden
-          className={`absolute left-1/2 top-1/2 h-[3px] w-[3px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-muted [transition:opacity_220ms_var(--ease-out-tk)] ${
-            alive ? "opacity-0" : "opacity-100"
+          className={`absolute left-1/2 top-1/2 h-[3px] w-[3px] -translate-x-1/2 -translate-y-1/2 rounded-full ${
+            alive
+              ? "bg-accent opacity-0 [transition:opacity_220ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]"
+              : "bg-muted opacity-100 [transition:opacity_220ms_var(--ease-out-tk),background-color_260ms_var(--ease-out-tk)_300ms]"
           }`}
         />
       )}
