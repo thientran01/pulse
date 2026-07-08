@@ -105,9 +105,11 @@ body {
 }
 
 /* The accent marker ignites LAST — color as the closing beat, the separator
- * ladder's grammar. 600ms ≈ cascade base + capped stagger + row animation;
- * keep in sync with ENTRANCE_DONE_MS in App.tsx. */
-.lyrics-entering [data-marker] {
+ * ladder's grammar. Scoped to the ANCHOR row only: a mid-entrance line
+ * advance ignites the new row's marker instantly instead of inheriting the
+ * hold. 600ms ≈ cascade base + capped stagger + row animation; keep in sync
+ * with ENTRANCE_DONE_MS in App.tsx. */
+.lyrics-entering [data-anchor] [data-marker] {
   transition-delay: 600ms;
 }
 
