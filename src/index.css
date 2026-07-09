@@ -123,3 +123,12 @@ body {
     opacity: 1;
   }
 }
+
+/* The miss caption's timed exit (NO_LYRICS_CAPTION_MS in App.tsx): replacing
+ * caption-in drops its held fill, so the implicit `from` is the class value
+ * (opacity 1) and `both` holds the faded state after. */
+@keyframes caption-out {
+  to {
+    opacity: 0;
+  }
+}
