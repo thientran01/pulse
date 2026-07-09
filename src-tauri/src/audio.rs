@@ -37,6 +37,12 @@ const RMS_DECAY: f32 = 0.998;
 /// scales bar targets into [DYN_FLOOR, 1] so quiet sections still animate,
 /// just visibly smaller.
 const DYN_FLOOR: f32 = 0.35;
+/// The dynamics factor tracks SECTIONS (verse vs drop), so its release is
+/// deliberately much slower than the per-bin RELEASE (~760ms half-life vs
+/// ~80ms): broadband RMS dips in the gaps between beats, and a fast release
+/// here would duck every bar in lockstep — the pump the staggered bins
+/// exist to avoid. Attack reuses ATTACK so a drop lands immediately.
+const DYN_RELEASE: f32 = 0.03;
 
 #[derive(Serialize, Clone, Copy, Default)]
 pub struct Bands {
@@ -231,7 +237,7 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
             let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
             rms_ref = (rms_ref * RMS_DECAY).max(rms).max(1e-4);
             let dyn_target = (rms / rms_ref).clamp(0.0, 1.0).sqrt();
-            let dk = if dyn_target > smoothed_dyn { ATTACK } else { RELEASE };
+            let dk = if dyn_target > smoothed_dyn { ATTACK } else { DYN_RELEASE };
             smoothed_dyn += (dyn_target - smoothed_dyn) * dk;
             let dyn_scale = DYN_FLOOR + (1.0 - DYN_FLOOR) * smoothed_dyn;
 
