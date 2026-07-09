@@ -351,8 +351,13 @@ pub fn run() {
                     };
                     match updater.check().await {
                         Ok(Some(update)) => {
-                            if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
-                                eprintln!("update install failed: {e}");
+                            match update.download_and_install(|_, _| {}, || {}).await {
+                                // Usually unreachable on Windows — the NSIS
+                                // installer kills this process during install —
+                                // but the documented pattern, and the relaunch
+                                // guarantee if the installer doesn't do it.
+                                Ok(()) => handle.restart(),
+                                Err(e) => eprintln!("update install failed: {e}"),
                             }
                         }
                         Ok(None) => {}
