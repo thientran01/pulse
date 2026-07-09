@@ -279,45 +279,33 @@ export const commands = {
       });
       return { synced: lines.join("\n"), plain: null };
     }
-    return lyricsSingleFlight(() => invoke("media_lyrics", { artist, title, album, durationMs }));
+    return lyricsLatestWins(() => invoke("media_lyrics", { artist, title, album, durationMs }));
   },
 };
 
 type Lyrics = { synced: string | null; plain: string | null };
 const LYRICS_MISS: Lyrics = { synced: null, plain: null };
 
-let lyricsInFlight = false;
-let lyricsQueued: {
-  start: () => Promise<Lyrics>;
-  resolve: (l: Lyrics | Promise<Lyrics>) => void;
-} | null = null;
+let lyricsGen = 0;
 
 /**
- * Single-flight gate for lyric fetches: a fetch can block for ~45s (LRCLIB
- * with fallbacks, 15s timeout each), and useLyrics fires one per track change WITHOUT awaiting
- * the previous — rapid track-skipping would otherwise fan out concurrent
- * invokes. At most one runs; a burst collapses to first + latest, and each
- * displaced request resolves as a miss (its caller's track key is already
- * stale, so the result is dropped anyway — see useLyrics' lastKey guard).
+ * Latest-wins lyric fetches. useLyrics fires one fetch per track change WITHOUT
+ * awaiting the previous, so the newest track's fetch must NOT wait behind an
+ * older, still-in-flight one. The prior "single-flight" gate serialized them,
+ * which meant a slow fetch on the outgoing track blocked the incoming track's
+ * fetch from even STARTING — the "next song sits ~10s before lyrics show up"
+ * stall. Here every call invokes immediately; a fetch superseded by a newer one
+ * resolves to a miss (its track key is already stale, so useLyrics' lastKey
+ * guard drops it regardless). There is no hard concurrency cap: a fast scrub
+ * through several uncached tracks can put a few fetches in flight at once, and
+ * a quick A→B→A flip can even fetch A twice before its cache write lands. That
+ * is acceptable here — fetches are human-paced and idempotent, and each track
+ * short-circuits on the Rust-side disk cache / session-miss set next time — but
+ * it is NOT the prior single-flight gate's hard "one in flight" guarantee.
  */
-function lyricsSingleFlight(start: () => Promise<Lyrics>): Promise<Lyrics> {
-  if (lyricsInFlight) {
-    lyricsQueued?.resolve(LYRICS_MISS); // displaced — its track is history
-    return new Promise<Lyrics>((resolve) => {
-      lyricsQueued = { start, resolve };
-    });
-  }
-  lyricsInFlight = true;
-  const settle = () => {
-    lyricsInFlight = false;
-    const next = lyricsQueued;
-    lyricsQueued = null;
-    if (next) next.resolve(lyricsSingleFlight(next.start));
-  };
+function lyricsLatestWins(start: () => Promise<Lyrics>): Promise<Lyrics> {
+  const gen = ++lyricsGen;
   return start()
     .catch(() => LYRICS_MISS)
-    .then((l) => {
-      settle();
-      return l;
-    });
+    .then((l) => (gen === lyricsGen ? l : LYRICS_MISS));
 }

@@ -1,9 +1,12 @@
 //! Synced lyrics via LRCLIB (lrclib.net — free, no auth, please send a UA).
-//! Strategy: exact /api/get (artist+title+album+duration) → /api/search
-//! fallback (raw title, then normalized title) filtered by duration ±4s.
-//! Successful lookups cache to disk; misses cache in-memory per session so a
-//! track without lyrics isn't re-fetched every poll but gets another chance
-//! next launch.
+//! Strategy: an exact /api/get (artist+title+album+duration) and a raw-title
+//! /api/search run CONCURRENTLY — Apple Music's exact call almost always 404s
+//! on its album suffix, so the search is on the common path; overlapping them
+//! turns a miss-then-hit from a SUM of two slow calls into a MAX. A
+//! normalized-title search follows only when both miss. Search hits are
+//! filtered by duration ±4s. Successful lookups cache to disk; misses cache
+//! in-memory per session so a track without lyrics isn't re-fetched every poll
+//! but gets another chance next launch.
 
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
@@ -192,17 +195,62 @@ pub fn fetch(cache_dir: &Path, artist: &str, title: &str, album: &str, duration_
 
     // Any transport failure → bail WITHOUT recording a miss (offline ≠ no lyrics).
     let lookup = || -> Result<Option<LrclibRecord>, Offline> {
-        if let Some(r) = get_exact(artist, title, album, duration_s)?.filter(|r| !r.is_empty_record()) {
+        // Start the raw-title /api/search CONCURRENTLY with the exact lookup.
+        // Apple Music's exact /api/get almost always 404s (its album carries a
+        // "- Single"/"- EP" suffix), so the search is on the common path and
+        // used to run only AFTER the exact call's full latency — overlapping
+        // them turns that miss-then-hit from a SUM into a MAX. The exact call
+        // keeps precedence, so we ALWAYS wait for it; the search runs on a
+        // detached worker and is joined only when exact misses. An exact hit
+        // therefore returns immediately and never blocks on the (heavier)
+        // search — the happy path is never slower than the old sequential form.
+        let (artist_owned, title_owned) = (artist.to_string(), title.to_string());
+        let raw_worker =
+            std::thread::spawn(move || search(&artist_owned, &title_owned, duration_s));
+
+        // Hit precedence unchanged: exact (non-empty) > raw search > norm search.
+        let exact = get_exact(artist, title, album, duration_s);
+        let exact_offline = exact.is_err();
+        if let Ok(Some(r)) = exact {
+            if !r.is_empty_record() {
+                return Ok(Some(r)); // exact hit — raw_worker detaches, its result unused
+            }
+        }
+
+        // Exact missed; the search result now matters. Join it (usually already
+        // done, having run alongside the exact call). A panicked worker degrades
+        // to Offline — never a false miss.
+        let raw = raw_worker.join().unwrap_or(Err(Offline));
+        let raw_offline = raw.is_err();
+        if let Ok(Some(r)) = raw {
             return Ok(Some(r));
         }
-        if let Some(r) = search(artist, title, duration_s)? {
-            return Ok(Some(r));
-        }
+
+        // The normalized-title search is a last resort, reached only when both
+        // prior attempts SERVED a negative. Skipping it when either was Offline
+        // matches the old `?`-propagation (which bailed on the first transport
+        // error) AND caps the degraded-network bail at one timeout window
+        // instead of chaining a third sequential 15s attempt.
         let norm = norm_title(title);
-        if norm.is_empty() || norm == title {
-            return Ok(None);
+        let norm_res = if !exact_offline && !raw_offline && !norm.is_empty() && norm != title {
+            search(artist, &norm, duration_s)
+        } else {
+            Ok(None)
+        };
+        let norm_offline = norm_res.is_err();
+        if let Ok(Some(r)) = norm_res {
+            return Ok(Some(r));
         }
-        search(artist, &norm, duration_s)
+
+        // No hit anywhere. A transport failure on ANY attempt means we can't
+        // conclude the track has no lyrics — bail without recording a miss
+        // (offline ≠ miss). Only an all-served-negative result is a real miss,
+        // which matches the old sequential `?`-propagation exactly.
+        if exact_offline || raw_offline || norm_offline {
+            Err(Offline)
+        } else {
+            Ok(None)
+        }
     };
     let record = match lookup() {
         Ok(r) => r,
