@@ -197,6 +197,14 @@ export function Waveform({ trailing, size = "sm" }: { trailing?: boolean; size?:
       }, SLEEP_MS);
     };
 
+    // Mount watchdog: the crossfade mounts this instance BEFORE the outgoing
+    // one's cleanup runs, so a swap inside the pause→settle window can seed
+    // "alive" from a stale lastAlive with the backend already silent (its
+    // single zero payload went to the old instance; subscribeBands never
+    // replays). Arm the settle now: any live payload clears it within a
+    // frame, silence collapses to rest on the normal ladder.
+    if (phaseRef.current === "alive") armSettle();
+
     const unsub = subscribeBands((b) => {
       latest = b;
       if (b.level > WAKE_LEVEL) {

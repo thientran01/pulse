@@ -1,5 +1,5 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { AnimatePresence, motion, useIsPresent, useReducedMotion } from "motion/react";
 import type { MorphName } from "./icons/geometry";
 import { MorphIcon } from "./icons/MorphIcon";
 import { useSeekTick } from "./icons/useSeekTick";
@@ -607,6 +607,26 @@ function ModeButton({
 /** Ordered mode ladder the anchored cluster steps through. */
 const MODE_ORDER: readonly Mode[] = ["pill", "card", "expanded"];
 
+/** Marks the exiting mode subtree inert for its 140ms crossfade. The
+ * shell-level exit pointerEvents can't do this alone: CSS pointer-events
+ * inherits, so a descendant that declares its own pointer-events-auto (the
+ * pill scrim, ViewToggle — both re-enabled by group-hover, which lives on
+ * the never-exiting root) overrides the ancestor's none; and neither CSS
+ * property touches the tab/AT order, so Enter on a focused dead control
+ * would still fire (quick-review catches, 2026-07-09). `inert` closes both:
+ * whole-subtree hit-test removal that descendants cannot override, plus
+ * focus/AT exclusion. Rendered as the shell's single full-height child —
+ * framer freezes the exiting child's props, so presence context is the only
+ * signal that still reaches this subtree. */
+function PresenceInert({ children }: { children: React.ReactNode }) {
+  const isPresent = useIsPresent();
+  return (
+    <div inert={!isPresent} className="flex h-full min-h-0 flex-col">
+      {children}
+    </div>
+  );
+}
+
 /**
  * The anchored mode cluster (design handoff 2026-07-08): collapse + expand
  * live at the bottom-right corner — the corner dock.rs resizes out of — so
@@ -616,8 +636,8 @@ const MODE_ORDER: readonly Mode[] = ["pill", "card", "expanded"];
  * fades or rescales with the content morph — chrome holds still (the
  * expanded view's hoisted-chrome rule, promoted app-wide).
  *
- * Positioned in WINDOW coordinates (this div lives in the p-1.5 root, not the
- * shell): right-3.5 = 14px window = 8px from the shell edge; bottom-[11px]
+ * Positioned in WINDOW coordinates (this div lives in the window root, not
+ * the inset-1.5 shell): right-3.5 = 14px window = 8px from the shell edge; bottom-[11px]
  * puts the 28px buttons' center 25px from the window bottom — the CONTROL
  * CENTERLINE every mode's controls sit on: the pill scrim's play/pause
  * (top-0/bottom-0.5 in the 36px shell → center 25px), and the card/expanded
@@ -1397,6 +1417,7 @@ function App() {
           // reads as a gray box on light surfaces.
           className="absolute inset-1.5 flex flex-col overflow-hidden rounded-xl border border-border/10 bg-surface/95 shadow-[0_1px_3px_rgb(0_0_0/0.18),0_3px_6px_rgb(0_0_0/0.12)]"
         >
+        <PresenceInert>
         {nothing ? (
           <div className="flex h-full w-full items-center justify-center gap-2 text-muted">
             <MorphIcon name="note" size={22} />
@@ -1470,6 +1491,7 @@ function App() {
         ) : (
           <ExpandedView np={np} artUrl={shownArt} lyrics={lyrics} seekable={seekable} playing={playing} />
         )}
+        </PresenceInert>
         </motion.div>
       </AnimatePresence>
       {/* Outside the mode-keyed remount: the cluster never fades or rescales
