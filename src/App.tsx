@@ -610,16 +610,17 @@ const MODE_ORDER: readonly Mode[] = ["pill", "card", "expanded"];
  * expanded view's hoisted-chrome rule, promoted app-wide).
  *
  * Positioned in WINDOW coordinates (this div lives in the p-1.5 root, not the
- * shell): right-3.5 = 14px window = 8px from the shell edge; bottom-4 = 16px
- * window = the handoff's 10px shell seat. That seat is CONSTANT in every mode
- * (no mode-dependent bottom) — docked bottom-right the window's bottom edge is
- * pinned, so the cluster holds the exact same screen pixels across
- * pill/card/expanded: the fixed-point guarantee, no drift even while hidden
- * (ANIMATIONS.md §2 — "opacity only, zero transforms; the fixed-point
- * guarantee includes the hidden state"). In the 36px pill shell a 28px button
- * at this seat overhangs the shell top by 2px into the transparent window pad
- * — invisible (the 13px glyph stays centered well inside the shell), and the
- * price of the fixed point. Hidden at rest (opacity 0, pointer-events none),
+ * shell): right-3.5 = 14px window = 8px from the shell edge; bottom-[11px]
+ * puts the 28px buttons' center 25px from the window bottom — the CONTROL
+ * CENTERLINE every mode's controls sit on: the pill scrim's play/pause
+ * (top-0/bottom-0.5 in the 36px shell → center 25px), and the card/expanded
+ * transports via their pb-1/pb-0.5 column padding (the shell's 1px border
+ * adds to both). Change one, change all four. The seat is CONSTANT in every mode (no mode-dependent bottom) —
+ * docked bottom-right the window's bottom edge is pinned, so the cluster
+ * holds the exact same screen pixels across pill/card/expanded: the
+ * fixed-point guarantee, no drift even while hidden (ANIMATIONS.md §2 —
+ * "opacity only, zero transforms; the fixed-point guarantee includes the
+ * hidden state"). Hidden at rest (opacity 0, pointer-events none),
  * it reveals on widget hover (group/widget): opacity 0→1 over 140ms EASE.out,
  * no motion. Also reveals on focus-within — the buttons stay in the Tab
  * order the whole time (hidden ≠ inert), so a hover-only reveal would strand
@@ -629,7 +630,7 @@ const MODE_ORDER: readonly Mode[] = ["pill", "card", "expanded"];
 function ModeCluster({ mode, onStep }: { mode: Mode; onStep: (d: -1 | 1) => void }) {
   return (
     <div
-      className="pointer-events-none absolute bottom-4 right-3.5 z-20 flex items-center gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-hover/widget:pointer-events-auto group-hover/widget:opacity-100 group-focus-within/widget:pointer-events-auto group-focus-within/widget:opacity-100"
+      className="pointer-events-none absolute bottom-[11px] right-3.5 z-20 flex items-center gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-hover/widget:pointer-events-auto group-hover/widget:opacity-100 group-focus-within/widget:pointer-events-auto group-focus-within/widget:opacity-100"
       // Swallow mousedown: pointer-events-none makes a DISABLED button
       // transparent to hit-testing, so without this a press on it (or the
       // 4px gap between the buttons) would fall through to the root drag
@@ -1147,7 +1148,10 @@ function ExpandedView({
   };
 
   return (
-    <div className="relative flex h-full flex-col gap-2 px-3 pb-2.5 pt-3">
+    // pb-0.5 (+ the shell's 1px border) seats the h-8 transport row's center
+    // on the 25px control centerline (see ModeCluster) — 2px less than the
+    // card's pb-1 because this transport row is 4px taller.
+    <div className="relative flex h-full flex-col gap-2 px-3 pb-0.5 pt-3">
       <div className="relative min-h-0 flex-1">
         <AnimatePresence initial={false}>
           {showLyrics ? (
@@ -1411,9 +1415,11 @@ function App() {
           /* Anchored-cluster handoff (2026-07-08, supersedes Figma 874:299):
              art+titles fill the top, then full-width progress, then the
              transport as the very-bottom row — centered, sharing its band
-             with the corner cluster. Bottom geometry matches expanded, so
-             the cluster and transport hold still across card⇄expanded. */
-          <div className="flex h-full flex-col gap-1.5 px-3 pb-2.5 pt-3">
+             with the corner cluster. pb-1 (+ the shell's 1px border) seats
+             the h-7 transport row's center on the 25px control centerline
+             (see ModeCluster), so the cluster and transport hold still
+             across every mode. */
+          <div className="flex h-full flex-col gap-1.5 px-3 pb-1 pt-3">
             <div className="flex min-h-0 flex-1 items-center gap-3">
               <Art url={shownArt} size={52} radiusPx={8} />
               <div className="min-w-0 flex-1">
