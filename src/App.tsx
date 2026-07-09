@@ -9,7 +9,7 @@ import { extractAccent } from "./lib/palette";
 import * as posClock from "./lib/posClock";
 import { initReactive } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
-import { Waveform } from "./Waveform";
+import { SeparatorDot, Waveform } from "./Waveform";
 import type { NowPlaying } from "./types";
 
 // Keep in sync with SEEK_STEP_MS in src-tauri/src/lib.rs (global hotkeys).
@@ -986,7 +986,7 @@ function ExpandedView({
                 <p className="truncate text-sm font-medium text-fg">{np.title}</p>
                 <p className="truncate text-xs text-muted">
                   {np.artist}
-                  <Waveform trailing={!np.album} />
+                  {np.album && <SeparatorDot />}
                   {np.album}
                 </p>
                 {/* Height-reserved caption slot: the caption fading in must
@@ -1006,6 +1006,15 @@ function ExpandedView({
                     </span>
                   )}
                 </p>
+              </div>
+              {/* The living separator at hero size, filling the dead zone
+                  between the metadata and the transport. The metadata line
+                  above keeps a static middot so the reactive surface isn't
+                  on screen twice. mt-3 centers it in that dead zone: the
+                  fixed 380x440 window plus this centered column puts half
+                  the margin back below, landing ~24px on both sides. */}
+              <div className="mt-3">
+                <Waveform size="lg" />
               </div>
             </motion.div>
           )}

@@ -13,11 +13,22 @@ import { useEffect, useRef, useState } from "react";
 import { type AudioBands } from "./lib/backend";
 import { Envelope, subscribeBands } from "./lib/reactive";
 
-const BARS = 5;
+/** Two renditions of the same instrument: "sm" is the inline text separator
+ * (5 bars); "lg" is the standalone hero in the expanded big-art view (7 bars —
+ * the wider stage earns the extra pair) — same choreography, scaled geometry.
+ * The lg footprint is CONSTANT (no width/margin morph, rest keeps the full
+ * box) because it sits in a centered column above the transport — collapsing
+ * it would re-center the column and move the art. */
+type Size = "sm" | "lg";
+const GEOM = {
+  sm: { bar: "h-[9px] w-[2px]", dot: "h-[2px] w-[2px]", survivor: "h-[3px] w-[3px]", dropBlur: "blur-[1.5px]" },
+  lg: { bar: "h-[26px] w-[5px]", dot: "h-[5px] w-[5px]", survivor: "h-[7px] w-[7px]", dropBlur: "blur-[3px]" },
+} as const;
 /** Which spectrum bin each bar rides: center gets the lowest (Apple's
  * tall-middle silhouette); neighbors sit on staggered mids/highs so the
- * bars never bounce in lockstep. */
-const BAR_BINS = [9, 4, 1, 6, 11];
+ * bars never bounce in lockstep. lg keeps sm's inner five and adds an
+ * outer high pair. */
+const BAR_BINS = { sm: [9, 4, 1, 6, 11], lg: [12, 9, 4, 1, 6, 11, 14] } as const;
 /** Minimum bar height while alive, as a fraction of the full bar. */
 const REST = 0.25;
 /** Stop animating once every envelope has decayed below this. */
@@ -60,25 +71,32 @@ let lastAlive = false;
 
 /** Per-bar geometry/visibility for a phase. Transform is deliberately NOT
  * transitioned while alive — the rAF loop owns it per frame. */
-function barClass(phase: Phase, i: number): string {
+function barClass(phase: Phase, i: number, size: Size): string {
+  const g = GEOM[size];
   if (phase === "alive")
-    return "h-[9px] w-[2px] [transition:height_220ms_var(--ease-out-tk),width_220ms_var(--ease-out-tk),opacity_140ms_var(--ease-out-tk)]";
-  const mid = i === 2;
-  const dropped = phase === "three" ? i === 0 || i === 4 : phase !== "dots" && !mid;
-  // The survivor grows to the middot's 3px once it's alone, so the final
+    return `${g.bar} [transition:height_220ms_var(--ease-out-tk),width_220ms_var(--ease-out-tk),opacity_140ms_var(--ease-out-tk)]`;
+  // Distance from the center bar drives the collapse: "three" keeps the
+  // survivor plus its immediate pair, so at lg the two outer pairs leave on
+  // one beat — their 260ms fades on 200ms beats still read outside-in.
+  const d = Math.abs(i - (BAR_BINS[size].length - 1) / 2);
+  const mid = d === 0;
+  const dropped = phase === "three" ? d > 1 : phase !== "dots" && !mid;
+  // The survivor grows to the middot's size once it's alone, so the final
   // layer handoff is pixel-perfect.
-  const size = mid && (phase === "one" || phase === "rest") ? "h-[3px] w-[3px]" : "h-[2px] w-[2px]";
-  return `${size} ${dropped ? "opacity-0 blur-[1.5px]" : "opacity-100 blur-0"} [transition:height_260ms_var(--ease-out-tk),width_260ms_var(--ease-out-tk),transform_260ms_var(--ease-out-tk),opacity_260ms_var(--ease-out-tk),filter_260ms_var(--ease-out-tk)]`;
+  const dotSize = mid && (phase === "one" || phase === "rest") ? g.survivor : g.dot;
+  return `${dotSize} ${dropped ? `opacity-0 ${g.dropBlur}` : "opacity-100 blur-0"} [transition:height_260ms_var(--ease-out-tk),width_260ms_var(--ease-out-tk),transform_260ms_var(--ease-out-tk),opacity_260ms_var(--ease-out-tk),filter_260ms_var(--ease-out-tk)]`;
 }
 
-export function Waveform({ trailing }: { trailing?: boolean }) {
+export function Waveform({ trailing, size = "sm" }: { trailing?: boolean; size?: Size }) {
   const barsRef = useRef<Array<HTMLSpanElement | null>>([]);
   const [phase, setPhase] = useState<Phase>(lastAlive ? "alive" : "rest");
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
 
+  const bins = BAR_BINS[size];
+
   useEffect(() => {
-    const envs = Array.from({ length: BARS }, () => new Envelope(40, 500));
+    const envs = bins.map(() => new Envelope(40, 500));
     let latest: AudioBands | null = null;
     let raf = 0;
     let running = false;
@@ -103,8 +121,8 @@ export function Waveform({ trailing }: { trailing?: boolean }) {
       last = now;
       const b = latest;
       let peak = 0;
-      for (let i = 0; i < BARS; i++) {
-        const bin = BAR_BINS[i];
+      for (let i = 0; i < bins.length; i++) {
+        const bin = bins[i];
         // Fallback for a payload without fine bins: coarse band by region.
         const target =
           b === null ? 0 : (b.spectrum?.[bin] ?? (bin <= 5 ? b.bass : bin <= 10 ? b.mid : b.high));
@@ -235,23 +253,31 @@ export function Waveform({ trailing }: { trailing?: boolean }) {
   // `trailing`: nothing follows this separator (lyrics view; empty album) —
   // there is nothing to separate, so rest state renders NOTHING (no dangling
   // dot, no sr-only dash) and the bars bloom in only while music plays.
+  // Ignored at lg: the hero always keeps its middot (rest = a single dot in
+  // the reserved box) and is purely decorative (no sr-only dash).
+  const showDot = size === "lg" || !trailing;
   return (
     <span
-      className={`relative inline-flex h-[11px] items-center align-middle [transition:width_220ms_var(--ease-out-tk),margin_220ms_var(--ease-out-tk)] ${
-        atRest ? (trailing ? "mx-0 w-0" : "mx-1.5 w-[5px]") : "mx-1.5 w-[18px]"
-      }`}
+      aria-hidden={size === "lg" || undefined}
+      className={
+        size === "lg"
+          ? "relative inline-flex h-[30px] w-[65px] items-center align-middle"
+          : `relative inline-flex h-[11px] items-center align-middle [transition:width_220ms_var(--ease-out-tk),margin_220ms_var(--ease-out-tk)] ${
+              atRest ? (trailing ? "mx-0 w-0" : "mx-1.5 w-[5px]") : "mx-1.5 w-[18px]"
+            }`
+      }
     >
       {/* AT hears the separator only when it actually separates two things. */}
-      {!trailing && <span className="sr-only"> — </span>}
+      {size === "sm" && !trailing && <span className="sr-only"> — </span>}
       {/* Resting state: a colorless middot — just a separator. It swaps in
           INSTANTLY over the survivor dot (identical pixels, so no crossfade
           is needed and none is wanted — a fade would ghost while the
           container width shrinks), still accent, then drains to muted as
           the LAST beat so losing the color reads as its own event. */}
-      {!trailing && (
+      {showDot && (
         <span
           aria-hidden
-          className={`absolute left-1/2 top-1/2 h-[3px] w-[3px] -translate-x-1/2 -translate-y-1/2 rounded-full ${
+          className={`absolute left-1/2 top-1/2 ${GEOM[size].survivor} -translate-x-1/2 -translate-y-1/2 rounded-full ${
             atRest
               ? "bg-muted opacity-100 [transition:background-color_260ms_var(--ease-out-tk)_300ms]"
               : "bg-accent opacity-0 [transition:opacity_220ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]"
@@ -267,17 +293,32 @@ export function Waveform({ trailing }: { trailing?: boolean }) {
           atRest ? "opacity-0" : "opacity-100 [transition:opacity_220ms_var(--ease-out-tk)]"
         }`}
       >
-        {Array.from({ length: BARS }, (_, i) => (
+        {bins.map((_, i) => (
           <span
             key={i}
             ref={(el) => {
               barsRef.current[i] = el;
             }}
-            className={`origin-center rounded-full bg-accent will-change-transform ${barClass(phase, i)}`}
+            className={`origin-center rounded-full bg-accent will-change-transform ${barClass(phase, i, size)}`}
             style={{ transform: phase === "alive" ? `scaleY(${REST})` : "scale(1)" }}
           />
         ))}
       </span>
+    </span>
+  );
+}
+
+/** The living separator's inert twin: the same colorless middot, pixel-for-
+ * pixel, with no audio subscription. For lines where the large Waveform is
+ * already on screen — one view, one audio-reactive surface. */
+export function SeparatorDot() {
+  return (
+    <span className="relative mx-1.5 inline-flex h-[11px] w-[5px] items-center align-middle">
+      <span className="sr-only"> — </span>
+      <span
+        aria-hidden
+        className="absolute left-1/2 top-1/2 h-[3px] w-[3px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-muted"
+      />
     </span>
   );
 }
