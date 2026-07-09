@@ -3,7 +3,7 @@ import { AnimatePresence, motion, useIsPresent, useReducedMotion } from "motion/
 import type { MorphName } from "./icons/geometry";
 import { MorphIcon } from "./icons/MorphIcon";
 import { useSeekTick } from "./icons/useSeekTick";
-import { commands, onNowPlaying } from "./lib/backend";
+import { commands, onDockCorner, onNowPlaying, type DockCorner } from "./lib/backend";
 import { currentLineIndex, msUntilNextLine, parseLrc, VOCAL_LEAD_MS, type LyricLine } from "./lib/lrc";
 import { extractAccent } from "./lib/palette";
 import * as posClock from "./lib/posClock";
@@ -18,7 +18,8 @@ const SEEK_STEP_MS = 10_000;
 type Mode = "pill" | "card" | "expanded";
 
 /** Native window size per mode — the window grows out of its docked corner
- * (200ms EASE.inOut on the Rust side) while the content morphs. */
+ * (200ms EASE.inOut on the Rust side), clip-revealing the incoming mode's
+ * already-final ModeContent plane while the shells crossfade. */
 const MODE_SIZES: Record<Mode, [number, number]> = {
   pill: [300, 48],
   card: [380, 132], // anchored-cluster handoff: 52px art row, full-width progress, bottom transport
@@ -607,25 +608,64 @@ function ModeButton({
 /** Ordered mode ladder the anchored cluster steps through. */
 const MODE_ORDER: readonly Mode[] = ["pill", "card", "expanded"];
 
-/** Marks the exiting mode subtree inert for its 140ms crossfade. The
- * shell-level exit pointerEvents can't do this alone: CSS pointer-events
- * inherits, so a descendant that declares its own pointer-events-auto (the
- * pill scrim, ViewToggle — both re-enabled by group-hover, which lives on
- * the never-exiting root) overrides the ancestor's none; and neither CSS
- * property touches the tab/AT order, so Enter on a focused dead control
- * would still fire (quick-review catches, 2026-07-09). `inert` closes both:
- * whole-subtree hit-test removal that descendants cannot override, plus
- * focus/AT exclusion. Rendered as the shell's single full-height child —
- * framer freezes the exiting child's props, so presence context is the only
- * signal that still reaches this subtree. */
-function PresenceInert({ children }: { children: React.ReactNode }) {
+/** What the shell's chrome takes from the window before content: the 6px
+ * transparent inset per side (inset-1.5) + the shell's 1px border per side.
+ * Change the inset or border, change this. */
+const SHELL_CHROME_PX = 14;
+
+/** The mode's content plane: laid out at its FINAL size from the first
+ * frame, anchored to the docked corner, while the shell (a plain surface —
+ * cheap to paint) tracks the animating window and clip-reveals it
+ * (ANIMATIONS_FROM_ZERO §2: "content lays out at final size immediately;
+ * the growing window reveals it"). Before this the content filled the live
+ * window instead: every native resize frame reflowed the whole interior —
+ * rows sliding, boxes re-flexing — which read as the UI "catching up with
+ * the expansion" instead of being revealed by it (Thien, live, 2026-07-09).
+ * The fixed box also keeps the exiting mode's content from squashing while
+ * it fades.
+ *
+ * Also marks the exiting subtree inert for the crossfade: the shell-level
+ * exit pointerEvents can't do it alone — CSS pointer-events inherits, so a
+ * descendant declaring its own pointer-events-auto (the pill scrim,
+ * ViewToggle — both re-enabled by group-hover on the never-exiting root)
+ * overrides the ancestor's none, and neither property touches the tab/AT
+ * order (quick-review catches, 2026-07-09). framer freezes the exiting
+ * child's props, so presence context is the only signal that still reaches
+ * this subtree — and this instance's frozen `mode`/`corner` keep the
+ * outgoing content seated while its shell shrinks over it. */
+function ModeContent({
+  mode,
+  corner,
+  children,
+}: {
+  mode: Mode;
+  corner: DockCorner;
+  children: React.ReactNode;
+}) {
   const isPresent = useIsPresent();
+  const [w, h] = MODE_SIZES[mode];
   return (
-    <div inert={!isPresent} className="flex h-full min-h-0 flex-col">
+    <div
+      inert={!isPresent}
+      className={`absolute flex flex-col ${CORNER_SEAT[corner]}`}
+      style={{ width: w - SHELL_CHROME_PX, height: h - SHELL_CHROME_PX }}
+    >
       {children}
     </div>
   );
 }
+
+/** The plane pins to the corner dock.rs resizes out of — the one corner whose
+ * screen position is fixed through the animation. Any other anchor puts the
+ * content on a MOVING edge and it rides the resize instead of being revealed
+ * by it (quick-review catch, 2026-07-09: the plane was hardcoded bottom-right
+ * while the dock is corner-general). */
+const CORNER_SEAT: Record<DockCorner, string> = {
+  "top-left": "left-0 top-0",
+  "top-right": "right-0 top-0",
+  "bottom-left": "bottom-0 left-0",
+  "bottom-right": "bottom-0 right-0",
+};
 
 /**
  * The anchored mode cluster (design handoff 2026-07-08): collapse + expand
@@ -1345,6 +1385,11 @@ function App() {
   // Assert the reduced-motion capture vote even before any separator mounts.
   useEffect(() => initReactive(), []);
 
+  // Which work-area corner the window docks to (dock.rs owns the derivation;
+  // bottom-right until it reports). ModeContent pins the content plane there.
+  const [dockCorner, setDockCorner] = useState<DockCorner>("bottom-right");
+  useEffect(() => onDockCorner(setDockCorner), []);
+
   const [mode, setMode] = useState<Mode>(() => {
     try {
       const saved = localStorage.getItem("pulse.mode");
@@ -1365,8 +1410,13 @@ function App() {
 
   const reducedMotion = useReducedMotion();
   const morph = {
-    initial: reducedMotion ? {} : { opacity: 0, scale: 0.98 },
-    animate: { opacity: 1, scale: 1 },
+    // Opacity ONLY — no scale. The native window growth is the mode swap's
+    // single motion system; a content zoom stacked on it ran slightly out of
+    // phase (EASE.out over EASE.inOut) and wobbled the shell edges — part of
+    // the "bouncy" live feel (Thien, 2026-07-09). Dropping it also honors
+    // spec failure-mode #2: growth must never read as a zoom.
+    initial: reducedMotion ? {} : { opacity: 0 },
+    animate: { opacity: 1 },
     // The outgoing shell dissolves in place (opacity only, no transform — the
     // house exit rule) UNDER the incoming one's 200ms fade: without it the
     // swap blinks the whole translucent widget toward the desktop for the
@@ -1444,7 +1494,7 @@ function App() {
           // reads as a gray box on light surfaces.
           className="absolute inset-1.5 flex flex-col overflow-hidden rounded-xl border border-border/10 bg-surface/95 shadow-[0_1px_3px_rgb(0_0_0/0.18),0_3px_6px_rgb(0_0_0/0.12)]"
         >
-        <PresenceInert>
+        <ModeContent mode={mode} corner={dockCorner}>
         {nothing ? (
           <div className="flex h-full w-full items-center justify-center gap-2 text-muted">
             <MorphIcon name="note" size={22} />
@@ -1518,7 +1568,7 @@ function App() {
         ) : (
           <ExpandedView np={np} artUrl={shownArt} lyrics={lyrics} seekable={seekable} playing={playing} />
         )}
-        </PresenceInert>
+        </ModeContent>
         </motion.div>
       </AnimatePresence>
       {/* Outside the mode-keyed remount: the cluster never fades or rescales

@@ -338,7 +338,8 @@ pub fn run() {
             now_playing,
             set_reactive_enabled,
             dock::set_window_size,
-            dock::start_drag
+            dock::start_drag,
+            dock::dock_corner
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Moved(_) = event {

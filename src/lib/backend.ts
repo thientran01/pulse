@@ -132,6 +132,29 @@ export function onNowPlaying(cb: (np: NowPlaying) => void): () => void {
   return () => window.clearInterval(id);
 }
 
+/** Work-area corner the window is docked to — dock.rs owns the derivation
+ * (drag-release snap, launch, tray reset) and pushes changes; ModeContent
+ * anchors the fixed content plane to it so resizes reveal instead of drag. */
+export type DockCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
+
+export function onDockCorner(cb: (corner: DockCorner) => void): () => void {
+  if (!IN_TAURI) return () => {}; // mock frame always docks bottom-right
+  let gotEvent = false;
+  const un = listen<DockCorner>("dock-corner", (e) => {
+    gotEvent = true;
+    cb(e.payload);
+  });
+  // Seed like onNowPlaying: the mount-time set_window_size emit can land
+  // before the listener registration completes, so read once after
+  // subscribing; an event that beat the seed wins (always at least as new).
+  void invoke<DockCorner | null>("dock_corner").then((c) => {
+    if (c && !gotEvent) cb(c);
+  });
+  return () => {
+    un.then((f) => f());
+  };
+}
+
 export const SPECTRUM_BINS = 16;
 
 export interface AudioBands {
