@@ -212,14 +212,41 @@ fn set_menu_label(
 /// Success normally never returns on Windows: the passive NSIS installer
 /// kills this process and relaunches; restart() is the documented pattern
 /// and the relaunch guarantee if the installer doesn't do it.
+/// One update flow at a time — the silent launch check and a tray click can
+/// otherwise race two concurrent NSIS installs. Never cleared on the install
+/// path (the process dies there).
+static UPDATE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+enum UpdateOutcome {
+    Installed,
+    UpToDate,
+    /// Dev builds check but never install: the release would land in
+    /// %LOCALAPPDATA%\Pulse while restart() relaunches the DEV exe.
+    DevAvailable,
+}
+
 fn spawn_update_check(app: &AppHandle, feedback: Option<tauri::menu::MenuItem<tauri::Wry>>) {
     use tauri_plugin_updater::UpdaterExt;
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let result: Result<bool, String> = async {
+        if UPDATE_IN_FLIGHT
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            // Another flow is mid-check/install (launch check racing a tray
+            // click) — put the entry back rather than leaving "Checking…".
+            if let Some(item) = &feedback {
+                set_menu_label(&app, item, "Check for updates", true);
+            }
+            return;
+        }
+        let result: Result<UpdateOutcome, String> = async {
             let updater = app.updater().map_err(|e| e.to_string())?;
             match updater.check().await.map_err(|e| e.to_string())? {
                 Some(update) => {
+                    if cfg!(debug_assertions) {
+                        return Ok(UpdateOutcome::DevAvailable);
+                    }
                     if let Some(item) = &feedback {
                         set_menu_label(&app, item, "Installing update…", false);
                     }
@@ -227,17 +254,23 @@ fn spawn_update_check(app: &AppHandle, feedback: Option<tauri::menu::MenuItem<ta
                         .download_and_install(|_, _| {}, || {})
                         .await
                         .map_err(|e| e.to_string())?;
-                    Ok(true)
+                    Ok(UpdateOutcome::Installed)
                 }
-                None => Ok(false),
+                None => Ok(UpdateOutcome::UpToDate),
             }
         }
         .await;
+        UPDATE_IN_FLIGHT.store(false, Ordering::SeqCst);
         match result {
-            Ok(true) => app.restart(),
-            Ok(false) => {
+            Ok(UpdateOutcome::Installed) => app.restart(),
+            Ok(UpdateOutcome::UpToDate) => {
                 if let Some(item) = &feedback {
                     set_menu_label(&app, item, "Up to date", false);
+                }
+            }
+            Ok(UpdateOutcome::DevAvailable) => {
+                if let Some(item) = &feedback {
+                    set_menu_label(&app, item, "Update available (dev — not installing)", false);
                 }
             }
             Err(e) => {
