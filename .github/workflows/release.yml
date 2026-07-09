@@ -1,0 +1,43 @@
+name: Release
+
+# Tag main as vX.Y.Z (matching the version in tauri.conf.json) and push the
+# tag — this builds the NSIS installer, signs the updater artifacts with
+# TAURI_SIGNING_PRIVATE_KEY (repo secret; key file lives at ~/.tauri/pulse.key
+# on Thien's machine — losing it orphans every installed copy), and publishes
+# a GitHub Release with latest.json for the in-app updater.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Pulse ${{ github.ref_name }}"
+          releaseBody: "NSIS installer below. Unsigned — Windows SmartScreen will warn on first run (More info → Run anyway). Installed copies self-update from this release."

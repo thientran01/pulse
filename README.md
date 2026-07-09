@@ -4,7 +4,7 @@ An always-on-top mini music player for Windows. Reads and controls whatever is p
 
 ## Install
 
-Grab `Pulse_x.y.z_x64-setup.exe` from a release build and run it — per-user install, no admin required. Pulse lives in the system tray; the widget docks to a corner of your screen and stays on top.
+Grab `Pulse_x.y.z_x64-setup.exe` from the [latest release](https://github.com/thientran01/pulse/releases/latest) and run it — per-user install, no admin required. Pulse lives in the system tray; the widget docks to a corner of your screen and stays on top. Installed copies check for updates at launch and update themselves.
 
 > The installer is currently unsigned, so Windows SmartScreen will warn on first run ("More info" → "Run anyway").
 
