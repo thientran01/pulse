@@ -500,6 +500,67 @@ function PlayerBadge({ player }: { player: NowPlaying["player"] }) {
   );
 }
 
+/** Hover hold before the full-text tooltip shows — reading intent, not a
+ * flyby. Native `title` waits about this long; this is the styled stand-in. */
+const TIP_DELAY_MS = 500;
+
+/** Truncating text line that reveals its full value in a mini tooltip after
+ * a hover hold — only when the text is actually clipped, measured at hover
+ * time so mode resizes can't leave a stale flag. The full string is already
+ * in the accessibility tree (truncate is a visual clip), so the tooltip is
+ * aria-hidden decoration, not the AT path. Chrome rules apply: raised
+ * neutral surface, no accent. */
+function TruncateTip({ text, className }: { text: string; className: string }) {
+  const [open, setOpen] = useState(false);
+  const timer = useRef<number | null>(null);
+  const clear = () => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = null;
+  };
+  useEffect(() => clear, []);
+  const reducedMotion = useReducedMotion();
+  return (
+    <span className="relative block min-w-0">
+      <span
+        className={`block truncate ${className}`}
+        onMouseEnter={(e) => {
+          const el = e.currentTarget;
+          clear();
+          // +1 forgives subpixel rounding: a line clipped by half a pixel
+          // isn't hiding anything worth a tooltip.
+          timer.current = window.setTimeout(() => setOpen(el.scrollWidth > el.clientWidth + 1), TIP_DELAY_MS);
+        }}
+        onMouseLeave={() => {
+          clear();
+          setOpen(false);
+        }}
+      >
+        {text}
+      </span>
+      <AnimatePresence>
+        {open && (
+          <motion.span
+            aria-hidden
+            initial={{ opacity: 0, y: -2 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            transition={{
+              duration: reducedMotion ? 0 : DUR[2] / 1000,
+              ease: [...EASE.out] as [number, number, number, number],
+            }}
+            // w-max up to the window's width minus the header's left gutter
+            // (44px art + gaps) — long strings wrap instead of truncating
+            // again inside their own tooltip.
+            className="absolute left-0 top-full z-20 mt-1.5 w-max max-w-[250px] whitespace-normal break-words rounded-md border border-border/10 bg-surface-2 px-2 py-1 text-xs leading-4 text-fg shadow-lg shadow-black/40"
+          >
+            {text}
+          </motion.span>
+        )}
+      </AnimatePresence>
+    </span>
+  );
+}
+
 /** Mode switch buttons: expand/contract corner brackets for the size ladder,
  * a mic for the lyrics view — action verbs, not container pictograms (v1's
  * pill/card/lyrics glyphs read as abstract shapes at 13px). Two stable slots
@@ -954,11 +1015,20 @@ function ExpandedView({
               <div className="flex items-center gap-2.5 pr-16">
                 <Art url={artUrl} size={44} radiusPx={6} />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-[15px] font-medium text-fg">{np.title}</p>
-                  <p className="truncate text-[13px] text-muted">
-                    {np.artist}
-                    <Waveform trailing />
-                  </p>
+                  <TruncateTip text={np.title} className="text-[15px] font-medium text-fg" />
+                  {/* Flex row, not inline flow: a long artist truncates in
+                      its own box while the waveform keeps its seat right
+                      after the clipped text — inline, it rode the string's
+                      full width into the clip edge. */}
+                  <div className="flex min-w-0 items-center">
+                    <TruncateTip text={np.artist} className="text-[13px] text-muted" />
+                    {/* md, not sm: this header is the lyrics view's only
+                        now-playing signal, so it earns more presence than
+                        an inline text separator. */}
+                    <span className="flex shrink-0 items-center">
+                      <Waveform size="md" trailing />
+                    </span>
+                  </div>
                 </div>
               </div>
               <LyricsPanel
