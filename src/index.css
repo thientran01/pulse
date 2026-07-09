@@ -54,6 +54,15 @@ body,
   height: 100%;
 }
 
+/* The native mode resize reflows the webview every frame — content that
+ * momentarily overflows mid-resize must clip, never flash a scrollbar
+ * (ANIMATIONS_FROM_ZERO §2). The shell's own overflow-hidden clips inside
+ * the window inset; this guards the 6px gutter around it. */
+html,
+body {
+  overflow: hidden;
+}
+
 /* The widget window is transparent; the React root paints its own surface. */
 body {
   margin: 0;
