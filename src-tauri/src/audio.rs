@@ -23,9 +23,26 @@ const SPECTRUM_BINS: usize = 16;
 const SPECTRUM_LO_HZ: f32 = 40.0;
 const SPECTRUM_HI_HZ: f32 = 8000.0;
 const ATTACK: f32 = 0.55;
-const RELEASE: f32 = 0.12;
+/// Release fast enough that a bar has visibly fallen before the next beat
+/// lands (~0.3 → ~2.5 ticks to halve ≈ 80ms) — 0.12 blurred adjacent kicks
+/// into one sway.
+const RELEASE: f32 = 0.3;
 /// Auto-gain reference decays slowly so quiet and loud tracks both animate.
 const GAIN_DECAY: f32 = 0.995;
+/// Broadband-RMS reference for the dynamics factor decays slower than the
+/// per-bin gain (~11s half-life vs ~5s) so a quiet bridge stays visibly
+/// quiet instead of re-gaining to full height mid-section.
+const RMS_DECAY: f32 = 0.998;
+/// How short a silent-adjacent passage can render: the dynamics factor
+/// scales bar targets into [DYN_FLOOR, 1] so quiet sections still animate,
+/// just visibly smaller.
+const DYN_FLOOR: f32 = 0.35;
+/// The dynamics factor tracks SECTIONS (verse vs drop), so its release is
+/// deliberately much slower than the per-bin RELEASE (~760ms half-life vs
+/// ~80ms): broadband RMS dips in the gaps between beats, and a fast release
+/// here would duck every bar in lockstep — the pump the staggered bins
+/// exist to avoid. Attack reuses ATTACK so a drop lands immediately.
+const DYN_RELEASE: f32 = 0.03;
 
 #[derive(Serialize, Clone, Copy, Default)]
 pub struct Bands {
@@ -152,6 +169,8 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
         let spec_edges = spectrum_edges();
         let mut smoothed_spec = [0.0f32; SPECTRUM_BINS];
         let mut gain_spec = [1e-4f32; SPECTRUM_BINS];
+        let mut rms_ref = 1e-4f32;
+        let mut smoothed_dyn = 0.0f32;
         let mut scratch = vec![Complex::default(); FFT_SIZE];
         // Stream-health watchdog: the callback bumps `frames`; if it stalls
         // while we're supposedly capturing (default device changed, stream
@@ -178,6 +197,7 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                     active = None; // drops the stream, releases the device
                     smoothed = [0.0; 3];
                     smoothed_spec = [0.0; SPECTRUM_BINS];
+                    smoothed_dyn = 0.0;
                     let _ = app.emit("audio-bands", Bands::default());
                 }
                 (Some(_), true) => {
@@ -209,6 +229,18 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
             fft.process(&mut scratch);
             let raw = band_energies(&scratch, *rate);
 
+            // Dynamics factor: broadband RMS against a slow peak reference.
+            // Per-bin auto-gain (below) erases loud-vs-quiet across song
+            // sections — every bin re-normalizes to its own recent peak — so
+            // this factor scales the *visual* targets back down during quiet
+            // passages. sqrt eases the curve (half amplitude → ~0.7, not 0.5).
+            let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+            rms_ref = (rms_ref * RMS_DECAY).max(rms).max(1e-4);
+            let dyn_target = (rms / rms_ref).clamp(0.0, 1.0).sqrt();
+            let dk = if dyn_target > smoothed_dyn { ATTACK } else { DYN_RELEASE };
+            smoothed_dyn += (dyn_target - smoothed_dyn) * dk;
+            let dyn_scale = DYN_FLOOR + (1.0 - DYN_FLOOR) * smoothed_dyn;
+
             let mut norm = [0.0f32; 3];
             for i in 0..3 {
                 gain_ref[i] = (gain_ref[i] * GAIN_DECAY).max(raw[i]).max(1e-4);
@@ -226,12 +258,15 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                 smoothed_spec[i] += (target - smoothed_spec[i]) * k;
                 spectrum[i] = smoothed_spec[i];
             }
+            // `level` stays UNSCALED — it drives the separator's wake/sleep
+            // (frontend WAKE_LEVEL), and a quiet passage is still "playing".
+            // Only the visual targets (bands + spectrum) take the dynamics.
             let bands = Bands {
-                bass: norm[0],
-                mid: norm[1],
-                high: norm[2],
+                bass: norm[0] * dyn_scale,
+                mid: norm[1] * dyn_scale,
+                high: norm[2] * dyn_scale,
                 level: (norm[0] * 0.5 + norm[1] * 0.35 + norm[2] * 0.15).clamp(0.0, 1.0),
-                spectrum,
+                spectrum: spectrum.map(|s| s * dyn_scale),
             };
             let _ = app.emit("audio-bands", bands);
             std::thread::sleep(EMIT_INTERVAL);

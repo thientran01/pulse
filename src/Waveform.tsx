@@ -13,24 +13,36 @@ import { useEffect, useRef, useState } from "react";
 import { type AudioBands } from "./lib/backend";
 import { Envelope, subscribeBands } from "./lib/reactive";
 
-/** Two renditions of the same instrument: "sm" is the inline text separator
- * (5 bars); "lg" is the standalone hero in the expanded big-art view (7 bars —
- * the wider stage earns the extra pair) — same choreography, scaled geometry.
- * The lg footprint is CONSTANT (no width/margin morph, rest keeps the full
- * box) because it sits in a centered column above the transport — collapsing
- * it would re-center the column and move the art. */
-type Size = "sm" | "lg";
+/** Three renditions of the same instrument: "sm" is the inline text separator
+ * (5 bars); "md" is the lyrics-view header separator (7 bars, scaled up — the
+ * header is that view's only now-playing signal, so it earns more presence
+ * than a text separator); "lg" is the standalone hero in the expanded big-art
+ * view (7 bars — the wider stage earns the extra pair) — same choreography,
+ * scaled geometry. boxH/aliveW/restW size the container: sm/md morph
+ * width between rest and alive; the lg footprint is CONSTANT (no width/margin
+ * morph, rest keeps the full box) because it sits in a centered column above
+ * the transport — collapsing it would re-center the column and move the art. */
+type Size = "sm" | "md" | "lg";
 const GEOM = {
-  sm: { bar: "h-[9px] w-[2px]", dot: "h-[2px] w-[2px]", survivor: "h-[3px] w-[3px]", dropBlur: "blur-[1.5px]" },
-  lg: { bar: "h-[26px] w-[5px]", dot: "h-[5px] w-[5px]", survivor: "h-[7px] w-[7px]", dropBlur: "blur-[3px]" },
+  sm: { bar: "h-[9px] w-[2px]", dot: "h-[2px] w-[2px]", survivor: "h-[3px] w-[3px]", dropBlur: "blur-[1.5px]", boxH: "h-[11px]", aliveW: "w-[18px]", restW: "w-[5px]" },
+  md: { bar: "h-[18px] w-[4px]", dot: "h-[3px] w-[3px]", survivor: "h-[4px] w-[4px]", dropBlur: "blur-[2px]", boxH: "h-[20px]", aliveW: "w-[46px]", restW: "w-[6px]" },
+  lg: { bar: "h-[26px] w-[5px]", dot: "h-[5px] w-[5px]", survivor: "h-[7px] w-[7px]", dropBlur: "blur-[3px]", boxH: "h-[30px]", aliveW: "w-[65px]", restW: "w-[65px]" },
 } as const;
 /** Which spectrum bin each bar rides: center gets the lowest (Apple's
  * tall-middle silhouette); neighbors sit on staggered mids/highs so the
- * bars never bounce in lockstep. lg keeps sm's inner five and adds an
- * outer high pair. */
-const BAR_BINS = { sm: [9, 4, 1, 6, 11], lg: [12, 9, 4, 1, 6, 11, 14] } as const;
+ * bars never bounce in lockstep. md and lg share the seven-bar spread —
+ * sm's inner five plus an outer high pair. */
+const BAR_BINS = { sm: [9, 4, 1, 6, 11], md: [12, 9, 4, 1, 6, 11, 14], lg: [12, 9, 4, 1, 6, 11, 14] } as const;
 /** Minimum bar height while alive, as a fraction of the full bar. */
-const REST = 0.25;
+const REST = 0.15;
+/** Frontend envelope on top of the backend's smoothing: fast attack so hits
+ * land, release short enough that a bar visibly falls between beats (500ms
+ * blurred adjacent kicks into a sway). */
+const ENV_ATTACK_MS = 40;
+const ENV_RELEASE_MS = 180;
+/** Height shaping exponent: <1 lifts moderate energy, but 0.6 compressed
+ * everything to "medium-tall" — 0.85 keeps the loud/quiet contrast. */
+const SHAPE_EXP = 0.85;
 /** Stop animating once every envelope has decayed below this. */
 const IDLE_EPS = 0.004;
 /** Level above which the separator wakes; falls asleep after quiet holds. */
@@ -96,7 +108,7 @@ export function Waveform({ trailing, size = "sm" }: { trailing?: boolean; size?:
   const bins = BAR_BINS[size];
 
   useEffect(() => {
-    const envs = bins.map(() => new Envelope(40, 500));
+    const envs = bins.map(() => new Envelope(ENV_ATTACK_MS, ENV_RELEASE_MS));
     let latest: AudioBands | null = null;
     let raf = 0;
     let running = false;
@@ -129,8 +141,9 @@ export function Waveform({ trailing, size = "sm" }: { trailing?: boolean; size?:
         const e = envs[i].step(target, dt);
         peak = Math.max(peak, e);
         const el = barsRef.current[i];
-        // Concave shaping: moderate energy already reaches near-full height.
-        if (el) el.style.transform = `scaleY(${(REST + Math.pow(e, 0.6) * (1 - REST)).toFixed(3)})`;
+        // Mildly concave shaping: lifts moderate energy without flattening
+        // the loud/quiet contrast (see SHAPE_EXP).
+        if (el) el.style.transform = `scaleY(${(REST + Math.pow(e, SHAPE_EXP) * (1 - REST)).toFixed(3)})`;
       }
       // Idle-stop once decayed; the next band event restarts the loop.
       if (peak < IDLE_EPS && (b === null || b.level <= 0.001)) {
@@ -259,13 +272,13 @@ export function Waveform({ trailing, size = "sm" }: { trailing?: boolean; size?:
   return (
     <span
       aria-hidden={size === "lg" || undefined}
-      className={
+      className={`relative inline-flex ${GEOM[size].boxH} items-center align-middle ${
         size === "lg"
-          ? "relative inline-flex h-[30px] w-[65px] items-center align-middle"
-          : `relative inline-flex h-[11px] items-center align-middle [transition:width_220ms_var(--ease-out-tk),margin_220ms_var(--ease-out-tk)] ${
-              atRest ? (trailing ? "mx-0 w-0" : "mx-1.5 w-[5px]") : "mx-1.5 w-[18px]"
+          ? GEOM[size].aliveW
+          : `[transition:width_220ms_var(--ease-out-tk),margin_220ms_var(--ease-out-tk)] ${
+              atRest ? (trailing ? "mx-0 w-0" : `mx-1.5 ${GEOM[size].restW}`) : `mx-1.5 ${GEOM[size].aliveW}`
             }`
-      }
+      }`}
     >
       {/* AT hears the separator only when it actually separates two things. */}
       {size === "sm" && !trailing && <span className="sr-only"> — </span>}
