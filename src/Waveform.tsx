@@ -17,7 +17,7 @@ import { Envelope, subscribeBands } from "./lib/reactive";
  * (5 bars); "md" is the lyrics-view header separator (7 bars, scaled up — the
  * header is that view's only now-playing signal, so it earns more presence
  * than a text separator); "lg" is the standalone hero in the expanded big-art
- * view (7 bars — the wider stage earns the extra pair) — same choreography,
+ * view (9 bars — the wider stage earns the extra pairs) — same choreography,
  * scaled geometry. boxH/aliveW/restW size the container: sm/md morph
  * width between rest and alive; the lg footprint is CONSTANT (no width/margin
  * morph, rest keeps the full box) because it sits in a centered column above
@@ -26,13 +26,14 @@ type Size = "sm" | "md" | "lg";
 const GEOM = {
   sm: { bar: "h-[9px] w-[2px]", dot: "h-[2px] w-[2px]", survivor: "h-[3px] w-[3px]", dropBlur: "blur-[1.5px]", boxH: "h-[11px]", aliveW: "w-[18px]", restW: "w-[5px]" },
   md: { bar: "h-[18px] w-[4px]", dot: "h-[3px] w-[3px]", survivor: "h-[4px] w-[4px]", dropBlur: "blur-[2px]", boxH: "h-[20px]", aliveW: "w-[46px]", restW: "w-[6px]" },
-  lg: { bar: "h-[26px] w-[5px]", dot: "h-[5px] w-[5px]", survivor: "h-[7px] w-[7px]", dropBlur: "blur-[3px]", boxH: "h-[30px]", aliveW: "w-[65px]", restW: "w-[65px]" },
+  lg: { bar: "h-[26px] w-[5px]", dot: "h-[5px] w-[5px]", survivor: "h-[7px] w-[7px]", dropBlur: "blur-[3px]", boxH: "h-[30px]", aliveW: "w-[85px]", restW: "w-[85px]" },
 } as const;
 /** Which spectrum bin each bar rides: center gets the lowest (Apple's
  * tall-middle silhouette); neighbors sit on staggered mids/highs so the
- * bars never bounce in lockstep. md and lg share the seven-bar spread —
- * sm's inner five plus an outer high pair. */
-const BAR_BINS = { sm: [9, 4, 1, 6, 11], md: [12, 9, 4, 1, 6, 11, 14], lg: [12, 9, 4, 1, 6, 11, 14] } as const;
+ * bars never bounce in lockstep. md is sm's inner five plus an outer high
+ * pair; lg adds one more high pair outside those (15/13 deliberately
+ * asymmetric — twin bins would bounce the edges in lockstep). */
+const BAR_BINS = { sm: [9, 4, 1, 6, 11], md: [12, 9, 4, 1, 6, 11, 14], lg: [15, 12, 9, 4, 1, 6, 11, 14, 13] } as const;
 /** Minimum bar height while alive, as a fraction of the full bar. */
 const REST = 0.15;
 /** Frontend envelope on top of the backend's smoothing: fast attack so hits
@@ -88,8 +89,8 @@ function barClass(phase: Phase, i: number, size: Size): string {
   if (phase === "alive")
     return `${g.bar} [transition:height_220ms_var(--ease-out-tk),width_220ms_var(--ease-out-tk),opacity_140ms_var(--ease-out-tk)]`;
   // Distance from the center bar drives the collapse: "three" keeps the
-  // survivor plus its immediate pair, so at lg the two outer pairs leave on
-  // one beat — their 260ms fades on 200ms beats still read outside-in.
+  // survivor plus its immediate pair, so at lg the three outer pairs leave
+  // on one beat — their 260ms fades on 200ms beats still read outside-in.
   const d = Math.abs(i - (BAR_BINS[size].length - 1) / 2);
   const mid = d === 0;
   const dropped = phase === "three" ? d > 1 : phase !== "dots" && !mid;

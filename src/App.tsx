@@ -1,5 +1,6 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import type { MorphName } from "./icons/geometry";
 import { MorphIcon } from "./icons/MorphIcon";
 import { useSeekTick } from "./icons/useSeekTick";
 import { commands, onNowPlaying } from "./lib/backend";
@@ -654,6 +655,63 @@ function ModeCluster({ mode, onStep }: { mode: Mode; onStep: (d: -1 | 1) => void
   );
 }
 
+/** The expanded view preference — lyrics (default) or album art. Persisted
+ * like pulse.mode: "I don't want to see lyrics" is a preference, not a
+ * per-visit choice, so it survives mode switches and relaunches. */
+function readViewPref(): "lyrics" | "art" {
+  try {
+    return localStorage.getItem("pulse.expandedView") === "art" ? "art" : "lyrics";
+  } catch {
+    return "lyrics";
+  }
+}
+
+/**
+ * The expanded view's art ⇄ lyrics toggle: one 28px seat at the top-right —
+ * the corner the anchored cluster's move to the bottom freed up. Same
+ * hover/focus-within reveal contract as the cluster (hidden at rest, opacity
+ * only, hidden ≠ inert — see ModeCluster), same mousedown swallow so a press
+ * never falls through to the window drag. The glyph names the DESTINATION:
+ * mic = show lyrics (karaoke), note = show album cover; a track with no
+ * synced lyrics disables the seat in place as a crossed-out mic — the seat
+ * never unmounts, so there's nothing to hunt for and nothing shifts. */
+function ViewToggle({
+  glyph,
+  label,
+  disabled = false,
+  onToggle,
+}: {
+  glyph: MorphName;
+  label: string;
+  disabled?: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div
+      className="pointer-events-none absolute right-2 top-2 z-10 opacity-0 transition-opacity duration-2 ease-out-tk group-hover/widget:pointer-events-auto group-hover/widget:opacity-100 group-focus-within/widget:pointer-events-auto group-focus-within/widget:opacity-100"
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <button
+        type="button"
+        aria-label={label}
+        title={label}
+        // aria-disabled (not disabled) keeps the seat focusable — the reveal
+        // rides focus-within, and a hard-disabled button would drop out of
+        // the Tab order entirely. Click guard covers Enter/Space.
+        aria-disabled={disabled || undefined}
+        onClick={() => {
+          if (!disabled) onToggle();
+        }}
+        className={`grid h-7 w-7 place-items-center rounded-md transition duration-2 ease-out-tk ${
+          disabled ? "pointer-events-none text-muted opacity-30" : "text-fg hover:bg-fg/10 active:scale-95"
+        }`}
+      >
+        <MorphIcon name={glyph} size={13} slot="view-toggle" dur={DUR[3]} ease={EASE.inOut} />
+      </button>
+    </div>
+  );
+}
+
 /** The marquee morph, fired optimistically on pointerdown — the morph IS the
  * press response (SMTC command bools lie; the next emit is the
  * reconciliation). Diff-suppressed emits mean a silently failed command never
@@ -977,6 +1035,11 @@ function Transport({
  * there": inside this window the swap renders plain (no arrival cascade), so
  * the inner choreography never stacks on the mode morph's tail. */
 const SNAP_WINDOW_MS = 300;
+/** How long the "No synced lyrics" caption stays before fading out — it's an
+ * answer to "why am I looking at art instead of lyrics", and once read it
+ * shouldn't sit under the metadata forever. The reserved slot keeps its
+ * height, so the fade moves nothing. */
+const NO_LYRICS_CAPTION_MS = 4000;
 /** Entrance delay on the entering view so the exit visibly leads — the
  * overlap reads as one gesture (off the DUR scale deliberately: it's an
  * offset between beats, not a duration). */
@@ -984,14 +1047,18 @@ const EXIT_LEAD_MS = 40;
 
 /**
  * Expanded mode: big-art fallback while lyrics fetch, karaoke view once they
- * land. Progress and transport are HOISTED out of the swap — chrome holds
- * perfectly still (and the rAF-driven progress fill never remounts
- * mid-write); only the content region crossfades. Mode controls live in the
- * app-root anchored cluster, so the top-right is free. The arrival
- * is choreographed (art exhales with the house blur, rows cascade outward
- * from the current line, the accent marker ignites last); the reverse — a
- * track change — exits fast and plain: continuity is earned by content
- * identity, and the outgoing view's art/lyrics belong to the outgoing track.
+ * land — unless the user flipped the top-right ViewToggle to art, which wins
+ * over available lyrics (a persisted preference, see readViewPref). Progress
+ * and transport are HOISTED out of the swap — chrome holds perfectly still
+ * (and the rAF-driven progress fill never remounts mid-write); only the
+ * content region crossfades. Mode controls live in the app-root anchored
+ * cluster; the view toggle is hoisted beside the swap for the same reason.
+ * The arrival is choreographed (art exhales with the house blur, rows
+ * cascade outward from the current line, the accent marker ignites last) —
+ * but ONLY when lyrics resolve on their own: a user-initiated toggle is a
+ * command, not an arrival, and swaps plain. The reverse — a track change —
+ * exits fast and plain: continuity is earned by content identity, and the
+ * outgoing view's art/lyrics belong to the outgoing track.
  */
 function ExpandedView({
   np,
@@ -1011,10 +1078,30 @@ function ExpandedView({
   // track's lines during useLyrics' one-render loading gap (see lyricsKeyOf).
   const lyricsLive = lyrics.status === "synced" && lyrics.key === lyricsKeyOf(np);
 
+  // The user's art ⇄ lyrics preference. Lyrics still gate on availability:
+  // "lyrics" with none synced falls back to art, and the preference sits
+  // unchanged for the next track that has them.
+  const [view, setView] = useState<"lyrics" | "art">(readViewPref);
+  const showLyrics = lyricsLive && view === "lyrics";
+  const toggleView = () => {
+    // A toggle is a command, not an arrival — clear the art clock so the
+    // swap it causes renders plain instead of earning the cascade.
+    artShownAt.current = null;
+    setView((v) => {
+      const next = v === "lyrics" ? "art" : "lyrics";
+      try {
+        localStorage.setItem("pulse.expandedView", next);
+      } catch {
+        // non-fatal: the preference resets to lyrics next launch
+      }
+      return next;
+    });
+  };
+
   // The arrival cascade is earned by a real wait: the art view must have been
   // on screen past the snap window. Stamped in an effect (post-commit), read
   // on the later render the swap triggers. The clock restarts per TRACK, not
-  // just per lyricsLive edge — a none→loading track change keeps lyricsLive
+  // just per showLyrics edge — a none→loading track change keeps showLyrics
   // false throughout, and the stale timestamp would let the next track's
   // instant resolve wrongly earn the cascade.
   const trackKey = lyricsKeyOf(np);
@@ -1023,7 +1110,7 @@ function ExpandedView({
     artShownAt.current = null;
   }, [trackKey]);
   useEffect(() => {
-    if (lyricsLive) {
+    if (showLyrics) {
       artShownAt.current = null;
     } else if (artShownAt.current === null) {
       artShownAt.current = performance.now();
@@ -1033,6 +1120,17 @@ function ExpandedView({
     !reducedMotion &&
     artShownAt.current !== null &&
     performance.now() - artShownAt.current > SNAP_WINDOW_MS;
+
+  // The miss caption answers once, then leaves (NO_LYRICS_CAPTION_MS); the
+  // timer restarts per track and per status flip so a loading→none resolve
+  // gets its full read window.
+  const [captionExpired, setCaptionExpired] = useState(false);
+  useEffect(() => {
+    setCaptionExpired(false);
+    if (lyrics.status !== "none") return;
+    const t = window.setTimeout(() => setCaptionExpired(true), NO_LYRICS_CAPTION_MS);
+    return () => window.clearTimeout(t);
+  }, [lyrics.status, trackKey]);
 
   const swap = {
     initial: reducedMotion ? {} : { opacity: 0 },
@@ -1052,7 +1150,7 @@ function ExpandedView({
     <div className="relative flex h-full flex-col gap-2 px-3 pb-2.5 pt-3">
       <div className="relative min-h-0 flex-1">
         <AnimatePresence initial={false}>
-          {lyricsLive ? (
+          {showLyrics ? (
             <motion.div
               // Keyed per TRACK: a fast resolve landing inside the previous
               // lyrics view's 140ms exit window would otherwise re-adopt the
@@ -1065,7 +1163,9 @@ function ExpandedView({
               exit={{ opacity: 0, pointerEvents: "none", transition: exitFast }}
               className="absolute inset-0 flex flex-col gap-2"
             >
-              <div className="flex items-center gap-2.5">
+              {/* pr-8 clears the hover-revealed ViewToggle seat — a long
+                  title/artist must not run under the incoming button. */}
+              <div className="flex items-center gap-2.5 pr-8">
                 <Art url={artUrl} size={44} radiusPx={6} />
                 <div className="min-w-0 flex-1">
                   <TruncateTip text={np.title} className="text-[15px] font-medium text-fg" />
@@ -1116,13 +1216,22 @@ function ExpandedView({
                     not re-center the column and shift the art (it did — every
                     lyrics miss nudged the 190px cover ~7px). "Finding
                     lyrics…" waits 400ms so fast fetches never flash it, and
-                    turns the eventual arrival into an answered question. */}
+                    turns the eventual arrival into an answered question. The
+                    miss caption fades back out once read (captionExpired) —
+                    the disabled toggle seat keeps carrying the answer;
+                    aria-hidden goes with it, since opacity 0 alone would
+                    leave AT announcing a caption sighted users can't see. */}
                 <p className="mt-0.5 h-[15px] text-[10px] text-muted">
                   {lyrics.status !== "synced" && (
                     <span
                       key={lyrics.status}
-                      className={`inline-block animate-[caption-in_200ms_var(--ease-out-tk)_both] ${
-                        lyrics.status === "loading" ? "[animation-delay:400ms]" : ""
+                      aria-hidden={captionExpired || undefined}
+                      className={`inline-block ${
+                        captionExpired
+                          ? "animate-[caption-out_260ms_var(--ease-out-tk)_both]"
+                          : `animate-[caption-in_200ms_var(--ease-out-tk)_both] ${
+                              lyrics.status === "loading" ? "[animation-delay:400ms]" : ""
+                            }`
                       }`}
                     >
                       {lyrics.status === "loading" ? "Finding lyrics…" : "No synced lyrics"}
@@ -1143,6 +1252,27 @@ function ExpandedView({
           )}
         </AnimatePresence>
       </div>
+      {/* Hoisted chrome, like progress/transport below: the toggle keeps its
+          seat while the content it switches crossfades under it. Glyph and
+          label name the destination; no lyrics = disabled in place. The
+          miss states key on status === "none" (not !== "synced"): during a
+          track change there's a one-render gap where the OLD track's synced
+          state hasn't flipped to loading yet (see lyricsKeyOf), and mapping
+          it to micOff would kick a spurious slash morph on every skip. */}
+      <ViewToggle
+        glyph={lyricsLive ? (showLyrics ? "note" : "mic") : lyrics.status === "none" ? "micOff" : "mic"}
+        label={
+          lyricsLive
+            ? showLyrics
+              ? "Show album cover"
+              : "Show lyrics"
+            : lyrics.status === "none"
+              ? "No synced lyrics"
+              : "Finding lyrics…"
+        }
+        disabled={!lyricsLive}
+        onToggle={toggleView}
+      />
       {/* Hoisted chrome: one seat for both states. Progress sits ABOVE the
           transport (handoff order) so the transport is the very-bottom row —
           the anchored cluster shares its vertical band at the corner. */}

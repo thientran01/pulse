@@ -29,6 +29,7 @@ export type MorphName =
   | "expand"
   | "contract"
   | "mic"
+  | "micOff"
   | "note";
 
 export type Stroke = { d: string; o: 0 | 1 };
@@ -110,6 +111,16 @@ export const ICONS: Record<MorphName, [Stroke, Stroke, Stroke]> = {
     { d: "M 8.0,3.2 C 10.9,3.2 10.9,8.2 8.0,8.2 C 5.1,8.2 5.1,3.2 8.0,3.2", o: 1 },
     { d: "M 4.6,7.2 C 4.6,9.1 6.1,10.6 8.0,10.6 C 9.9,10.6 11.4,9.1 11.4,7.2", o: 1 },
     { d: "M 8.0,10.6 C 8.0,11.0 8.0,11.4 8.0,11.8 C 8.0,12.2 8.0,12.6 8.0,13.0", o: 1 },
+  ],
+  // mic crossed out — the expanded view-toggle's "no synced lyrics" state.
+  // Head and stand are byte-identical to mic's, so the loading→miss morph is
+  // a single event: the stem (stroke 2) sweeps out into the corner-to-corner
+  // slash. The stem is the sacrifice the 3-stroke budget demands — head +
+  // stand + slash still read as a muted mic at 13px.
+  micOff: [
+    { d: "M 8.0,3.2 C 10.9,3.2 10.9,8.2 8.0,8.2 C 5.1,8.2 5.1,3.2 8.0,3.2", o: 1 },
+    { d: "M 4.6,7.2 C 4.6,9.1 6.1,10.6 8.0,10.6 C 9.9,10.6 11.4,9.1 11.4,7.2", o: 1 },
+    { d: "M 3.2,3.2 C 4.8,4.8 6.4,6.4 8.0,8.0 C 9.6,9.6 11.2,11.2 12.8,12.8", o: 1 },
   ],
   // Eighth note: stem = spine (maps rigidly onto play's left edge), flag =
   // action (curl opens into the apex chevron), notehead = detail (two 180°
