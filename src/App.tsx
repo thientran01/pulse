@@ -621,12 +621,15 @@ const MODE_ORDER: readonly Mode[] = ["pill", "card", "expanded"];
  * — invisible (the 13px glyph stays centered well inside the shell), and the
  * price of the fixed point. Hidden at rest (opacity 0, pointer-events none),
  * it reveals on widget hover (group/widget): opacity 0→1 over 140ms EASE.out,
- * no motion.
+ * no motion. Also reveals on focus-within — the buttons stay in the Tab
+ * order the whole time (hidden ≠ inert), so a hover-only reveal would strand
+ * keyboard users on an invisible, invisibly-outlined control (quick-review
+ * catch, 2026-07-08).
  */
 function ModeCluster({ mode, onStep }: { mode: Mode; onStep: (d: -1 | 1) => void }) {
   return (
     <div
-      className="pointer-events-none absolute bottom-4 right-3.5 z-20 flex items-center gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-hover/widget:pointer-events-auto group-hover/widget:opacity-100"
+      className="pointer-events-none absolute bottom-4 right-3.5 z-20 flex items-center gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-hover/widget:pointer-events-auto group-hover/widget:opacity-100 group-focus-within/widget:pointer-events-auto group-focus-within/widget:opacity-100"
       // Swallow mousedown: pointer-events-none makes a DISABLED button
       // transparent to hit-testing, so without this a press on it (or the
       // 4px gap between the buttons) would fall through to the root drag
@@ -907,7 +910,10 @@ function Hairline({ np }: { np: NowPlaying }) {
  * opacity-only on widget hover (ANIMATIONS.md §3) so the title/artist line
  * never reflows as the controls take the corner. aria-hidden: the pill's
  * Hairline progressbar already announces position, so the visible label is a
- * glance-only duplicate. */
+ * glance-only duplicate. Also fades on focus-within — the swap must track
+ * the same reveal signal as the controls it's trading places with, or a
+ * keyboard user tabbing to play/pause would see it fight the still-visible
+ * time label. */
 function PillTime({ np }: { np: NowPlaying }) {
   const timeRef = useRef<HTMLSpanElement>(null);
   // Label only: the bar/fill refs stay unattached (useProgressDom null-guards
@@ -919,7 +925,7 @@ function PillTime({ np }: { np: NowPlaying }) {
     <span
       ref={timeRef}
       aria-hidden
-      className="shrink-0 text-[11px] leading-4 tabular-nums text-muted transition-opacity duration-2 ease-out-tk group-hover/widget:opacity-0"
+      className="shrink-0 text-[11px] leading-4 tabular-nums text-muted transition-opacity duration-2 ease-out-tk group-hover/widget:opacity-0 group-focus-within/widget:opacity-0"
     />
   );
 }
@@ -1253,10 +1259,19 @@ function App() {
                 nothing reflows; the gradient lets the artist text fade UNDER
                 the incoming control. 180px wide, play/pause ending 76px from
                 the shell right edge — an 8px gap before the corner cluster.
-                Stops 2px above the bottom so the progress hairline stays lit. */}
+                Stops 2px above the bottom so the progress hairline stays lit.
+                Also reveals on focus-within (play/pause stays tabbable the
+                whole time — a hover-only reveal would strand keyboard users
+                on an invisible button, quick-review catch 2026-07-08). */}
             <div
-              className="pointer-events-none absolute bottom-0.5 right-0 top-0 flex w-[180px] items-center justify-end pr-[76px] opacity-0 transition-opacity duration-2 ease-out-tk group-hover/widget:pointer-events-auto group-hover/widget:opacity-100"
+              className="pointer-events-none absolute bottom-0.5 right-0 top-0 flex w-[180px] items-center justify-end pr-[76px] opacity-0 transition-opacity duration-2 ease-out-tk group-hover/widget:pointer-events-auto group-hover/widget:opacity-100 group-focus-within/widget:pointer-events-auto group-focus-within/widget:opacity-100"
               style={{ background: "linear-gradient(90deg, transparent, rgb(var(--surface) / 0.96) 45%)" }}
+              // Swallow mousedown, same reason as ModeCluster: pointer-events
+              // only turns on for the 180px scrim, but the button inside it
+              // doesn't fill that box — a press that lands on the gradient
+              // padding instead of the 28px button would otherwise fall
+              // through to the root's onDragStart and move the window.
+              onMouseDown={(e) => e.stopPropagation()}
             >
               <PlayPauseButton size="sm" iconSize={16} playing={playing} />
             </div>
