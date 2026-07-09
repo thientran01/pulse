@@ -73,7 +73,7 @@ tooltip/aria-label) for this reason.
 ## Commands
 
 - `npm run tauri dev` — run the app (requires Rust MSVC toolchain + VS Build Tools, both installed)
-- `npm run tauri build` — release build → NSIS per-user installer at `src-tauri/target/release/bundle/nsis/Pulse_<version>_x64-setup.exe` (unsigned; SmartScreen warns on other machines). Needs `TAURI_SIGNING_PRIVATE_KEY_PATH=$HOME/.tauri/pulse.key` in the env now that updater artifacts are signed — without it the bundler errors after compiling.
+- `npm run tauri build` — release build → NSIS per-user installer at `src-tauri/target/release/bundle/nsis/Pulse_<version>_x64-setup.exe` (unsigned; SmartScreen warns on other machines). Needs `TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/pulse.key)"` in the env now that updater artifacts are signed — without it the bundler errors after compiling (the `_PATH` variant does NOT work despite `tauri signer generate`'s help text — measured 2026-07-08).
 - `npm run dev` — frontend only (no Tauri window, limited use)
 
 Installed app: single-instance (relaunching surfaces the running widget), tray has an opt-in "Start at login" toggle (tauri-plugin-autostart, HKCU Run key — registers the current exe's path, so toggling from a dev build points it at the dev exe). App icon source: five living-separator capsules on a dark rounded square; regenerate the set with `npx tauri icon <1024px.png>`.
