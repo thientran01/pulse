@@ -50,9 +50,13 @@ src/icons/      morphing icon system (benji.org/morphing-icons-with-claude, gene
                 the data (stroke ORDER is the correspondence map; prev is deliberately
                 order-swapped, don't re-sort), MorphIcon.tsx renders + morphs (slot
                 registry carries the FROM glyph across App's mode-keyed remounts).
-                Mode buttons: expand/contract corner brackets for the size ladder +
-                a mic for the lyrics view — action verbs, not container pictograms
-                (v1 pill/card/lyrics pictograms read as abstract shapes at 13px) and
+                Mode buttons: expand/contract corner brackets stepping the
+                pill↔card↔expanded ladder from ONE anchored cluster at the
+                bottom-right corner (rendered once in the app root, outside the
+                mode-keyed remount — docked bottom-right it holds the same
+                screen pixels in every mode; end buttons disable in place, never
+                unmount) — action verbs, not container pictograms (v1
+                pill/card/lyrics pictograms read as abstract shapes at 13px) and
                 never a direction chevron. Dev sequencer: npm run dev → /?lab
 ```
 
@@ -67,8 +71,10 @@ Design rule: chrome stays neutral (house semantic tokens); the album-art palette
 
 Commands route to the OS "current" media session, which Windows re-points to
 whichever app played most recently (pause AM while Spotify plays → next command
-hits Spotify). The card shows the controlled app's brand icon (name in the
-tooltip/aria-label) for this reason.
+hits Spotify). The controlled-app brand icon (PlayerBadge) was removed in the
+anchored-cluster redesign (2026-07-08, Thien's call) — the seek-unsupported
+tooltip still names the app, but no persistent surface shows which app is
+being controlled.
 
 ## Commands
 

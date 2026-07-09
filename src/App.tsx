@@ -1,6 +1,5 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { PlayerMark } from "./icons/badges";
 import { MorphIcon } from "./icons/MorphIcon";
 import { useSeekTick } from "./icons/useSeekTick";
 import { commands, onNowPlaying } from "./lib/backend";
@@ -21,7 +20,7 @@ type Mode = "pill" | "card" | "expanded";
  * (200ms EASE.inOut on the Rust side) while the content morphs. */
 const MODE_SIZES: Record<Mode, [number, number]> = {
   pill: [300, 48],
-  card: [380, 132], // Figma spec 874:299: 74px art block, compact transport, full-width progress
+  card: [380, 132], // anchored-cluster handoff: 52px art row, full-width progress, bottom transport
   expanded: [380, 440], // lyrics home; big-art fallback gets breathing room
 };
 
@@ -473,33 +472,6 @@ const PLAYER_NAMES: Record<NowPlaying["player"], string> = {
   none: "",
 };
 
-/** Monochrome source-app mark (muted, tooltip carries the name). Fades in
- * over 90ms when the controlled session hops apps; brand marks never morph. */
-function PlayerBadge({ player }: { player: NowPlaying["player"] }) {
-  const reducedMotion = useReducedMotion();
-  if (player === "none") return null;
-  return (
-    <motion.span
-      key={player}
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{
-        duration: reducedMotion ? 0 : DUR[1] / 1000,
-        ease: [...EASE.out] as [number, number, number, number],
-      }}
-      role="img"
-      aria-label={`Controlling ${PLAYER_NAMES[player]}`}
-      title={PLAYER_NAMES[player]}
-      // Same 28px cell as an sm IconButton: the neighboring buttons' glyphs
-      // sit well inside their hit areas, so a bare icon here reads as a
-      // smaller gap even though the flex gap is uniform.
-      className="grid h-7 w-7 shrink-0 place-items-center text-muted"
-    >
-      <PlayerMark player={player} />
-    </motion.span>
-  );
-}
-
 /** Hover hold before the full-text tooltip shows — reading intent, not a
  * flyby. Native `title` waits about this long; this is the styled stand-in. */
 const TIP_DELAY_MS = 500;
@@ -561,22 +533,25 @@ function TruncateTip({ text, className }: { text: string; className: string }) {
   );
 }
 
-/** Mode switch buttons: expand/contract corner brackets for the size ladder,
- * a mic for the lyrics view — action verbs, not container pictograms (v1's
- * pill/card/lyrics glyphs read as abstract shapes at 13px). Two stable slots
- * pair layoutId (button glides across the mode remount) with MorphIcon's
- * registry (the glyph morphs from whatever the slot last showed — expand
- * folds into contract as the window grows). Clocked to dock.rs's 200ms
- * EASE.inOut window resize so window, glide, and glyph move as one gesture. */
+/** One button of the anchored mode cluster: expand/contract corner brackets —
+ * action verbs, not container pictograms (v1's pill/card/lyrics glyphs read
+ * as abstract shapes at 13px). Glyphs are fixed per seat now; the slot
+ * registry + layoutId stay so a future remount or seat change still morphs/
+ * glides instead of popping. End-of-ladder buttons DISABLE in place (opacity
+ * fade, 140ms EASE.out) — never unmount, which would shift the sibling.
+ * pointer-events dies with it so a park-and-click drag never starts a window
+ * drag from a dead button. */
 function ModeButton({
   to,
   label,
   slot,
+  disabled = false,
   onClick,
 }: {
-  to: "expand" | "contract" | "mic";
+  to: "expand" | "contract";
   label: string;
   slot: "mode-primary" | "mode-secondary";
+  disabled?: boolean;
   onClick: () => void;
 }) {
   const reducedMotion = useReducedMotion();
@@ -584,10 +559,17 @@ function ModeButton({
     <motion.button
       type="button"
       layoutId={slot}
+      // motion owns opacity inline (layoutId projection writes it), so the
+      // disabled fade must live here — an opacity-* class would be overridden.
+      animate={{ opacity: disabled ? 0.28 : 1 }}
       transition={{
         layout: {
           duration: reducedMotion ? 0 : DUR[3] / 1000,
           ease: [...EASE.inOut] as [number, number, number, number],
+        },
+        opacity: {
+          duration: reducedMotion ? 0 : DUR[2] / 1000,
+          ease: [...EASE.out] as [number, number, number, number],
         },
         // Without this, whileTap's scale runs on motion's default spring —
         // press feedback must ride the tokens like every other button.
@@ -596,14 +578,59 @@ function ModeButton({
           ease: [...EASE.out] as [number, number, number, number],
         },
       }}
-      whileTap={{ scale: reducedMotion ? 1 : 0.95 }}
+      whileTap={{ scale: reducedMotion || disabled ? 1 : 0.95 }}
       aria-label={label}
       title={label}
+      aria-disabled={disabled || undefined}
       onClick={onClick}
-      className="grid h-7 w-7 place-items-center rounded-md text-muted transition-colors duration-2 ease-out-tk hover:bg-fg/10 hover:text-fg"
+      className={`grid h-7 w-7 place-items-center rounded-md transition-colors duration-2 ease-out-tk ${
+        disabled ? "pointer-events-none text-muted" : "text-fg hover:bg-fg/10"
+      }`}
     >
       <MorphIcon name={to} size={13} slot={slot} dur={DUR[3]} ease={EASE.inOut} />
     </motion.button>
+  );
+}
+
+/** Ordered mode ladder the anchored cluster steps through. */
+const MODE_ORDER: readonly Mode[] = ["pill", "card", "expanded"];
+
+/**
+ * The anchored mode cluster (design handoff 2026-07-08): collapse + expand
+ * live at the bottom-right corner — the corner dock.rs resizes out of — so
+ * when the window is docked bottom-right the buttons occupy the same screen
+ * pixels in every mode: park the cursor once, step the whole ladder.
+ * Rendered ONCE in the app root, outside the mode-keyed remount, so it never
+ * fades or rescales with the content morph — chrome holds still (the
+ * expanded view's hoisted-chrome rule, promoted app-wide).
+ *
+ * Insets are shell-relative (right 8px). Vertically the card/expanded seat
+ * is 10px up from the shell; the pill's 36px shell can't fit 28px + 10px,
+ * so there the cluster centers (4px) — the 6px seat shift rides the same
+ * 200ms EASE.inOut as the window resize, and the 28px targets overlap
+ * across modes so a parked cursor still hits every rung.
+ */
+function ModeCluster({ mode, onStep }: { mode: Mode; onStep: (d: -1 | 1) => void }) {
+  return (
+    <div
+      className="absolute right-3.5 z-20 flex items-center gap-1 transition-[bottom] duration-3 ease-in-out-tk"
+      style={{ bottom: mode === "pill" ? 10 : 16 }}
+    >
+      <ModeButton
+        to="contract"
+        label={mode === "expanded" ? "Collapse to card" : "Collapse to pill"}
+        slot="mode-secondary"
+        disabled={mode === "pill"}
+        onClick={() => onStep(-1)}
+      />
+      <ModeButton
+        to="expand"
+        label={mode === "pill" ? "Expand to card" : "Expand to lyrics"}
+        slot="mode-primary"
+        disabled={mode === "expanded"}
+        onClick={() => onStep(1)}
+      />
+    </div>
   );
 }
 
@@ -857,22 +884,11 @@ function Hairline({ np }: { np: NowPlaying }) {
   );
 }
 
-function Art({
-  url,
-  size,
-  radiusPx,
-  height,
-}: {
-  url: string | null;
-  size: number;
-  radiusPx: number;
-  /** Card mode's Figma spec crops the cover slightly wide (82x74). */
-  height?: number;
-}) {
+function Art({ url, size, radiusPx }: { url: string | null; size: number; radiusPx: number }) {
   return (
     <div
       className="grid shrink-0 place-items-center overflow-hidden bg-surface-2 text-muted"
-      style={{ width: size, height: height ?? size, borderRadius: radiusPx }}
+      style={{ width: size, height: size, borderRadius: radiusPx }}
     >
       {url ? (
         <img src={url} alt="" className="h-full w-full object-cover" draggable={false} />
@@ -883,8 +899,8 @@ function Art({
   );
 }
 
-/** compact = the card's Figma spec (874:299): 24px buttons on an 8px gap.
- * Expanded keeps the 32px/4px transport until that view gets its own pass. */
+/** compact = the card's bottom row: 24px buttons on an 8px gap. Expanded
+ * keeps the 32px/4px transport — both center in a full-width bottom row. */
 function Transport({
   np,
   seekable,
@@ -923,9 +939,10 @@ const EXIT_LEAD_MS = 40;
 
 /**
  * Expanded mode: big-art fallback while lyrics fetch, karaoke view once they
- * land. Transport, progress, badge and the collapse button are HOISTED out of
- * the swap — chrome holds perfectly still (and the rAF-driven progress fill
- * never remounts mid-write); only the content region crossfades. The arrival
+ * land. Progress and transport are HOISTED out of the swap — chrome holds
+ * perfectly still (and the rAF-driven progress fill never remounts
+ * mid-write); only the content region crossfades. Mode controls live in the
+ * app-root anchored cluster, so the top-right is free. The arrival
  * is choreographed (art exhales with the house blur, rows cascade outward
  * from the current line, the accent marker ignites last); the reverse — a
  * track change — exits fast and plain: continuity is earned by content
@@ -937,14 +954,12 @@ function ExpandedView({
   lyrics,
   seekable,
   playing,
-  onCollapse,
 }: {
   np: NowPlaying;
   artUrl: string | null;
   lyrics: LyricsState;
   seekable: boolean;
   playing: boolean;
-  onCollapse: () => void;
 }) {
   const reducedMotion = useReducedMotion();
   // Key-stamped gate: never render the new track's header over the old
@@ -989,14 +1004,7 @@ function ExpandedView({
   };
 
   return (
-    <div className="relative flex h-full flex-col gap-2 px-3 pb-2 pt-3">
-      {/* Pinned chrome — identical seat in both states, so it never moves.
-          top-5 centers the 28px buttons on the lyrics header's 44px art row
-          (pt-3 + (44-28)/2), where they used to live inline. */}
-      <div className="absolute right-2 top-5 z-10 flex items-center gap-1">
-        <PlayerBadge player={np.player} />
-        <ModeButton to="contract" label="Collapse to card" slot="mode-primary" onClick={onCollapse} />
-      </div>
+    <div className="relative flex h-full flex-col gap-2 px-3 pb-2.5 pt-3">
       <div className="relative min-h-0 flex-1">
         <AnimatePresence initial={false}>
           {lyricsLive ? (
@@ -1012,7 +1020,7 @@ function ExpandedView({
               exit={{ opacity: 0, pointerEvents: "none", transition: exitFast }}
               className="absolute inset-0 flex flex-col gap-2"
             >
-              <div className="flex items-center gap-2.5 pr-16">
+              <div className="flex items-center gap-2.5">
                 <Art url={artUrl} size={44} radiusPx={6} />
                 <div className="min-w-0 flex-1">
                   <TruncateTip text={np.title} className="text-[15px] font-medium text-fg" />
@@ -1090,11 +1098,13 @@ function ExpandedView({
           )}
         </AnimatePresence>
       </div>
-      {/* Hoisted chrome: one seat for both states. */}
-      <div className="flex justify-center">
+      {/* Hoisted chrome: one seat for both states. Progress sits ABOVE the
+          transport (handoff order) so the transport is the very-bottom row —
+          the anchored cluster shares its vertical band at the corner. */}
+      <ProgressBar np={np} />
+      <div className="flex h-8 items-center justify-center">
         <Transport np={np} seekable={seekable} playing={playing} />
       </div>
-      <ProgressBar np={np} />
     </div>
   );
 }
@@ -1162,8 +1172,13 @@ function App() {
     commands.startDrag();
   };
 
+  // The anchored cluster steps this ladder one rung per click; the end
+  // buttons disable instead of wrapping.
+  const stepMode = (d: -1 | 1) =>
+    setMode((m) => MODE_ORDER[Math.min(Math.max(MODE_ORDER.indexOf(m) + d, 0), MODE_ORDER.length - 1)]);
+
   return (
-    <div className="h-screen p-1.5" onMouseDown={onDragStart}>
+    <div className="relative h-screen p-1.5" onMouseDown={onDragStart}>
       <motion.div
         key={mode}
         {...morph}
@@ -1179,7 +1194,9 @@ function App() {
           </div>
         ) : mode === "pill" ? (
           <>
-            <div className="flex h-full items-center gap-2 pl-1.5 pr-1">
+            {/* pr reserves the anchored cluster's corner zone (60px cluster
+                + 8px inset, measured from the shell's right edge). */}
+            <div className="flex h-full items-center gap-2 pl-3 pr-[70px]">
               <Art url={shownArt} size={26} radiusPx={6} />
               <p className="min-w-0 flex-1 truncate text-xs font-medium text-fg">
                 {np.title}
@@ -1187,53 +1204,41 @@ function App() {
                 <span className="font-normal text-muted">{np.artist}</span>
               </p>
               <PlayPauseButton size="sm" iconSize={16} playing={playing} />
-              <ModeButton to="expand" label="Expand to card" slot="mode-secondary" onClick={() => setMode("card")} />
             </div>
             {/* Non-interactive progress hairline — still announced to AT. */}
             <Hairline np={np} />
           </>
         ) : mode === "card" ? (
-          <div className="flex h-full flex-col gap-1 p-3">
-            {/* Thien's Figma spec (Work / node 874:299, re-synced 2026-07-08):
-                82x74 art on a 12px gutter; beside it title/artist (gap 2),
-                then a 4px beat before the compact left-aligned transport
-                (24px buttons, 8px gaps) — 28+2+16+4+24 = 74, so art top rides
-                the title and art bottom the transport. Progress spans full
-                width 4px below the block. */}
-            <div className="flex gap-3">
-              <Art url={shownArt} size={82} height={74} radiusPx={8} />
-              <div className="flex min-w-0 flex-1 flex-col justify-center gap-1">
-                <div className="flex flex-col gap-0.5">
-                  <div className="flex h-7 items-center gap-1">
-                    <p className="min-w-0 flex-1 truncate text-[15px] font-medium text-fg">{np.title}</p>
-                    {/* Windows routes commands to the OS "current" session, which
-                        hops between apps — always show which app this card controls. */}
-                    <PlayerBadge player={np.player} />
-                    <ModeButton to="contract" label="Collapse to pill" slot="mode-secondary" onClick={() => setMode("pill")} />
-                    <ModeButton to="mic" label="Show lyrics" slot="mode-primary" onClick={() => setMode("expanded")} />
-                  </div>
-                  <p className="truncate text-xs leading-4 text-muted">
-                    {np.artist}
-                    <Waveform trailing={!np.album} />
-                    {np.album}
-                  </p>
-                </div>
-                <Transport np={np} seekable={seekable} playing={playing} compact />
+          /* Anchored-cluster handoff (2026-07-08, supersedes Figma 874:299):
+             art+titles fill the top, then full-width progress, then the
+             transport as the very-bottom row — centered, sharing its band
+             with the corner cluster. Bottom geometry matches expanded, so
+             the cluster and transport hold still across card⇄expanded. */
+          <div className="flex h-full flex-col gap-1.5 px-3 pb-2.5 pt-3">
+            <div className="flex min-h-0 flex-1 items-center gap-3">
+              <Art url={shownArt} size={52} radiusPx={8} />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-[15px] font-medium text-fg">{np.title}</p>
+                <p className="truncate text-xs leading-4 text-muted">
+                  {np.artist}
+                  <Waveform trailing={!np.album} />
+                  {np.album}
+                </p>
               </div>
             </div>
             <ProgressBar np={np} />
+            <div className="flex h-7 items-center justify-center">
+              <Transport np={np} seekable={seekable} playing={playing} compact />
+            </div>
           </div>
         ) : (
-          <ExpandedView
-            np={np}
-            artUrl={shownArt}
-            lyrics={lyrics}
-            seekable={seekable}
-            playing={playing}
-            onCollapse={() => setMode("card")}
-          />
+          <ExpandedView np={np} artUrl={shownArt} lyrics={lyrics} seekable={seekable} playing={playing} />
         )}
       </motion.div>
+      {/* Outside the mode-keyed remount: the cluster never fades or rescales
+          with the content morph, and — docked bottom-right — never moves on
+          screen. See ModeCluster. */}
+      {!nothing && <ModeCluster mode={mode} onStep={stepMode} />}
       {/* Broken-art detector — OUTSIDE the mode-keyed subtree so the data URL
           isn't re-decoded on every mode switch, only per track. */}
       {artUrl && artUrl !== brokenArtUrl && (
