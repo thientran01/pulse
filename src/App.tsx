@@ -10,7 +10,7 @@ import * as posClock from "./lib/posClock";
 import { initReactive } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
 import { SeparatorDot, Waveform } from "./Waveform";
-import type { NowPlaying } from "./types";
+import { IN_TAURI, type NowPlaying } from "./types";
 
 // Keep in sync with SEEK_STEP_MS in src-tauri/src/lib.rs (global hotkeys).
 const SEEK_STEP_MS = 10_000;
@@ -1403,8 +1403,35 @@ function App() {
   const stepMode = (d: -1 | 1) =>
     setMode((m) => MODE_ORDER[Math.min(Math.max(MODE_ORDER.indexOf(m) + d, 0), MODE_ORDER.length - 1)]);
 
+  // Browser mock: there is no OS window to be the widget, so emulate one —
+  // a desktop-ish backdrop under a mode-sized root (below). Without this the
+  // widget stretches to the whole tab and nothing sits relative to anything.
+  useEffect(() => {
+    if (!IN_TAURI) document.body.style.background = "#33363c";
+  }, []);
+
   return (
-    <div className="group/widget relative h-screen" onMouseDown={onDragStart}>
+    <div
+      className={`group/widget relative ${IN_TAURI ? "h-screen" : ""}`}
+      // The mock window frame (browser dev only): a MODE_SIZES box docked
+      // 12px off the viewport's bottom-right like dock.rs's corner, width and
+      // height sharing one 200ms EASE.inOut window — the handoff prototype's
+      // reference implementation of the corner-anchored native resize, so the
+      // mock previews the content crossfade composed with "window" growth.
+      style={
+        IN_TAURI
+          ? undefined
+          : {
+              position: "fixed",
+              right: 12,
+              bottom: 12,
+              width: MODE_SIZES[mode][0],
+              height: MODE_SIZES[mode][1],
+              transition: "width 200ms var(--ease-in-out-tk), height 200ms var(--ease-in-out-tk)",
+            }
+      }
+      onMouseDown={onDragStart}
+    >
       {/* AnimatePresence keeps the outgoing shell mounted for its 140ms exit
           fade; absolute inset (not flow + root padding) lets the two shells
           stack during the crossfade instead of pushing each other. */}
