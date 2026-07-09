@@ -615,9 +615,10 @@ const MODE_ORDER: readonly Mode[] = ["pill", "card", "expanded"];
  * CENTERLINE every mode's controls sit on: the pill scrim's play/pause
  * (top-0/bottom-0.5 in the 36px shell → center 25px), and the card/expanded
  * transports via their pb-1/pb-0.5 column padding (the shell's 1px border
- * adds to both). Change one, change all four. The seat is CONSTANT in every mode (no mode-dependent bottom) —
- * docked bottom-right the window's bottom edge is pinned, so the cluster
- * holds the exact same screen pixels across pill/card/expanded: the
+ * adds to both). Change one, change all four. The seat is CONSTANT in every
+ * mode (no mode-dependent bottom) — docked bottom-right the window's bottom
+ * edge is pinned, so the cluster holds the exact same screen pixels across
+ * pill/card/expanded: the
  * fixed-point guarantee, no drift even while hidden (ANIMATIONS.md §2 —
  * "opacity only, zero transforms; the fixed-point guarantee includes the
  * hidden state"). Hidden at rest (opacity 0, pointer-events none),
