@@ -3,7 +3,7 @@ import { AnimatePresence, motion, useIsPresent, useReducedMotion } from "motion/
 import type { MorphName } from "./icons/geometry";
 import { MorphIcon } from "./icons/MorphIcon";
 import { useSeekTick } from "./icons/useSeekTick";
-import { commands, onNowPlaying } from "./lib/backend";
+import { commands, onDockCorner, onNowPlaying, type DockCorner } from "./lib/backend";
 import { currentLineIndex, msUntilNextLine, parseLrc, VOCAL_LEAD_MS, type LyricLine } from "./lib/lrc";
 import { extractAccent } from "./lib/palette";
 import * as posClock from "./lib/posClock";
@@ -18,7 +18,8 @@ const SEEK_STEP_MS = 10_000;
 type Mode = "pill" | "card" | "expanded";
 
 /** Native window size per mode — the window grows out of its docked corner
- * (200ms EASE.inOut on the Rust side) while the content morphs. */
+ * (200ms EASE.inOut on the Rust side), clip-revealing the incoming mode's
+ * already-final ModeContent plane while the shells crossfade. */
 const MODE_SIZES: Record<Mode, [number, number]> = {
   pill: [300, 48],
   card: [380, 132], // anchored-cluster handoff: 52px art row, full-width progress, bottom transport
@@ -630,21 +631,41 @@ const SHELL_CHROME_PX = 14;
  * overrides the ancestor's none, and neither property touches the tab/AT
  * order (quick-review catches, 2026-07-09). framer freezes the exiting
  * child's props, so presence context is the only signal that still reaches
- * this subtree — and this instance's frozen `mode` keeps the outgoing
- * content at the outgoing mode's size while its shell shrinks over it. */
-function ModeContent({ mode, children }: { mode: Mode; children: React.ReactNode }) {
+ * this subtree — and this instance's frozen `mode`/`corner` keep the
+ * outgoing content seated while its shell shrinks over it. */
+function ModeContent({
+  mode,
+  corner,
+  children,
+}: {
+  mode: Mode;
+  corner: DockCorner;
+  children: React.ReactNode;
+}) {
   const isPresent = useIsPresent();
   const [w, h] = MODE_SIZES[mode];
   return (
     <div
       inert={!isPresent}
-      className="absolute bottom-0 right-0 flex flex-col"
+      className={`absolute flex flex-col ${CORNER_SEAT[corner]}`}
       style={{ width: w - SHELL_CHROME_PX, height: h - SHELL_CHROME_PX }}
     >
       {children}
     </div>
   );
 }
+
+/** The plane pins to the corner dock.rs resizes out of — the one corner whose
+ * screen position is fixed through the animation. Any other anchor puts the
+ * content on a MOVING edge and it rides the resize instead of being revealed
+ * by it (quick-review catch, 2026-07-09: the plane was hardcoded bottom-right
+ * while the dock is corner-general). */
+const CORNER_SEAT: Record<DockCorner, string> = {
+  "top-left": "left-0 top-0",
+  "top-right": "right-0 top-0",
+  "bottom-left": "bottom-0 left-0",
+  "bottom-right": "bottom-0 right-0",
+};
 
 /**
  * The anchored mode cluster (design handoff 2026-07-08): collapse + expand
@@ -1364,6 +1385,11 @@ function App() {
   // Assert the reduced-motion capture vote even before any separator mounts.
   useEffect(() => initReactive(), []);
 
+  // Which work-area corner the window docks to (dock.rs owns the derivation;
+  // bottom-right until it reports). ModeContent pins the content plane there.
+  const [dockCorner, setDockCorner] = useState<DockCorner>("bottom-right");
+  useEffect(() => onDockCorner(setDockCorner), []);
+
   const [mode, setMode] = useState<Mode>(() => {
     try {
       const saved = localStorage.getItem("pulse.mode");
@@ -1468,7 +1494,7 @@ function App() {
           // reads as a gray box on light surfaces.
           className="absolute inset-1.5 flex flex-col overflow-hidden rounded-xl border border-border/10 bg-surface/95 shadow-[0_1px_3px_rgb(0_0_0/0.18),0_3px_6px_rgb(0_0_0/0.12)]"
         >
-        <ModeContent mode={mode}>
+        <ModeContent mode={mode} corner={dockCorner}>
         {nothing ? (
           <div className="flex h-full w-full items-center justify-center gap-2 text-muted">
             <MorphIcon name="note" size={22} />

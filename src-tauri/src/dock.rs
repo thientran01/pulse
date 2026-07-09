@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, Manager, State, WebviewWindow, Window};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 use windows::core::BOOL;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
@@ -43,6 +43,27 @@ pub enum Corner {
     TopRight,
     BottomLeft,
     BottomRight,
+}
+
+impl Corner {
+    fn as_str(self) -> &'static str {
+        match self {
+            Corner::TopLeft => "top-left",
+            Corner::TopRight => "top-right",
+            Corner::BottomLeft => "bottom-left",
+            Corner::BottomRight => "bottom-right",
+        }
+    }
+}
+
+/// Tell the webview which corner resizes grow out of: ModeContent (App.tsx)
+/// anchors its fixed content plane there so the native resize reveals the
+/// layout instead of dragging it along — anchoring to the wrong corner makes
+/// the content ride the MOVING edge. Fired wherever the corner is derived or
+/// re-set; the frontend seeds via the dock_corner command against the
+/// listener-attach race.
+fn emit_corner(window: &WebviewWindow, corner: Corner) {
+    let _ = window.emit("dock-corner", corner.as_str());
 }
 
 pub struct Dock {
@@ -289,6 +310,7 @@ fn snap_to_nearest(window: &WebviewWindow) {
     let (w, h) = (size.width as i32, size.height as i32);
     let corner = nearest_corner(pos.x + w / 2, pos.y + h / 2, &wa);
     *dock.corner.lock().unwrap_or_else(PoisonError::into_inner) = Some(corner);
+    emit_corner(window, corner);
     let scale = window.scale_factor().unwrap_or(1.0);
     let margin = (MARGIN_LOGICAL * scale).round() as i32;
     let target = corner_origin(corner, &wa, w, h, margin);
@@ -322,6 +344,7 @@ pub fn set_window_size(window: WebviewWindow, dock: State<Dock>, width: f64, hei
             Err(_) => Corner::BottomRight,
         })
     };
+    emit_corner(&window, corner);
     if (w0, h0) == (w, h) {
         // Same size (launch, usually) — just make sure we're docked.
         let (x, y) = corner_origin(corner, &wa, w, h, margin);
@@ -336,6 +359,17 @@ pub fn set_window_size(window: WebviewWindow, dock: State<Dock>, width: f64, hei
         let (xi, yi) = corner_origin(corner, &wa, wi, hi, margin);
         apply_pos(win, xi, yi, Some((wi, hi)));
     });
+}
+
+/// One-shot corner read for webview mount/reload — the event stream's seed
+/// (same pattern as now_playing). None until the first positioning op derives
+/// a corner; the frontend keeps its bottom-right default then.
+#[tauri::command]
+pub fn dock_corner(dock: State<Dock>) -> Option<&'static str> {
+    dock.corner
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .map(Corner::as_str)
 }
 
 /// Native drag, killing any in-flight snap first so it can't fight the hand.
@@ -392,6 +426,7 @@ pub fn reset_position(app: &AppHandle) {
     let _ = window.show();
     let dock = app.state::<Dock>();
     *dock.corner.lock().unwrap_or_else(PoisonError::into_inner) = Some(Corner::BottomRight);
+    emit_corner(&window, Corner::BottomRight);
     let Some(wa) = work_area(&window) else { return };
     let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
         return;
