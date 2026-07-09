@@ -21,7 +21,7 @@ type Mode = "pill" | "card" | "expanded";
  * (200ms EASE.inOut on the Rust side) while the content morphs. */
 const MODE_SIZES: Record<Mode, [number, number]> = {
   pill: [300, 48],
-  card: [380, 146], // Figma spec 874:299: art block, left transport, full-width progress
+  card: [380, 132], // Figma spec 874:299: 74px art block, compact transport, full-width progress
   expanded: [380, 440], // lyrics home; big-art fallback gets breathing room
 };
 
@@ -390,7 +390,7 @@ function IconButton({
   onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
   onPointerDown?: (e: React.PointerEvent<HTMLButtonElement>) => void;
   disabled?: boolean;
-  size?: "sm" | "md";
+  size?: "xs" | "sm" | "md";
   children: React.ReactNode;
 }) {
   return (
@@ -402,7 +402,7 @@ function IconButton({
       onClick={onClick}
       onPointerDown={onPointerDown}
       className={`grid place-items-center rounded-md text-fg transition duration-2 ease-out-tk hover:bg-fg/10 active:scale-95 disabled:pointer-events-none disabled:opacity-40 ${
-        size === "sm" ? "h-7 w-7" : "h-8 w-8"
+        size === "xs" ? "h-6 w-6" : size === "sm" ? "h-7 w-7" : "h-8 w-8"
       }`}
     >
       {children}
@@ -501,7 +501,7 @@ function PlayPauseButton({
 }: {
   playing: boolean;
   iconSize?: number;
-  size?: "sm" | "md";
+  size?: "xs" | "sm" | "md";
 }) {
   const [optimistic, setOptimistic] = useState<boolean | null>(null);
   useEffect(() => setOptimistic(null), [playing]);
@@ -535,14 +535,17 @@ function SeekButton({
   dir,
   seekable,
   player,
+  size,
 }: {
   dir: -1 | 1;
   seekable: boolean;
   player: NowPlaying["player"];
+  size?: "xs" | "sm" | "md";
 }) {
   const { scope, tick } = useSeekTick(dir);
   return (
     <IconButton
+      size={size}
       label={
         seekable
           ? dir < 0
@@ -734,11 +737,22 @@ function Hairline({ np }: { np: NowPlaying }) {
   );
 }
 
-function Art({ url, size, radiusPx }: { url: string | null; size: number; radiusPx: number }) {
+function Art({
+  url,
+  size,
+  radiusPx,
+  height,
+}: {
+  url: string | null;
+  size: number;
+  radiusPx: number;
+  /** Card mode's Figma spec crops the cover slightly wide (82x74). */
+  height?: number;
+}) {
   return (
     <div
       className="grid shrink-0 place-items-center overflow-hidden bg-surface-2 text-muted"
-      style={{ width: size, height: size, borderRadius: radiusPx }}
+      style={{ width: size, height: height ?? size, borderRadius: radiusPx }}
     >
       {url ? (
         <img src={url} alt="" className="h-full w-full object-cover" draggable={false} />
@@ -749,16 +763,29 @@ function Art({ url, size, radiusPx }: { url: string | null; size: number; radius
   );
 }
 
-function Transport({ np, seekable, playing }: { np: NowPlaying; seekable: boolean; playing: boolean }) {
+/** compact = the card's Figma spec (874:299): 24px buttons on an 8px gap.
+ * Expanded keeps the 32px/4px transport until that view gets its own pass. */
+function Transport({
+  np,
+  seekable,
+  playing,
+  compact = false,
+}: {
+  np: NowPlaying;
+  seekable: boolean;
+  playing: boolean;
+  compact?: boolean;
+}) {
+  const size = compact ? "xs" : "md";
   return (
-    <div className="flex items-center gap-1">
-      <IconButton label="Previous track" onClick={commands.prev}>
+    <div className={`flex items-center ${compact ? "gap-2" : "gap-1"}`}>
+      <IconButton size={size} label="Previous track" onClick={commands.prev}>
         <MorphIcon name="prev" size={16} />
       </IconButton>
-      <SeekButton dir={-1} seekable={seekable} player={np.player} />
-      <PlayPauseButton playing={playing} />
-      <SeekButton dir={1} seekable={seekable} player={np.player} />
-      <IconButton label="Next track" onClick={commands.next}>
+      <SeekButton size={size} dir={-1} seekable={seekable} player={np.player} />
+      <PlayPauseButton size={size} playing={playing} />
+      <SeekButton size={size} dir={1} seekable={seekable} player={np.player} />
+      <IconButton size={size} label="Next track" onClick={commands.next}>
         <MorphIcon name="next" size={16} />
       </IconButton>
     </div>
@@ -1028,29 +1055,32 @@ function App() {
             <Hairline np={np} />
           </>
         ) : mode === "card" ? (
-          <div className="flex h-full flex-col gap-3 p-3">
-            {/* Thien's Figma spec (Work / node 874:299, edited 2026-07-08):
-                80px art with a tight 4px gutter; title/artist/transport stack
-                left-aligned beside it — the stack's 80px (28+16+32+2px gaps)
-                keeps art top on the title and art bottom on the transport —
-                and the progress bar on its own full-width bottom row. */}
-            <div className="flex items-center gap-1">
-              <Art url={shownArt} size={80} radiusPx={8} />
-              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <div className="flex h-7 items-center gap-1">
-                  <p className="min-w-0 flex-1 truncate text-[15px] font-medium text-fg">{np.title}</p>
-                  {/* Windows routes commands to the OS "current" session, which
-                      hops between apps — always show which app this card controls. */}
-                  <PlayerBadge player={np.player} />
-                  <ModeButton to="contract" label="Collapse to pill" slot="mode-secondary" onClick={() => setMode("pill")} />
-                  <ModeButton to="mic" label="Show lyrics" slot="mode-primary" onClick={() => setMode("expanded")} />
+          <div className="flex h-full flex-col gap-1 p-3">
+            {/* Thien's Figma spec (Work / node 874:299, re-synced 2026-07-08):
+                82x74 art on a 12px gutter; beside it title/artist (gap 2),
+                then a 4px beat before the compact left-aligned transport
+                (24px buttons, 8px gaps) — 28+2+16+4+24 = 74, so art top rides
+                the title and art bottom the transport. Progress spans full
+                width 4px below the block. */}
+            <div className="flex gap-3">
+              <Art url={shownArt} size={82} height={74} radiusPx={8} />
+              <div className="flex min-w-0 flex-1 flex-col justify-center gap-1">
+                <div className="flex flex-col gap-0.5">
+                  <div className="flex h-7 items-center gap-1">
+                    <p className="min-w-0 flex-1 truncate text-[15px] font-medium text-fg">{np.title}</p>
+                    {/* Windows routes commands to the OS "current" session, which
+                        hops between apps — always show which app this card controls. */}
+                    <PlayerBadge player={np.player} />
+                    <ModeButton to="contract" label="Collapse to pill" slot="mode-secondary" onClick={() => setMode("pill")} />
+                    <ModeButton to="mic" label="Show lyrics" slot="mode-primary" onClick={() => setMode("expanded")} />
+                  </div>
+                  <p className="truncate text-xs leading-4 text-muted">
+                    {np.artist}
+                    <Waveform trailing={!np.album} />
+                    {np.album}
+                  </p>
                 </div>
-                <p className="truncate text-xs leading-4 text-muted">
-                  {np.artist}
-                  <Waveform trailing={!np.album} />
-                  {np.album}
-                </p>
-                <Transport np={np} seekable={seekable} playing={playing} />
+                <Transport np={np} seekable={seekable} playing={playing} compact />
               </div>
             </div>
             <ProgressBar np={np} />
