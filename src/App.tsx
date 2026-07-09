@@ -392,11 +392,10 @@ function LyricsPanel({
           type="button"
           aria-label="Now — back to the current line"
           onClick={relatch}
-          className={`absolute left-1/2 z-10 flex -translate-x-1/2 items-center gap-1 rounded-full border border-border/10 bg-surface-2/90 py-1 pl-2.5 pr-2 text-[11px] font-medium leading-none text-muted transition duration-2 ease-out-tk [animation:caption-in_140ms_var(--ease-out-tk)_both] hover:text-fg active:scale-95 ${
+          className={`absolute left-1/2 z-10 flex -translate-x-1/2 items-center rounded-full border border-border/10 bg-surface-2/90 p-1.5 leading-none text-muted transition duration-2 ease-out-tk [animation:caption-in_140ms_var(--ease-out-tk)_both] hover:text-fg active:scale-95 ${
             nowBelow ? "bottom-8" : "top-8"
           }`}
         >
-          Now
           <svg
             width="9"
             height="9"
