@@ -215,6 +215,7 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_window_state::Builder::new()
@@ -328,6 +329,36 @@ pub fn run() {
                 if let Err(e) = result {
                     eprintln!("hotkey {hk} failed to register: {e}");
                 }
+            }
+
+            // Self-update: one check at launch against the latest GitHub
+            // release, release builds only (a dev build "updating" itself to
+            // the published version would be chaos). Passive install mode —
+            // NSIS shows a small progress bar, replaces the app, relaunches.
+            // Every failure path is a shrug: no network / rate-limited / repo
+            // gone just means this launch runs the current version.
+            #[cfg(not(debug_assertions))]
+            {
+                use tauri_plugin_updater::UpdaterExt;
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let updater = match handle.updater() {
+                        Ok(u) => u,
+                        Err(e) => {
+                            eprintln!("updater unavailable: {e}");
+                            return;
+                        }
+                    };
+                    match updater.check().await {
+                        Ok(Some(update)) => {
+                            if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
+                                eprintln!("update install failed: {e}");
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => eprintln!("update check failed: {e}"),
+                    }
+                });
             }
 
             // Audio-reactive capture switch: on ONLY while visible AND playing

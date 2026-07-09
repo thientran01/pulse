@@ -1,8 +1,19 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Pulse",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.thien.pulse",
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRFOTJGNzRDMThFNDM4OEUKUldTT09PUVlUUGVTVHUyRXc1SFNNQXd0dGRCelNGd2lxZXlsbjdOZ2pYb0FBcm9jV2ZSRW5tQ2QK",
+      "endpoints": [
+        "https://github.com/thientran01/pulse/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -32,6 +43,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "publisher": "Thien Tran",
     "shortDescription": "Mini music player widget for Windows",
     "longDescription": "Always-on-top mini music player that reads and controls whatever is playing (Apple Music, Spotify, browsers) with synced lyrics and album-art adaptive accents.",
