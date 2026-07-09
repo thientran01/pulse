@@ -30,7 +30,15 @@ const GEOM = {
  * outer high pair. */
 const BAR_BINS = { sm: [9, 4, 1, 6, 11], lg: [12, 9, 4, 1, 6, 11, 14] } as const;
 /** Minimum bar height while alive, as a fraction of the full bar. */
-const REST = 0.25;
+const REST = 0.15;
+/** Frontend envelope on top of the backend's smoothing: fast attack so hits
+ * land, release short enough that a bar visibly falls between beats (500ms
+ * blurred adjacent kicks into a sway). */
+const ENV_ATTACK_MS = 40;
+const ENV_RELEASE_MS = 180;
+/** Height shaping exponent: <1 lifts moderate energy, but 0.6 compressed
+ * everything to "medium-tall" — 0.85 keeps the loud/quiet contrast. */
+const SHAPE_EXP = 0.85;
 /** Stop animating once every envelope has decayed below this. */
 const IDLE_EPS = 0.004;
 /** Level above which the separator wakes; falls asleep after quiet holds. */
@@ -96,7 +104,7 @@ export function Waveform({ trailing, size = "sm" }: { trailing?: boolean; size?:
   const bins = BAR_BINS[size];
 
   useEffect(() => {
-    const envs = bins.map(() => new Envelope(40, 500));
+    const envs = bins.map(() => new Envelope(ENV_ATTACK_MS, ENV_RELEASE_MS));
     let latest: AudioBands | null = null;
     let raf = 0;
     let running = false;
@@ -129,8 +137,9 @@ export function Waveform({ trailing, size = "sm" }: { trailing?: boolean; size?:
         const e = envs[i].step(target, dt);
         peak = Math.max(peak, e);
         const el = barsRef.current[i];
-        // Concave shaping: moderate energy already reaches near-full height.
-        if (el) el.style.transform = `scaleY(${(REST + Math.pow(e, 0.6) * (1 - REST)).toFixed(3)})`;
+        // Mildly concave shaping: lifts moderate energy without flattening
+        // the loud/quiet contrast (see SHAPE_EXP).
+        if (el) el.style.transform = `scaleY(${(REST + Math.pow(e, SHAPE_EXP) * (1 - REST)).toFixed(3)})`;
       }
       // Idle-stop once decayed; the next band event restarts the loop.
       if (peak < IDLE_EPS && (b === null || b.level <= 0.001)) {
