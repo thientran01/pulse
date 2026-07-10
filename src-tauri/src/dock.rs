@@ -188,7 +188,9 @@ fn apply_pos(window: &WebviewWindow, x: i32, y: i32, size: Option<(i32, i32)>) {
 /// Physical state of the primary mouse button (drag may still be in flight).
 /// GetAsyncKeyState reports physical buttons — respect SM_SWAPBUTTON so a
 /// left-handed mouse (dragging with physical-right) is read correctly.
-fn primary_button_down() -> bool {
+/// pub(crate): the presence conceal also defers while a press is in flight
+/// (hiding the window mid-drag would yank it out from under the hand).
+pub(crate) fn primary_button_down() -> bool {
     unsafe {
         let swapped = GetSystemMetrics(SM_SWAPBUTTON) != 0;
         let vk = if swapped { VK_RBUTTON } else { VK_LBUTTON };
@@ -521,7 +523,14 @@ pub fn on_moved(window: &Window) {
 /// this is the manual belt-and-braces path.
 pub fn reset_position(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else { return };
-    let _ = window.show();
+    // An explicit summons: clear manual hide, snooze any conceal episode,
+    // and let apply_visibility (the only show/hide caller) reconcile.
+    let vis = app.state::<crate::VisIntent>();
+    vis.user_hidden.store(false, Ordering::Relaxed);
+    if vis.concealed.load(Ordering::Relaxed) {
+        vis.conceal_snoozed.store(true, Ordering::Relaxed);
+    }
+    crate::apply_visibility(app);
     let dock = app.state::<Dock>();
     *dock.corner.lock().unwrap_or_else(PoisonError::into_inner) = Some(Corner::BottomRight);
     emit_corner(&window, Corner::BottomRight);

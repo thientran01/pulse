@@ -1573,6 +1573,16 @@ function App() {
   // root's data-hot instead of group-hover.
   const [hot, setHot] = useState(false);
   useEffect(() => onCursorLeft(() => setHot(false)), []);
+  // Conceal hides the native window without a mouseleave ever reaching the
+  // webview (same blindness as the click-through gate) — drop hover state so
+  // the revealed chrome isn't pinned open when the window restores.
+  useEffect(
+    () =>
+      onPresence((p) => {
+        if (p.concealed) setHot(false);
+      }),
+    [],
+  );
 
   const morph = {
     // Opacity ONLY — no scale. The shell's size glide is the mode swap's
