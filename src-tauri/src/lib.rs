@@ -338,6 +338,7 @@ pub fn run() {
             now_playing,
             set_reactive_enabled,
             dock::set_window_size,
+            dock::set_hit_size,
             dock::start_drag,
             dock::dock_corner
         ])
@@ -406,6 +407,12 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+
+            // Click-through gate for the fixed-size window's unused gutter —
+            // see dock::spawn_hit_watcher.
+            if let Some(win) = app.get_webview_window("main") {
+                dock::spawn_hit_watcher(win);
+            }
 
             // Global hotkeys, each with its own action.
             type Action = fn(&AppHandle);

@@ -209,13 +209,19 @@ export const commands = {
   startDrag(): void {
     if (IN_TAURI) void invoke("start_drag");
   },
-  /** Snap the native window to a logical size, anchored to the docked corner
-   * (Rust owns all positioning — see src-tauri/src/dock.rs). ONE SetWindowPos,
-   * no native animation: the visible glide is the shell's CSS, and App.tsx
-   * awaits this promise to sequence snap-then-glide (grow) / glide-then-snap
-   * (shrink). */
-  async setWindowSize(width: number, height: number): Promise<void> {
-    if (IN_TAURI) await invoke("set_window_size", { width, height });
+  /** Dock the native window at a logical size (one corner-pinned
+   * SetWindowPos — Rust owns all positioning, see src-tauri/src/dock.rs).
+   * Called ONCE at launch with WINDOW_MAX; the window never resizes after
+   * that — mode changes are the shell's CSS glide. */
+  setWindowSize(width: number, height: number): void {
+    if (IN_TAURI) void invoke("set_window_size", { width, height });
+  },
+  /** Report the current mode's interactive footprint (logical px, anchored
+   * at the docked corner). The Rust cursor watcher makes everything outside
+   * it click-through — the fixed-size window's gutter must not eat clicks
+   * meant for what's beneath. */
+  setHitSize(width: number, height: number): void {
+    if (IN_TAURI) void invoke("set_hit_size", { width, height });
   },
   playPause(): void {
     if (IN_TAURI) {

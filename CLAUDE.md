@@ -25,15 +25,19 @@ src-tauri/src/
   dock.rs       corner docking: window lives in one of the 4 work-area corners (12px
                 margin, above the taskbar); free drag snaps to the nearest corner on
                 release (Moved-debounce + GetAsyncKeyState — no drag-end event exists;
-                glide stays native EASE.out — pure moves never shake). Mode resizes
-                are ONE corner-pinned SetWindowPos snap; the visible 200ms EASE.inOut
-                glide is the SHELL's CSS in the webview (App.tsx sequences: grow =
-                snap-to-union then glide, shrink = glide then snap) — NEVER animate
-                native bounds per frame: an origin-moving resize translates WebView2's
-                lagging frame every tick and the whole UI shakes (measured v0.5.0).
-                Docked corner is pushed to the webview ("dock-corner" event +
-                dock_corner seed command); corner derived from the window-state-
-                restored position, never stored
+                glide stays native EASE.out — pure moves never shake). The window
+                NEVER RESIZES after launch: born at WINDOW_MAX (tauri.conf =
+                MODE_SIZES.expanded, keep in sync), docked once; every mode change
+                is the shell's 200ms EASE.inOut CSS glide inside it. NEVER resize
+                the native window for animation — WebView2's composited frame lags
+                the rect one frame, so per-frame animation shakes (measured v0.5.0)
+                and even a single snap blinks (measured PR #51). The oversized
+                window's gutter is kept from eating clicks by spawn_hit_watcher:
+                cursor-polled whole-window click-through (set_ignore_cursor_events)
+                gated on the frontend-reported hit rect (set_hit_size, the mode's
+                footprint at the docked corner). Docked corner is pushed to the
+                webview ("dock-corner" event + dock_corner seed command); corner
+                derived from the window-state-restored position, never stored
   lyrics.rs     LRCLIB get→search fallback, disk cache (bounded, app-data) + session miss set
   audio.rs      WASAPI loopback (cpal input stream on the output device) → FFT →
                 smoothed auto-gained band energies at ~30Hz; capture runs ONLY

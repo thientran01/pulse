@@ -1,16 +1,20 @@
 /*
  * Corner docking: the widget always rests in one of the four corners of the
  * monitor's work area (above the taskbar, MARGIN_LOGICAL from the edges).
- * Drags stay free; on release the window glides to the nearest corner. Mode
- * resizes are ONE corner-pinned SetWindowPos snap — the visible 200ms glide
- * is the shell's CSS inside the webview (App.tsx sequences: grow snaps the
- * window first, shrink snaps it after the glide). Animating the native
- * bounds per frame can never look smooth here: a corner-docked resize moves
- * the ORIGIN every frame, the rect updates synchronously while WebView2's
- * composited content lags a frame behind, and the stale pixels ride the
- * moving top-left — the whole UI visibly shakes (measured live, v0.5.0).
- * Pure MOVES are exempt (content rides the translation rigidly), which is
- * why the drag-release glide stays native.
+ * Drags stay free; on release the window glides to the nearest corner.
+ *
+ * The window NEVER RESIZES after launch: it is born at the largest mode's
+ * size (tauri.conf.json = App.tsx WINDOW_MAX) and every mode change is the
+ * shell's CSS glide inside it. Resizing a WebView2 window at all costs one
+ * wrong frame — the rect updates synchronously while the composited content
+ * lags a frame behind, so a per-frame animated resize shakes the whole UI
+ * (measured, v0.5.0) and even a single snap blinks it (measured, PR #51) —
+ * an origin-moving resize has no artifact-free ordering. Pure MOVES are
+ * exempt (content rides the translation rigidly), which is why the
+ * drag-release glide stays native. The price of the oversized window is
+ * that its transparent gutter would eat clicks meant for whatever is
+ * beneath; spawn_hit_watcher makes everything outside the frontend-reported
+ * interactive rect click-through.
  *
  * Corner persistence is derived, not stored: tauri-plugin-window-state
  * restores the last position, and the first positioning call (or the launch
@@ -27,9 +31,9 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SetWindowPos, SystemParametersInfoW, SET_WINDOW_POS_FLAGS, SM_SWAPBUTTON,
-    SPI_GETCLIENTAREAANIMATION, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOSIZE, SWP_NOZORDER,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    GetCursorPos, GetSystemMetrics, SetWindowPos, SystemParametersInfoW, SET_WINDOW_POS_FLAGS,
+    SM_SWAPBUTTON, SPI_GETCLIENTAREAANIMATION, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOSIZE,
+    SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
 /// Gap between the window and the work-area edges, in logical px.
@@ -42,6 +46,12 @@ const DEBOUNCE_MS: u64 = 200;
 const FRAME_MS: u64 = 8;
 /// Drag-release watcher poll interval.
 const WATCH_MS: u64 = 60;
+/// Hit watcher cadence: fast while the cursor is near the window (the gate
+/// must flip before a click can land), relaxed when it's far away.
+const HIT_NEAR_MS: u64 = 8;
+const HIT_FAR_MS: u64 = 40;
+/// "Near" halo around the window rect that switches the fast cadence on.
+const HIT_NEAR_PAD: i32 = 64;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Corner {
@@ -84,6 +94,10 @@ pub struct Dock {
     last_moved: Mutex<Instant>,
     /// One debounce watcher at a time.
     watcher_armed: AtomicBool,
+    /// The interactive footprint (logical px, anchored at the docked
+    /// corner) the frontend reports per mode — everything outside it is
+    /// click-through. None (pre-report) = the whole window is interactive.
+    hit_size: Mutex<Option<(f64, f64)>>,
 }
 
 impl Default for Dock {
@@ -94,6 +108,7 @@ impl Default for Dock {
             animating: AtomicBool::new(false),
             last_moved: Mutex::new(Instant::now()),
             watcher_armed: AtomicBool::new(false),
+            hit_size: Mutex::new(None),
         }
     }
 }
@@ -325,14 +340,12 @@ fn snap_to_nearest(window: &WebviewWindow) {
     animate_to(window, (pos.x, pos.y), target);
 }
 
-/// Resize to the given logical size in ONE corner-pinned snap — origin and
-/// size land in the same SetWindowPos, derived from the docked corner. No
-/// native animation: the visible glide is the shell's CSS in the webview,
-/// and App.tsx sequences the snaps around it (grow: snap to the union first
-/// so the glide has room; shrink: glide, then snap) — see the module
-/// comment for why per-frame native resizes shake on WebView2. First call
-/// after launch derives the corner from wherever window-state restored us —
-/// that IS the startup dock.
+/// Size + dock the window in ONE corner-pinned SetWindowPos. Called once at
+/// launch with WINDOW_MAX (the window is born at that size, so this is
+/// effectively pure positioning): it derives the corner from wherever
+/// window-state restored us — that IS the startup dock — and seeds the
+/// dock-corner event. Mode changes never call this; the window stays at
+/// WINDOW_MAX for its whole life (see the module comment).
 #[tauri::command]
 pub fn set_window_size(window: WebviewWindow, dock: State<Dock>, width: f64, height: f64) {
     dock.epoch.fetch_add(1, Ordering::SeqCst); // cancel any in-flight glide
@@ -360,6 +373,76 @@ pub fn set_window_size(window: WebviewWindow, dock: State<Dock>, width: f64, hei
     dock.animating.store(true, Ordering::SeqCst);
     apply_pos(&window, x, y, Some((w, h)));
     dock.animating.store(false, Ordering::SeqCst);
+}
+
+/// The frontend reports the current mode's interactive footprint (logical
+/// px, anchored at the docked corner) on every mode change — the hit
+/// watcher makes everything outside it click-through. The full MODE_SIZES
+/// footprint (shell + gutter), not just the shell, so the visible edge ring
+/// stays grabbable for drags.
+#[tauri::command]
+pub fn set_hit_size(dock: State<Dock>, width: f64, height: f64) {
+    *dock.hit_size.lock().unwrap_or_else(PoisonError::into_inner) = Some((width, height));
+}
+
+/// The fixed-size window's transparent gutter must not eat clicks meant for
+/// whatever is beneath: poll the cursor and toggle whole-window
+/// click-through (WS_EX_TRANSPARENT via set_ignore_cursor_events) so the
+/// window is interactive exactly while the cursor is inside the hit rect —
+/// the current mode's footprint, anchored at the docked corner. Toggles are
+/// suppressed mid-press so a drag/click can't have the window yanked out
+/// from under it, and skipped while hidden.
+pub fn spawn_hit_watcher(window: WebviewWindow) {
+    std::thread::spawn(move || {
+        // Local mirror of the applied state — the window starts interactive.
+        let mut ignoring = false;
+        loop {
+            let mut near = false;
+            if window.is_visible().unwrap_or(false) {
+                let mut p = windows::Win32::Foundation::POINT::default();
+                let got = unsafe { GetCursorPos(&mut p).is_ok() };
+                if got {
+                    if let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) {
+                        let (wx, wy) = (pos.x, pos.y);
+                        let (ww, wh) = (size.width as i32, size.height as i32);
+                        near = p.x >= wx - HIT_NEAR_PAD
+                            && p.x < wx + ww + HIT_NEAR_PAD
+                            && p.y >= wy - HIT_NEAR_PAD
+                            && p.y < wy + wh + HIT_NEAR_PAD;
+                        let dock = window.state::<Dock>();
+                        let hit = *dock.hit_size.lock().unwrap_or_else(PoisonError::into_inner);
+                        let inside = match hit {
+                            None => p.x >= wx && p.x < wx + ww && p.y >= wy && p.y < wy + wh,
+                            Some((hw, hh)) => {
+                                let scale = window.scale_factor().unwrap_or(1.0);
+                                let hw = ((hw * scale).round() as i32).min(ww);
+                                let hh = ((hh * scale).round() as i32).min(wh);
+                                let corner = dock
+                                    .corner
+                                    .lock()
+                                    .unwrap_or_else(PoisonError::into_inner)
+                                    .unwrap_or(Corner::BottomRight);
+                                let (l, t) = match corner {
+                                    Corner::TopLeft => (wx, wy),
+                                    Corner::TopRight => (wx + ww - hw, wy),
+                                    Corner::BottomLeft => (wx, wy + wh - hh),
+                                    Corner::BottomRight => (wx + ww - hw, wy + wh - hh),
+                                };
+                                p.x >= l && p.x < l + hw && p.y >= t && p.y < t + hh
+                            }
+                        };
+                        // inside == ignoring means the state is wrong-way —
+                        // flip it, unless a press is in flight.
+                        if inside == ignoring && !primary_button_down() {
+                            ignoring = !inside;
+                            let _ = window.set_ignore_cursor_events(ignoring);
+                        }
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(if near { HIT_NEAR_MS } else { HIT_FAR_MS }));
+        }
+    });
 }
 
 /// One-shot corner read for webview mount/reload — the event stream's seed

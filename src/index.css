@@ -54,11 +54,11 @@ body,
   height: 100%;
 }
 
-/* Mode changes snap the OS window while the shell glides inside it (App.tsx
- * sequencing) — content that momentarily overflows (a final-size plane in a
- * still-gliding shell, the union-sized window phase) must clip, never flash
- * a scrollbar. The shell's own overflow-hidden clips inside the window
- * gutter; this guards the gutter itself. */
+/* The OS window never resizes; the shell glides inside it — content that
+ * momentarily overflows (a final-size plane in a still-gliding shell) and
+ * the permanent gutter around a small shell must clip, never flash a
+ * scrollbar. The shell's own overflow-hidden clips its interior; this
+ * guards everything outside it. */
 html,
 body {
   overflow: hidden;
