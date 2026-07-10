@@ -1192,12 +1192,18 @@ function ExpandedView({
   lyrics,
   seekable,
   playing,
+  plainArrival,
 }: {
   np: NowPlaying;
   artUrl: string | null;
   lyrics: LyricsState;
   seekable: boolean;
   playing: boolean;
+  /** True while this view exists because of the presence override (the
+   * ambient AFK grow): nobody is watching and nobody waited, so a lyric
+   * resolve during ambient must NOT earn the arrival cascade — the doctrine
+   * reserves celebration for a wait the user actually experienced. */
+  plainArrival: boolean;
 }) {
   const reducedMotion = useReducedMotion();
   // Key-stamped gate: never render the new track's header over the old
@@ -1244,6 +1250,7 @@ function ExpandedView({
   });
   const celebrate =
     !reducedMotion &&
+    !plainArrival &&
     artShownAt.current !== null &&
     performance.now() - artShownAt.current > SNAP_WINDOW_MS;
 
@@ -1503,6 +1510,11 @@ function App() {
   // Assert the reduced-motion capture vote even before any separator mounts.
   useEffect(() => initReactive(), []);
 
+  const nothing = !np || np.player === "none";
+  const playing = np?.status === "playing";
+  // AM can't seek over SMTC (support matrix) — buttons gate on capability.
+  const seekable = !!np?.can_seek;
+
   // Which work-area corner the window docks to (dock.rs owns the derivation;
   // bottom-right until it reports). ModeContent pins the content plane there.
   const [dockCorner, setDockCorner] = useState<DockCorner>("bottom-right");
@@ -1534,19 +1546,72 @@ function App() {
     commands.setWindowSize(WINDOW_MAX[0], WINDOW_MAX[1]);
   }, []);
 
-  // Report the mode's interactive footprint: outside it the fixed-size
-  // window is click-through (dock.rs hit watcher), so the invisible gutter
-  // above a small shell can't eat clicks — or start drags — meant for
-  // whatever is beneath the widget. Shrinks are DEFERRED past the glide:
-  // the hit rect must never be smaller than the shell still on screen, or
-  // clicks on the visibly-shrinking shell would fall through mid-glide
-  // (quick-review catch, 2026-07-10). Grows apply instantly — the gutter
-  // intercepting 200ms early is invisible; the shell arriving into a dead
-  // zone would not be. hitCommanded keeps interrupted shrinks honest (the
-  // winCommanded lesson from the snap era).
+  // JS-owned hover: mousemove arms it, mouseleave clears it, and the Rust
+  // cursor-left event clears it for gutter exits — once the window goes
+  // click-through the webview receives no more mouse events at all, so a
+  // CSS :hover would freeze true and pin the revealed chrome open
+  // (quick-review catch, 2026-07-10). Every reveal surface keys on the
+  // root's data-hot instead of group-hover.
+  const [hot, setHot] = useState(false);
+  useEffect(() => onCursorLeft(() => setHot(false)), []);
+  // Settled device context (presence.rs). ONE subscription serves both
+  // consumers: conceal drops hover state (a hidden webview never receives
+  // the mouseleave), and the ambient override below keys off user/concealed.
+  const [presence, setPresence] = useState<PresenceState>({
+    fullscreen: false,
+    user: "active",
+    concealed: false,
+  });
+  useEffect(
+    () =>
+      onPresence((p) => {
+        setPresence(p);
+        if (p.concealed) setHot(false);
+      }),
+    [],
+  );
+
+  // P3 — the ambient AFK grow (CLAUDE.md Presence clause 3): away while
+  // music plays promotes the widget to the expanded view; ANY input returns
+  // it to the user's mode, fast and plain (input flips the backend to
+  // active within one 1s tick, and stepMode clears it instantly). The
+  // override layers over the persisted mode, which NEVER changes here; a
+  // re-fire needs a full new away period (backend state machine — the
+  // anti-haunt latch falls out of it).
+  const ambient = presence.user === "away" && playing && !nothing && !presence.concealed;
+  const [presenceOverride, setPresenceOverride] = useState<Mode | null>(null);
+  // Disarmed by a manual dismissal until the user has actually been active
+  // again: presence stays "away" for up to a tick after input (and playing/
+  // nothing can flicker inside that window — AM tears its session down on
+  // pause), so deriving purely from `ambient` could re-assert an override
+  // the user JUST dismissed (quick-review catch, 2026-07-09).
+  const ambientArmed = useRef(true);
+  useEffect(() => {
+    if (presence.user === "active") ambientArmed.current = true;
+  }, [presence.user]);
+  useEffect(() => {
+    setPresenceOverride(ambient && ambientArmed.current ? "expanded" : null);
+  }, [ambient]);
+  // What the widget actually shows. Every mode consumer below keys on THIS;
+  // `mode` itself is only the persisted user intent.
+  const effectiveMode = presenceOverride ?? mode;
+
+  // Report the EFFECTIVE mode's interactive footprint: outside it the
+  // fixed-size window is click-through (dock.rs hit watcher), so the
+  // invisible gutter above a small shell can't eat clicks — or start drags
+  // — meant for whatever is beneath the widget. Shrinks are DEFERRED past
+  // the glide: the hit rect must never be smaller than the shell still on
+  // screen, or clicks on the visibly-shrinking shell would fall through
+  // mid-glide (quick-review catch, 2026-07-10). Grows apply instantly — the
+  // gutter intercepting 200ms early is invisible; the shell arriving into a
+  // dead zone would not be. hitCommanded keeps interrupted shrinks honest
+  // (the winCommanded lesson from the snap era). While ambient, the
+  // expanded footprint intercepts more desktop clicks — acceptable because
+  // reaching for the widget IS input, so the shell shrinks back within
+  // ~1.2s (1s presence tick + 200ms glide), before a deliberate click.
   const hitCommanded = useRef<[number, number] | null>(null);
   useEffect(() => {
-    const [w1, h1] = MODE_SIZES[mode];
+    const [w1, h1] = MODE_SIZES[effectiveMode];
     const [cw, ch] = hitCommanded.current ?? [w1, h1];
     const uw = Math.max(w1, cw);
     const uh = Math.max(h1, ch);
@@ -1563,26 +1628,7 @@ function App() {
       );
     }
     return () => window.clearTimeout(timer);
-  }, [mode, reducedMotion]);
-
-  // JS-owned hover: mousemove arms it, mouseleave clears it, and the Rust
-  // cursor-left event clears it for gutter exits — once the window goes
-  // click-through the webview receives no more mouse events at all, so a
-  // CSS :hover would freeze true and pin the revealed chrome open
-  // (quick-review catch, 2026-07-10). Every reveal surface keys on the
-  // root's data-hot instead of group-hover.
-  const [hot, setHot] = useState(false);
-  useEffect(() => onCursorLeft(() => setHot(false)), []);
-  // Conceal hides the native window without a mouseleave ever reaching the
-  // webview (same blindness as the click-through gate) — drop hover state so
-  // the revealed chrome isn't pinned open when the window restores.
-  useEffect(
-    () =>
-      onPresence((p) => {
-        if (p.concealed) setHot(false);
-      }),
-    [],
-  );
+  }, [effectiveMode, reducedMotion]);
 
   const morph = {
     // Opacity ONLY — no scale. The shell's size glide is the mode swap's
@@ -1608,11 +1654,6 @@ function App() {
     },
     transition: { duration: reducedMotion ? 0 : DUR[3] / 1000, ease: [...EASE.out] as [number, number, number, number] },
   };
-  const nothing = !np || np.player === "none";
-  const playing = np?.status === "playing";
-  // AM can't seek over SMTC (support matrix) — buttons gate on capability.
-  const seekable = !!np?.can_seek;
-
   // Whole-card drag, except interactive elements. (data-tauri-drag-region only
   // fires when the pressed element itself carries the attribute — art, gaps,
   // and icons didn't, which made the window feel undraggable.)
@@ -1624,9 +1665,22 @@ function App() {
   };
 
   // The anchored cluster steps this ladder one rung per click; the end
-  // buttons disable instead of wrapping.
-  const stepMode = (d: -1 | 1) =>
-    setMode((m) => MODE_ORDER[Math.min(Math.max(MODE_ORDER.indexOf(m) + d, 0), MODE_ORDER.length - 1)]);
+  // buttons disable instead of wrapping. Steps from the EFFECTIVE mode, so
+  // a press during an ambient override does exactly what its label says
+  // ("Collapse to card" lands on card — three review agents independently
+  // caught the earlier jump-to-persisted-mode version lying to AT/tooltips)
+  // and the result persists like any explicit choice. The press also
+  // dismisses the override and disarms re-fire until a fresh active period.
+  const stepMode = (d: -1 | 1) => {
+    ambientArmed.current = false;
+    setPresenceOverride(null);
+    setMode(
+      () =>
+        MODE_ORDER[
+          Math.min(Math.max(MODE_ORDER.indexOf(effectiveMode) + d, 0), MODE_ORDER.length - 1)
+        ],
+    );
+  };
 
   // Browser mock: there is no OS window to be the widget, so emulate one —
   // a desktop-ish backdrop under a mode-sized root (below). Without this the
@@ -1671,14 +1725,14 @@ function App() {
       <div
         className={`absolute overflow-hidden rounded-xl border border-border/10 bg-surface/97 shadow-[0_1px_3px_rgb(0_0_0/0.18),0_3px_6px_rgb(0_0_0/0.12)] [transition:width_200ms_var(--ease-in-out-tk),height_200ms_var(--ease-in-out-tk)] ${SHELL_SEAT[dockCorner]}`}
         style={{
-          width: MODE_SIZES[mode][0] - SHELL_GUTTER_PX,
-          height: MODE_SIZES[mode][1] - SHELL_GUTTER_PX,
+          width: MODE_SIZES[effectiveMode][0] - SHELL_GUTTER_PX,
+          height: MODE_SIZES[effectiveMode][1] - SHELL_GUTTER_PX,
         }}
       >
       {/* Crossfading content layers, clipped by the gliding shell above. */}
       <AnimatePresence>
-        <motion.div key={mode} {...morph} className="absolute inset-0">
-        <ModeContent mode={mode} corner={dockCorner}>
+        <motion.div key={effectiveMode} {...morph} className="absolute inset-0">
+        <ModeContent mode={effectiveMode} corner={dockCorner}>
         {nothing ? (
           /* The resting state: the note glyph, the words, and the living
              separator's resting middot with nothing to separate — breathing
@@ -1693,7 +1747,7 @@ function App() {
               <span className="resting-pulse absolute left-1/2 top-1/2 h-[3px] w-[3px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-muted" />
             </span>
           </div>
-        ) : mode === "pill" ? (
+        ) : effectiveMode === "pill" ? (
           /* "5a — time at rest" (ANIMATIONS.md §3): at rest the pill is pure
              glance — art · title · artist · elapsed time, no buttons. On widget
              hover the time fades out (keeping its flex slot so the title/artist
@@ -1740,7 +1794,7 @@ function App() {
             {/* Non-interactive progress hairline — still announced to AT. */}
             <Hairline np={np} />
           </>
-        ) : mode === "card" ? (
+        ) : effectiveMode === "card" ? (
           /* Anchored-cluster handoff (2026-07-08, supersedes Figma 874:299):
              art+titles fill the top, then full-width progress, then the
              transport as the very-bottom row — centered, sharing its band
@@ -1784,7 +1838,14 @@ function App() {
             </div>
           </div>
         ) : (
-          <ExpandedView np={np} artUrl={shownArt} lyrics={lyrics} seekable={seekable} playing={playing} />
+          <ExpandedView
+            np={np}
+            artUrl={shownArt}
+            lyrics={lyrics}
+            seekable={seekable}
+            playing={playing}
+            plainArrival={presenceOverride !== null}
+          />
         )}
         </ModeContent>
         </motion.div>
@@ -1793,7 +1854,7 @@ function App() {
           never fades, so the cluster never fades with content — and seated
           on the shell it tracks the visible box in every dock corner and
           every mode of the fixed-size window. See ModeCluster. */}
-      {!nothing && <ModeCluster mode={mode} onStep={stepMode} />}
+      {!nothing && <ModeCluster mode={effectiveMode} onStep={stepMode} />}
       </div>
       {/* Broken-art detector — OUTSIDE the mode-keyed subtree so the data URL
           isn't re-decoded on every mode switch, only per track. */}

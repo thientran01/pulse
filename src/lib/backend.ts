@@ -192,7 +192,11 @@ const MOCK_PRESENCE: PresenceState = !IN_TAURI
   ? {
       fullscreen: new URLSearchParams(window.location.search).has("fs"),
       user: new URLSearchParams(window.location.search).has("away") ? "away" : "active",
-      concealed: false,
+      // Mirror the real engine: settled fullscreen ⇒ concealed (P1), so
+      // ?away&fs correctly exercises "conceal beats ambient" in preview —
+      // a mock that leaves this false would green-light a regression of
+      // the gate (quick-review catch, 2026-07-09).
+      concealed: new URLSearchParams(window.location.search).has("fs"),
     }
   : { fullscreen: false, user: "active", concealed: false };
 
@@ -214,6 +218,18 @@ export function onPresence(cb: (p: PresenceState) => void): () => void {
     };
   }
   cb(MOCK_PRESENCE);
+  // Mock the real engine's return-on-input: seeded away (?away), the first
+  // pointer/key input flips to active — so the ambient grow AND its return
+  // glide are both exercisable in preview.
+  if (MOCK_PRESENCE.user === "away") {
+    const onInput = () => cb({ ...MOCK_PRESENCE, user: "active" });
+    window.addEventListener("pointermove", onInput, { once: true });
+    window.addEventListener("keydown", onInput, { once: true });
+    return () => {
+      window.removeEventListener("pointermove", onInput);
+      window.removeEventListener("keydown", onInput);
+    };
+  }
   return () => {};
 }
 
