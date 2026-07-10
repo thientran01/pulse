@@ -1493,6 +1493,33 @@ function PresenceOverlay({ corner }: { corner: DockCorner }) {
   );
 }
 
+/** The pill's track key at the last commit — module-level so it survives
+ * the mode-keyed remounts (the lastAlive pattern): switching INTO the pill
+ * remounts the title spans with the same key, and that mount must not
+ * replay the track-change fade. */
+let lastPillKey: string | null = null;
+
+/** Pill title/artist span: remounted per track key by the parent's `key`,
+ * fading in ONLY when the mount is a real track change (a mode switch into
+ * the pill re-creates the DOM with the same key — no beat). */
+function TrackFadeSpan({
+  k,
+  className,
+  children,
+}: {
+  k: string | null;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  // Captured once at mount, BEFORE the commit effect below records the new
+  // key — exactly "was this mount a change".
+  const [animate] = useState(() => k !== null && lastPillKey !== null && k !== lastPillKey);
+  useEffect(() => {
+    lastPillKey = k;
+  }, [k]);
+  return <span className={`${animate ? "title-in " : ""}${className ?? ""}`}>{children}</span>;
+}
+
 function App() {
   const [np, setNp] = useState<NowPlaying | null>(null);
   useEffect(
@@ -1606,15 +1633,37 @@ function App() {
   // LONG real absence (lunch-length) or his own re-shrink to pill resets
   // it (see stepMode).
   const ambientArmed = useRef(true);
-  const workingArmed = useRef(true);
+  // The working pin survives webview reloads via sessionStorage (dies with
+  // the window — matching the "session-long" semantics): the dev build's
+  // HMR full reloads would otherwise silently un-pin an overrule and
+  // reproduce the exact discarded-choice complaint this latch fixes.
+  const workingArmed = useRef(
+    (() => {
+      try {
+        return sessionStorage.getItem("pulse.workingArmed") !== "0";
+      } catch {
+        return true;
+      }
+    })(),
+  );
+  const setWorkingArmed = (v: boolean) => {
+    workingArmed.current = v;
+    try {
+      sessionStorage.setItem("pulse.workingArmed", v ? "1" : "0");
+    } catch {
+      // non-fatal: the pin just won't survive a reload
+    }
+  };
   const awaySince = useRef<number | null>(null);
   useEffect(() => {
     if (presence.user === "away") {
+      // Stamped at the away FLIP, so the effective absence is the away
+      // threshold PLUS this — close enough for a lunch-length bar.
       awaySince.current ??= Date.now();
     } else {
       ambientArmed.current = true;
       if (awaySince.current !== null && Date.now() - awaySince.current >= LONG_ABSENCE_MS) {
-        workingArmed.current = true;
+        setWorkingArmed(true);
       }
       awaySince.current = null;
     }
@@ -1721,12 +1770,12 @@ function App() {
     // behavior's latch (ambient re-arms on the next non-away tick; working
     // waits for a LONG absence or the manual-pill re-arm below).
     if (presenceOverride === "expanded") ambientArmed.current = false;
-    if (presenceOverride === "pill") workingArmed.current = false;
+    if (presenceOverride === "pill") setWorkingArmed(false);
     const next =
       MODE_ORDER[Math.min(Math.max(MODE_ORDER.indexOf(effectiveMode) + d, 0), MODE_ORDER.length - 1)];
     // Explicitly choosing the pill re-invites the quiet: the pinned "I want
     // this view while I work" intent ends the moment he shrinks it himself.
-    if (presenceOverride === null && next === "pill") workingArmed.current = true;
+    if (presenceOverride === null && next === "pill") setWorkingArmed(true);
     setPresenceOverride(null);
     setMode(() => next);
   };
@@ -1819,13 +1868,17 @@ function App() {
                   ladder — collapse, gray re-multiply, accent igniting last
                   in the NEW album's color. */}
               <p className="min-w-0 flex-1 truncate text-xs font-medium text-fg">
-                <span key={`t:${lyricsKeyOf(np)}`} className="title-in">
+                <TrackFadeSpan key={`t:${lyricsKeyOf(np)}`} k={lyricsKeyOf(np)}>
                   {np.title}
-                </span>
+                </TrackFadeSpan>
                 <Waveform trailing={!np.artist} announceKey={lyricsKeyOf(np) ?? undefined} />
-                <span key={`a:${lyricsKeyOf(np)}`} className="title-in font-normal text-muted">
+                <TrackFadeSpan
+                  key={`a:${lyricsKeyOf(np)}`}
+                  k={lyricsKeyOf(np)}
+                  className="font-normal text-muted"
+                >
                   {np.artist}
-                </span>
+                </TrackFadeSpan>
               </p>
               <PillTime np={np} />
             </div>

@@ -233,9 +233,12 @@ export function Waveform({
     // drain lands at the bottom (announceTint flips as the survivor forms,
     // mirroring "color leaves last" on the way down) and the ignition is
     // the FINAL beat (clearing announceTint at "alive" lets the 220ms
-    // background-color transition sweep the bars into the NEW track's
-    // accent — the retint runs in parallel, so the ignition lands in the
-    // incoming album's color).
+    // background-color transition sweep the bars back to accent). When the
+    // new album's palette has already resolved, the ignition lands in the
+    // incoming color; when art lags the metadata (AM, up to ~10s — see the
+    // CLAUDE.md gotcha) it ignites in the current accent and the standard
+    // retint sweep recolors when the palette arrives. ~1.06s end to end —
+    // the 2-beat bottom hold is the feel-check knob if it reads slow.
     announceRef.current = () => {
       if (phaseRef.current !== "alive" || blooming || announcing) return;
       if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
@@ -347,11 +350,14 @@ export function Waveform({
 
   // Fire the announcement on a track-identity CHANGE only — never the
   // initial key (mount/remount is not a track change; lastAlive already
-  // keeps mode switches quiet).
+  // keeps mode switches quiet). A transient undefined key (GSMTC populates
+  // title before duration, so lyricsKeyOf can gap to null mid-change) must
+  // not overwrite the memory — it would make the NEXT real track read as
+  // an initial mount and silently skip (quick-review catch, 2026-07-10).
   const prevKeyRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     const prev = prevKeyRef.current;
-    prevKeyRef.current = announceKey;
+    if (announceKey !== undefined) prevKeyRef.current = announceKey;
     if (announceKey === undefined || prev === undefined || prev === announceKey) return;
     announceRef.current();
   }, [announceKey]);
