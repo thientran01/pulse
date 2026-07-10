@@ -54,10 +54,11 @@ body,
   height: 100%;
 }
 
-/* The native mode resize reflows the webview every frame — content that
- * momentarily overflows mid-resize must clip, never flash a scrollbar
- * (ANIMATIONS_FROM_ZERO §2). The shell's own overflow-hidden clips inside
- * the window inset; this guards the 6px gutter around it. */
+/* Mode changes snap the OS window while the shell glides inside it (App.tsx
+ * sequencing) — content that momentarily overflows (a final-size plane in a
+ * still-gliding shell, the union-sized window phase) must clip, never flash
+ * a scrollbar. The shell's own overflow-hidden clips inside the window
+ * gutter; this guards the gutter itself. */
 html,
 body {
   overflow: hidden;

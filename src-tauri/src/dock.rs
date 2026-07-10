@@ -62,12 +62,13 @@ impl Corner {
     }
 }
 
-/// Tell the webview which corner resizes grow out of: ModeContent (App.tsx)
-/// anchors its fixed content plane there so the native resize reveals the
-/// layout instead of dragging it along — anchoring to the wrong corner makes
-/// the content ride the MOVING edge. Fired wherever the corner is derived or
-/// re-set; the frontend seeds via the dock_corner command against the
-/// listener-attach race.
+/// Tell the webview which corner resizes grow out of: App.tsx seats the
+/// gliding shell (SHELL_SEAT) and its fixed content plane (CORNER_SEAT)
+/// there, so the glide radiates out of the one corner that never moves —
+/// anchoring anywhere else puts the content on a MOVING edge and it rides
+/// the resize instead of being revealed by it. Fired wherever the corner is
+/// derived or re-set; the frontend seeds via the dock_corner command against
+/// the listener-attach race.
 fn emit_corner(window: &WebviewWindow, corner: Corner) {
     let _ = window.emit("dock-corner", corner.as_str());
 }

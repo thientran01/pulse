@@ -17,9 +17,11 @@ const SEEK_STEP_MS = 10_000;
 
 type Mode = "pill" | "card" | "expanded";
 
-/** Native window size per mode — the window grows out of its docked corner
- * (200ms EASE.inOut on the Rust side), clip-revealing the incoming mode's
- * already-final ModeContent plane while the shells crossfade. */
+/** Native window size per mode. The window SNAPS between these (one
+ * corner-pinned SetWindowPos — dock.rs); the visible 200ms EASE.inOut growth
+ * is the persistent shell's CSS glide out of the docked corner,
+ * clip-revealing the incoming mode's already-final ModeContent plane while
+ * the content layers crossfade inside it. */
 const MODE_SIZES: Record<Mode, [number, number]> = {
   pill: [300, 48],
   card: [380, 132], // anchored-cluster handoff: 52px art row, full-width progress, bottom transport
@@ -608,7 +610,8 @@ function ModeButton({
 /** Ordered mode ladder the anchored cluster steps through. */
 const MODE_ORDER: readonly Mode[] = ["pill", "card", "expanded"];
 
-/** The 6px transparent gutter per side between the window edge and shell. */
+/** The 6px transparent gutter per side between the window edge and shell —
+ * 2× SHELL_SEAT's 1.5 inset. Change the seat inset, change this too. */
 const SHELL_GUTTER_PX = 12;
 /** What the shell's chrome takes from the window before content: the 6px
  * gutter per side (SHELL_SEAT's 1.5 inset) + the shell's 1px border per
@@ -686,16 +689,23 @@ const CORNER_SEAT: Record<DockCorner, string> = {
  * fades or rescales with the content morph — chrome holds still (the
  * expanded view's hoisted-chrome rule, promoted app-wide).
  *
- * Positioned in WINDOW coordinates (this div lives in the window root, not
- * the inset-1.5 shell): right-3.5 = 14px window = 8px from the shell edge; bottom-[11px]
- * puts the 28px buttons' center 25px from the window bottom — the CONTROL
- * CENTERLINE every mode's controls sit on: the pill scrim's play/pause
+ * Positioned in SHELL coordinates — this div lives inside the persistent
+ * shell, beside (never inside) the content swap. The old hoist-to-root
+ * reason died when the crossfading shells became one persistent shell: the
+ * chrome can't fade anymore, and shell-relative seating is what keeps the
+ * cluster glued to the VISIBLE box through every dock corner and the
+ * transient union-sized window phase (window-relative seating floated it
+ * over the transparent gutter there — quick-review catch). Seat math:
+ * right-[7px] shell = +1px border +6px gutter = 14px window (8px from the
+ * shell's outer edge); bottom-[4px] shell = 11px window, putting the 28px
+ * buttons' center 25px from the window bottom — the CONTROL CENTERLINE
+ * every mode's controls sit on: the pill scrim's play/pause
  * (top-0/bottom-0.5 in the 36px shell → center 25px), and the card/expanded
  * transports via their pb-1/pb-0.5 column padding (the shell's 1px border
  * adds to both). Change one, change all four. The seat is CONSTANT in every
- * mode (no mode-dependent bottom) — docked bottom-right the window's bottom
- * edge is pinned, so the cluster holds the exact same screen pixels across
- * pill/card/expanded: the
+ * mode (no mode-dependent bottom) — docked bottom-right the shell's bottom-
+ * right corner is welded through rests AND glides, so the cluster holds the
+ * exact same screen pixels across pill/card/expanded: the
  * fixed-point guarantee, no drift even while hidden (ANIMATIONS.md §2 —
  * "opacity only, zero transforms; the fixed-point guarantee includes the
  * hidden state"). Hidden at rest (opacity 0, pointer-events none),
@@ -708,7 +718,7 @@ const CORNER_SEAT: Record<DockCorner, string> = {
 function ModeCluster({ mode, onStep }: { mode: Mode; onStep: (d: -1 | 1) => void }) {
   return (
     <div
-      className="pointer-events-none absolute bottom-[11px] right-3.5 z-20 flex items-center gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-hover/widget:pointer-events-auto group-hover/widget:opacity-100 group-focus-within/widget:pointer-events-auto group-focus-within/widget:opacity-100"
+      className="pointer-events-none absolute bottom-[4px] right-[7px] z-20 flex items-center gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-hover/widget:pointer-events-auto group-hover/widget:opacity-100 group-focus-within/widget:pointer-events-auto group-focus-within/widget:opacity-100"
       // Swallow mousedown: pointer-events-none makes a DISABLED button
       // transparent to hit-testing, so without this a press on it (or the
       // 4px gap between the buttons) would fall through to the root drag
@@ -1416,53 +1426,81 @@ function App() {
     }
   }, [mode]);
 
+  const reducedMotion = useReducedMotion();
+
   /** Shell's glide target — lags `mode` by the grow snap (below) so the CSS
-   * glide never starts before the window has made room for it. */
-  const [shellMode, setShellMode] = useState<Mode>(mode);
+   * glide never starts before the window has made room for it. Starts at
+   * "card" regardless of the persisted mode: window-state restores position
+   * only, so every launch's REAL window is tauri.conf.json's default (= the
+   * card size) — seeding from `mode` would paint a full-size expanded shell
+   * clipped inside a card-size window for the first frames (quick-review
+   * catch). The first sequencing run below glides it to the persisted mode.
+   */
+  const [shellMode, setShellMode] = useState<Mode>("card");
   /** Mock only: the fake OS window's size. Snaps, never transitions — it
    * emulates dock.rs, and the real window side of a mode change is a snap. */
-  const [mockWin, setMockWin] = useState<[number, number]>(() => MODE_SIZES[mode]);
+  const [mockWin, setMockWin] = useState<[number, number]>(() => MODE_SIZES.card);
 
   // The resize gesture, sequenced. The OS window SNAPS (one corner-pinned
   // SetWindowPos — dock.rs; per-frame native resizes shake on WebView2)
   // while the shell glides 200ms EASE.inOut between mode boxes. The window
   // is transparent, so the shell's glide is the only visible motion and the
   // webview compositor owns it end-to-end. Grow: snap out to the union of
-  // old/new first so the glide has room; shrink: glide, then snap down once
-  // the shell has settled (the timer's slack absorbs a late paint frame).
-  // Interrupting mid-glide clears the pending down-snap and re-runs against
-  // the union of LOGICAL sizes — the window is only ever at a mode size or
-  // a union of two, so the target union covers wherever it actually is.
-  const prevSize = useRef<[number, number] | null>(null);
+  // where-the-window-is and the target first so the glide has room; shrink:
+  // glide, then snap down once the shell has settled (the timer's slack
+  // absorbs a late paint frame). Interrupting mid-glide clears the pending
+  // down-snap; because unions are computed against winCommanded (where the
+  // window actually is), the interrupted state stays covered.
+  /** Last size actually commanded to the (real or mock) window. Seeded with
+   * tauri.conf.json's default window size (= card; window-state restores
+   * position only). Kept honest across cancelled down-snaps — computing the
+   * union from the last logical TARGET instead let two quick shrink clicks
+   * yank the window below the still-gliding shell and hard-clip it
+   * (quick-review catch). Keep in sync with tauri.conf.json width/height. */
+  const winCommanded = useRef<[number, number]>(MODE_SIZES.card);
+  const firstSnap = useRef(true);
   useEffect(() => {
     const [w1, h1] = MODE_SIZES[mode];
-    // First run snaps straight to the target: launch docking (the restored
-    // window can be a different mode's size than the persisted pulse.mode).
-    const [w0, h0] = prevSize.current ?? [0, 0];
-    prevSize.current = [w1, h1];
-    const uw = Math.max(w0, w1);
-    const uh = Math.max(h0, h1);
+    const [cw, ch] = winCommanded.current;
+    const uw = Math.max(w1, cw);
+    const uh = Math.max(h1, ch);
     let timer: number | undefined;
     let alive = true;
     const snap = (w: number, h: number): Promise<void> => {
+      winCommanded.current = [w, h];
       if (IN_TAURI) return commands.setWindowSize(w, h);
       setMockWin([w, h]);
       return Promise.resolve();
     };
-    void snap(uw, uh).then(() => {
-      if (!alive) return;
-      setShellMode(mode);
-      if (uw !== w1 || uh !== h1) {
-        timer = window.setTimeout(() => void snap(w1, h1), DUR[3] + 80);
-      }
-    });
+    // The first run always snaps — that's the launch dock (dock.rs derives
+    // the corner from it). After that, skip no-op snaps: re-committing an
+    // unchanged rect would NOCOPYBITS-blank a window that isn't moving.
+    const pre =
+      firstSnap.current || uw !== cw || uh !== ch ? snap(uw, uh) : Promise.resolve();
+    firstSnap.current = false;
+    // A rejected snap (window/monitor gone mid-IPC) must not strand the
+    // shell in the old box while the content already swapped — glide anyway;
+    // winCommanded keeps later unions honest.
+    void pre
+      .catch(() => {})
+      .then(() => {
+        if (!alive) return;
+        setShellMode(mode);
+        if (uw !== w1 || uh !== h1) {
+          // Reduced motion zeroes the CSS glide — don't make those users
+          // wait out a glide that isn't happening before the window fits.
+          timer = window.setTimeout(
+            () => void snap(w1, h1).catch(() => {}),
+            reducedMotion ? 0 : DUR[3] + 80,
+          );
+        }
+      });
     return () => {
       alive = false;
       window.clearTimeout(timer);
     };
-  }, [mode]);
+  }, [mode, reducedMotion]);
 
-  const reducedMotion = useReducedMotion();
   const morph = {
     // Opacity ONLY — no scale. The shell's size glide is the mode swap's
     // single motion system; a content zoom stacked on it runs out of phase
@@ -1630,11 +1668,12 @@ function App() {
         </ModeContent>
         </motion.div>
       </AnimatePresence>
-      </div>
-      {/* Outside the mode-keyed remount: the cluster never fades or rescales
-          with the content morph, and — docked bottom-right — never moves on
-          screen. See ModeCluster. */}
+      {/* Inside the persistent shell but OUTSIDE the content swap: the shell
+          never fades, so the cluster never fades with content — and seated
+          on the shell it tracks the visible box through every dock corner
+          and the union-window phase. See ModeCluster. */}
       {!nothing && <ModeCluster mode={mode} onStep={stepMode} />}
+      </div>
       {/* Broken-art detector — OUTSIDE the mode-keyed subtree so the data URL
           isn't re-decoded on every mode switch, only per track. */}
       {artUrl && artUrl !== brokenArtUrl && (
