@@ -147,6 +147,13 @@ body {
   transition-delay: 600ms;
 }
 
+/* Track-change title beat (the pill): the incoming title/artist fade in
+ * fast and plain — remount-keyed, so the outgoing text exits instantly per
+ * the track-change doctrine. Reuses caption-in's keyframes. */
+.title-in {
+  animation: caption-in 140ms var(--ease-out-tk) both;
+}
+
 /* Caption fade for the big-art view's reserved slot ("Finding lyrics…" /
  * "No synced lyrics") — an animation, not a transition, so it runs on mount. */
 @keyframes caption-in {

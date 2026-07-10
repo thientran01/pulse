@@ -66,6 +66,12 @@ function mockSkip(dir: 1 | -1): void {
   pushMock({ ...MOCK_TRACKS[mockTrack], status: "playing", position_ms: 0, position_at_ms: now });
 }
 
+// Preview affordance: drive a track change from views without a next button
+// (the pill — where the track-change announcement lives) via the console.
+if (!IN_TAURI) {
+  (window as unknown as { __mockNext?: () => void }).__mockNext = () => mockSkip(1);
+}
+
 /** Mutate the mock payload, advancing the seq stamp like the backend does. */
 function pushMock(patch: Partial<NowPlaying>): void {
   mock = { ...mock, ...patch, seq: mock.seq + 1 };

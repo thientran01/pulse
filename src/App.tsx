@@ -45,6 +45,13 @@ const MODE_SIZES: Record<Mode, [number, number]> = {
  * first-frame artifact). */
 const WINDOW_MAX: [number, number] = MODE_SIZES.expanded;
 
+/** An away stretch this long counts as a REAL absence and re-arms the
+ * working-quiet latch after a manual overrule (anything shorter — reading
+ * lyrics, listening between typing bursts — must not). The frontend can't
+ * see debug_assertions; vite DEV ⇔ `npm run tauri dev` is the right proxy
+ * for the short feel-check value. */
+const LONG_ABSENCE_MS = import.meta.env.DEV ? 45_000 : 15 * 60_000;
+
 function fmt(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
@@ -1486,6 +1493,33 @@ function PresenceOverlay({ corner }: { corner: DockCorner }) {
   );
 }
 
+/** The pill's track key at the last commit — module-level so it survives
+ * the mode-keyed remounts (the lastAlive pattern): switching INTO the pill
+ * remounts the title spans with the same key, and that mount must not
+ * replay the track-change fade. */
+let lastPillKey: string | null = null;
+
+/** Pill title/artist span: remounted per track key by the parent's `key`,
+ * fading in ONLY when the mount is a real track change (a mode switch into
+ * the pill re-creates the DOM with the same key — no beat). */
+function TrackFadeSpan({
+  k,
+  className,
+  children,
+}: {
+  k: string | null;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  // Captured once at mount, BEFORE the commit effect below records the new
+  // key — exactly "was this mount a change".
+  const [animate] = useState(() => k !== null && lastPillKey !== null && k !== lastPillKey);
+  useEffect(() => {
+    lastPillKey = k;
+  }, [k]);
+  return <span className={`${animate ? "title-in " : ""}${className ?? ""}`}>{children}</span>;
+}
+
 function App() {
   const [np, setNp] = useState<NowPlaying | null>(null);
   useEffect(
@@ -1591,14 +1625,48 @@ function App() {
   // tick after input (and playing/nothing can flicker inside that window —
   // AM tears its session down on pause), so deriving purely from `ambient`
   // could re-assert an override the user JUST dismissed (quick-review
-  // catch, 2026-07-09). Working-quiet's latch is harsher — one manual
-  // overrule suppresses it until a REAL away period resets it (the user
-  // told the companion no; only a fresh absence earns another try).
+  // catch, 2026-07-09). Working-quiet's latch is much harsher: an overrule
+  // means "I chose this view while working" and brief idles (reading the
+  // lyrics he just expanded, listening between typing bursts) must NOT
+  // re-arm it — the first live soak showed every track change discarding
+  // his choice via the old any-away re-arm (Thien, 2026-07-10). Only a
+  // LONG real absence (lunch-length) or his own re-shrink to pill resets
+  // it (see stepMode).
   const ambientArmed = useRef(true);
-  const workingArmed = useRef(true);
+  // The working pin survives webview reloads via sessionStorage (dies with
+  // the window — matching the "session-long" semantics): the dev build's
+  // HMR full reloads would otherwise silently un-pin an overrule and
+  // reproduce the exact discarded-choice complaint this latch fixes.
+  const workingArmed = useRef(
+    (() => {
+      try {
+        return sessionStorage.getItem("pulse.workingArmed") !== "0";
+      } catch {
+        return true;
+      }
+    })(),
+  );
+  const setWorkingArmed = (v: boolean) => {
+    workingArmed.current = v;
+    try {
+      sessionStorage.setItem("pulse.workingArmed", v ? "1" : "0");
+    } catch {
+      // non-fatal: the pin just won't survive a reload
+    }
+  };
+  const awaySince = useRef<number | null>(null);
   useEffect(() => {
-    if (presence.user !== "away") ambientArmed.current = true;
-    if (presence.user === "away") workingArmed.current = true;
+    if (presence.user === "away") {
+      // Stamped at the away FLIP, so the effective absence is the away
+      // threshold PLUS this — close enough for a lunch-length bar.
+      awaySince.current ??= Date.now();
+    } else {
+      ambientArmed.current = true;
+      if (awaySince.current !== null && Date.now() - awaySince.current >= LONG_ABSENCE_MS) {
+        setWorkingArmed(true);
+      }
+      awaySince.current = null;
+    }
   }, [presence.user]);
   useEffect(() => {
     // Branch order mirrors the documented precedence (conceal > working
@@ -1700,16 +1768,16 @@ function App() {
   const stepMode = (d: -1 | 1) => {
     // A press while an override is active is an overrule — disarm THAT
     // behavior's latch (ambient re-arms on the next non-away tick; working
-    // stays suppressed until a real away period).
+    // waits for a LONG absence or the manual-pill re-arm below).
     if (presenceOverride === "expanded") ambientArmed.current = false;
-    if (presenceOverride === "pill") workingArmed.current = false;
+    if (presenceOverride === "pill") setWorkingArmed(false);
+    const next =
+      MODE_ORDER[Math.min(Math.max(MODE_ORDER.indexOf(effectiveMode) + d, 0), MODE_ORDER.length - 1)];
+    // Explicitly choosing the pill re-invites the quiet: the pinned "I want
+    // this view while I work" intent ends the moment he shrinks it himself.
+    if (presenceOverride === null && next === "pill") setWorkingArmed(true);
     setPresenceOverride(null);
-    setMode(
-      () =>
-        MODE_ORDER[
-          Math.min(Math.max(MODE_ORDER.indexOf(effectiveMode) + d, 0), MODE_ORDER.length - 1)
-        ],
-    );
+    setMode(() => next);
   };
 
   // Browser mock: there is no OS window to be the widget, so emulate one —
@@ -1792,10 +1860,25 @@ function App() {
                 12px it needs to breathe. */}
             <div className="flex h-full items-center gap-2 pl-1.5 pr-3">
               <Art url={shownArt} size={26} radiusPx={6} />
+              {/* Track-change announcement (pill only — the quiet state is
+                  where a change needs NOTICING; card/expanded already read
+                  as now-playing surfaces): the incoming title/artist fade
+                  in via remount (outgoing exits instantly — track changes
+                  exit fast and plain) while the separator runs its announce
+                  ladder — collapse, gray re-multiply, accent igniting last
+                  in the NEW album's color. */}
               <p className="min-w-0 flex-1 truncate text-xs font-medium text-fg">
-                {np.title}
-                <Waveform trailing={!np.artist} />
-                <span className="font-normal text-muted">{np.artist}</span>
+                <TrackFadeSpan key={`t:${lyricsKeyOf(np)}`} k={lyricsKeyOf(np)}>
+                  {np.title}
+                </TrackFadeSpan>
+                <Waveform trailing={!np.artist} announceKey={lyricsKeyOf(np) ?? undefined} />
+                <TrackFadeSpan
+                  key={`a:${lyricsKeyOf(np)}`}
+                  k={lyricsKeyOf(np)}
+                  className="font-normal text-muted"
+                >
+                  {np.artist}
+                </TrackFadeSpan>
               </p>
               <PillTime np={np} />
             </div>

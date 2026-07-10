@@ -106,11 +106,33 @@ function barClass(phase: Phase, i: number, size: Size): string {
   return `${dotSize} ${dropped ? `opacity-0 ${g.dropBlur}` : "opacity-100 blur-0"} [transition:height_260ms_var(--ease-out-tk),width_260ms_var(--ease-out-tk),transform_260ms_var(--ease-out-tk),opacity_260ms_var(--ease-out-tk),filter_260ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]`;
 }
 
-export function Waveform({ trailing, size = "sm" }: { trailing?: boolean; size?: Size }) {
+/** Announcement (track change) beat spacing — the bloom's quick cadence for
+ * both directions: an announcement is glanced at, not watched. */
+const ANNOUNCE_MS = BLOOM_MS;
+
+export function Waveform({
+  trailing,
+  size = "sm",
+  announceKey,
+}: {
+  trailing?: boolean;
+  size?: Size;
+  /** Track-identity key: a CHANGE while alive runs the announcement — the
+   * capsules collapse (old song's color drains at the bottom), re-multiply
+   * gray, and ignite last in the incoming track's accent. The pill's
+   * track-change "notice me" beat; card/expanded instances don't pass it. */
+  announceKey?: string;
+}) {
   const barsRef = useRef<Array<HTMLSpanElement | null>>([]);
   const [phase, setPhase] = useState<Phase>(lastAlive ? "alive" : "rest");
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
+  // Render-visible half of the announce ladder: while true the bars paint
+  // muted, so clearing it at the final beat lets the existing 220ms
+  // background-color transition BE the accent ignition (color lands last —
+  // the PR #30 arrival grammar).
+  const [announceTint, setAnnounceTint] = useState(false);
+  const announceRef = useRef<() => void>(() => {});
 
   const bins = BAR_BINS[size];
 
@@ -170,11 +192,18 @@ export function Waveform({ trailing, size = "sm" }: { trailing?: boolean; size?:
     // names alone are ambiguous, and loud payloads arrive at ~30Hz while the
     // bloom plays; they must not clear or restart it.
     let blooming = false;
+    // Same guard for the announce ladder (alive → one → alive round trip on
+    // a track change): loud payloads must ride through it untouched.
+    let announcing = false;
 
     const armSettle = () => {
       if (sleepTimer !== null) return;
       sleepTimer = window.setTimeout(() => {
         sleepTimer = null;
+        // A settle firing mid-announcement would interleave two ladders on
+        // the same bars. Skip it — the announcement's final beat re-checks
+        // the last payload and re-arms (the bloom's self-heal pattern).
+        if (announcing) return;
         lastAlive = false;
         // Reduced motion: one state change, not four discrete snaps —
         // the global CSS guard zeroes transitions but not these timers.
@@ -198,6 +227,49 @@ export function Waveform({ trailing, size = "sm" }: { trailing?: boolean; size?:
       }, SLEEP_MS);
     };
 
+    // The announcement (track change while alive): the settle ladder down to
+    // the lone dot and straight back, on the bloom's quick cadence — the
+    // song leaving and the next one multiplying in. Color grammar: the
+    // drain lands at the bottom (announceTint flips as the survivor forms,
+    // mirroring "color leaves last" on the way down) and the ignition is
+    // the FINAL beat (clearing announceTint at "alive" lets the 220ms
+    // background-color transition sweep the bars back to accent). When the
+    // new album's palette has already resolved, the ignition lands in the
+    // incoming color; when art lags the metadata (AM, up to ~10s — see the
+    // CLAUDE.md gotcha) it ignites in the current accent and the standard
+    // retint sweep recolors when the palette arrives. ~1.06s end to end —
+    // the 2-beat bottom hold is the feel-check knob if it reads slow.
+    announceRef.current = () => {
+      if (phaseRef.current !== "alive" || blooming || announcing) return;
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+      announcing = true;
+      setPhase("dots");
+      seqTimers.push(window.setTimeout(() => setPhase("three"), ANNOUNCE_MS));
+      seqTimers.push(
+        window.setTimeout(() => {
+          setPhase("one");
+          setAnnounceTint(true); // the old song's color leaves at the bottom
+        }, ANNOUNCE_MS * 2),
+      );
+      // Hold the lone gray dot for two beats — the drain needs a moment to
+      // read before the multiplication reverses.
+      seqTimers.push(window.setTimeout(() => setPhase("three"), ANNOUNCE_MS * 4));
+      seqTimers.push(window.setTimeout(() => setPhase("dots"), ANNOUNCE_MS * 5));
+      seqTimers.push(
+        window.setTimeout(() => {
+          announcing = false;
+          seqTimers.splice(0);
+          setAnnounceTint(false); // ignition: accent lands last
+          setPhase("alive");
+          start();
+          // Mirror the bloom's self-heal: a pause mid-announcement emitted
+          // its single zero payload while armSettle was skipping — re-check
+          // or the separator strands as static bars.
+          if (latest !== null && latest.level <= WAKE_LEVEL) armSettle();
+        }, ANNOUNCE_MS * 6),
+      );
+    };
+
     // Mount watchdog: the crossfade mounts this instance BEFORE the outgoing
     // one's cleanup runs, so a swap inside the pause→settle window can seed
     // "alive" from a stale lastAlive with the backend already silent (its
@@ -214,8 +286,8 @@ export function Waveform({ trailing, size = "sm" }: { trailing?: boolean; size?:
           sleepTimer = null;
         }
         lastAlive = true;
-        if (blooming) {
-          // Reverse ladder in flight — let it finish into "alive".
+        if (blooming || announcing) {
+          // A ladder is in flight — let it finish into "alive".
         } else if (
           phaseRef.current === "rest" &&
           !window.matchMedia("(prefers-reduced-motion: reduce)").matches
@@ -276,6 +348,20 @@ export function Waveform({ trailing, size = "sm" }: { trailing?: boolean; size?:
     };
   }, []);
 
+  // Fire the announcement on a track-identity CHANGE only — never the
+  // initial key (mount/remount is not a track change; lastAlive already
+  // keeps mode switches quiet). A transient undefined key (GSMTC populates
+  // title before duration, so lyricsKeyOf can gap to null mid-change) must
+  // not overwrite the memory — it would make the NEXT real track read as
+  // an initial mount and silently skip (quick-review catch, 2026-07-10).
+  const prevKeyRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const prev = prevKeyRef.current;
+    if (announceKey !== undefined) prevKeyRef.current = announceKey;
+    if (announceKey === undefined || prev === undefined || prev === announceKey) return;
+    announceRef.current();
+  }, [announceKey]);
+
   const atRest = phase === "rest";
 
   // `trailing`: nothing follows this separator (lyrics view; empty album) —
@@ -328,7 +414,9 @@ export function Waveform({ trailing, size = "sm" }: { trailing?: boolean; size?:
             ref={(el) => {
               barsRef.current[i] = el;
             }}
-            className={`origin-center rounded-full bg-accent will-change-transform ${barClass(phase, i, size)}`}
+            className={`origin-center rounded-full will-change-transform ${
+              announceTint ? "bg-muted" : "bg-accent"
+            } ${barClass(phase, i, size)}`}
             style={{ transform: phase === "alive" ? `scaleY(${REST})` : "scale(1)" }}
           />
         ))}
