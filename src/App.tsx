@@ -1579,19 +1579,45 @@ function App() {
   // re-fire needs a full new away period (backend state machine — the
   // anti-haunt latch falls out of it).
   const ambient = presence.user === "away" && playing && !nothing && !presence.concealed;
+  // P4 — working quiet (CLAUDE.md Presence clause 4): sustained input duty
+  // (typing/mousing ≥60% of the working window) shrinks a louder mode to
+  // the pill via the same override slot. Only meaningful when the user's
+  // mode is louder than pill; conceal wins (window hidden anyway).
+  const workingQuiet =
+    presence.user === "working" && !nothing && !presence.concealed && mode !== "pill";
   const [presenceOverride, setPresenceOverride] = useState<Mode | null>(null);
-  // Disarmed by a manual dismissal until the user has actually been active
-  // again: presence stays "away" for up to a tick after input (and playing/
-  // nothing can flicker inside that window — AM tears its session down on
-  // pause), so deriving purely from `ambient` could re-assert an override
-  // the user JUST dismissed (quick-review catch, 2026-07-09).
+  // Arming latches, one per behavior. Ambient re-arms when presence returns
+  // to a non-away state (input happened): presence stays "away" for up to a
+  // tick after input (and playing/nothing can flicker inside that window —
+  // AM tears its session down on pause), so deriving purely from `ambient`
+  // could re-assert an override the user JUST dismissed (quick-review
+  // catch, 2026-07-09). Working-quiet's latch is harsher — one manual
+  // overrule suppresses it until a REAL away period resets it (the user
+  // told the companion no; only a fresh absence earns another try).
   const ambientArmed = useRef(true);
+  const workingArmed = useRef(true);
   useEffect(() => {
-    if (presence.user === "active") ambientArmed.current = true;
+    if (presence.user !== "away") ambientArmed.current = true;
+    if (presence.user === "away") workingArmed.current = true;
   }, [presence.user]);
   useEffect(() => {
-    setPresenceOverride(ambient && ambientArmed.current ? "expanded" : null);
-  }, [ambient]);
+    // Branch order mirrors the documented precedence (conceal > working
+    // quiet > ambient): user states are mutually exclusive today, but the
+    // order must not silently invert the doctrine if that ever loosens.
+    if (workingQuiet && workingArmed.current) {
+      // Never shrink under the cursor: apply only while the pointer is
+      // away from the widget (hot=false). While hot, HOLD the current
+      // state — an already-applied quiet stays, a pending one waits for
+      // the next hot=false flip (this effect re-runs on it).
+      if (!hot) setPresenceOverride("pill");
+      return;
+    }
+    if (ambient && ambientArmed.current) {
+      setPresenceOverride("expanded");
+      return;
+    }
+    setPresenceOverride(null);
+  }, [ambient, workingQuiet, hot]);
   // What the widget actually shows. Every mode consumer below keys on THIS;
   // `mode` itself is only the persisted user intent.
   const effectiveMode = presenceOverride ?? mode;
@@ -1672,7 +1698,11 @@ function App() {
   // and the result persists like any explicit choice. The press also
   // dismisses the override and disarms re-fire until a fresh active period.
   const stepMode = (d: -1 | 1) => {
-    ambientArmed.current = false;
+    // A press while an override is active is an overrule — disarm THAT
+    // behavior's latch (ambient re-arms on the next non-away tick; working
+    // stays suppressed until a real away period).
+    if (presenceOverride === "expanded") ambientArmed.current = false;
+    if (presenceOverride === "pill") workingArmed.current = false;
     setPresenceOverride(null);
     setMode(
       () =>
