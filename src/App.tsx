@@ -132,6 +132,49 @@ function useArt(artId: string | null): string | null {
   return artId ? url : null;
 }
 
+/** Feed the history thumb cache (history.rs): downscale the current cover to
+ * a 96px JPEG once per ART REVISION — a rev bump means the first capture had
+ * the previous track's image (the stale-art probe), so it must overwrite.
+ * The key handed to the backend is the art_id's prefix (media::ident_key),
+ * which is also the history entry's `key`. Fire-and-forget; the mock no-ops.
+ *
+ * The hook fetches the art ITSELF (media_art resolves an id to its bytes or
+ * null): the display path's useArt keeps showing the OUTGOING track's URL
+ * while the new fetch is in flight, so capturing that shared state here
+ * would file the old cover under the new track's key (quick-review catch,
+ * 2026-07-10). A miss or a failed decode un-latches so the next payload
+ * retries instead of skipping the revision forever. */
+function useHistoryThumb(artId: string | null): void {
+  const lastId = useRef<string | null>(null);
+  useEffect(() => {
+    if (!artId || artId === lastId.current) return;
+    lastId.current = artId;
+    const unlatch = () => {
+      if (lastId.current === artId) lastId.current = null;
+    };
+    void commands.art(artId).then((url) => {
+      // null = the cache already advanced past this id — a newer payload
+      // (with a newer art_id) is coming; let it retry.
+      if (!url) return unlatch();
+      const img = new Image();
+      img.onerror = unlatch;
+      img.onload = () => {
+        const side = 96;
+        const c = document.createElement("canvas");
+        c.width = side;
+        c.height = side;
+        const ctx = c.getContext("2d");
+        if (!ctx || img.width === 0 || img.height === 0) return;
+        // Cover-crop the (usually already square) art into the square thumb.
+        const s = Math.min(img.width, img.height);
+        ctx.drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, side, side);
+        commands.historyThumb(artId.split(":")[0], c.toDataURL("image/jpeg", 0.8));
+      };
+      img.src = url;
+    });
+  }, [artId]);
+}
+
 type LyricsState =
   | { status: "loading" | "none" }
   | { status: "synced"; lines: LyricLine[]; key: string };
@@ -1540,6 +1583,7 @@ function App() {
   const [brokenArtUrl, setBrokenArtUrl] = useState<string | null>(null);
   const shownArt = artUrl !== null && artUrl !== brokenArtUrl ? artUrl : null;
   useArtAccent(shownArt);
+  useHistoryThumb(np?.art_id ?? null);
   const lyrics = useLyrics(np);
   // Assert the reduced-motion capture vote even before any separator mounts.
   useEffect(() => initReactive(), []);

@@ -4,7 +4,13 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { IN_TAURI, type NowPlaying, type PresenceDebug, type PresenceState } from "../types";
+import {
+  IN_TAURI,
+  type HistoryEntry,
+  type NowPlaying,
+  type PresenceDebug,
+  type PresenceState,
+} from "../types";
 import * as posClock from "./posClock";
 
 const MOCK_DURATION = 204_000;
@@ -60,10 +66,70 @@ let mock: NowPlaying = {
 };
 
 function mockSkip(dir: 1 | -1): void {
+  // The outgoing track becomes a history entry, like the backend tracker
+  // finalizing on a track change — keeps `?am`/`__mockNext()` exercising the
+  // history live-append path alongside everything else.
+  mockHistoryAppend(mockHistoryEntry(MOCK_TRACKS[mockTrack], Date.now() - 190_000, 190_000));
   mockTrack = (mockTrack + dir + MOCK_TRACKS.length) % MOCK_TRACKS.length;
   const now = Date.now();
   amTruth = { pos: 0, at: now };
   pushMock({ ...MOCK_TRACKS[mockTrack], status: "playing", position_ms: 0, position_at_ms: now });
+}
+
+// ---- play history (history.rs seam) ----
+
+/** Chronological (append order, oldest first) — pages slice from the end,
+ * mirroring the backend's JSONL + line index. */
+const mockHistory: HistoryEntry[] = [];
+const mockHistoryListeners = new Set<(e: HistoryEntry) => void>();
+
+function mockHistoryEntry(
+  t: { title: string; artist: string; album: string },
+  startedAtMs: number,
+  listenedMs: number,
+): HistoryEntry {
+  return {
+    v: 1,
+    key: `mock-${t.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+    app_id: mock.app_id,
+    player: mock.player,
+    ...t,
+    started_at_ms: startedAtMs,
+    ended_at_ms: startedAtMs + listenedMs,
+    ms_listened: listenedMs,
+    duration_ms: MOCK_DURATION,
+    spotify_uri: null,
+  };
+}
+
+function mockHistoryAppend(e: HistoryEntry): void {
+  mockHistory.push(e);
+  mockHistoryListeners.forEach((cb) => cb(e));
+}
+
+// Seed a scrollable backlog so the history UI is preview-iterable: ~40
+// entries walking the ring backwards at a plausible listening cadence.
+if (!IN_TAURI) {
+  const now = Date.now();
+  for (let i = 40; i >= 1; i--) {
+    mockHistory.push(
+      mockHistoryEntry(MOCK_TRACKS[i % MOCK_TRACKS.length], now - i * 4.2 * 60_000, 190_000),
+    );
+  }
+}
+
+/** Fires once per finalized listen (a track change past the listen floor). */
+export function onHistoryAppended(cb: (e: HistoryEntry) => void): () => void {
+  if (IN_TAURI) {
+    const un = listen<HistoryEntry>("history-appended", (e) => cb(e.payload));
+    return () => {
+      un.then((f) => f());
+    };
+  }
+  mockHistoryListeners.add(cb);
+  return () => {
+    mockHistoryListeners.delete(cb);
+  };
 }
 
 // Preview affordance: drive a track change from views without a next button
@@ -413,6 +479,29 @@ export const commands = {
   async art(artId: string): Promise<string | null> {
     if (!IN_TAURI) return artId === "mock-art" ? mockArt() : null;
     return invoke<string | null>("media_art", { artId });
+  },
+  /** Newest-first history page; `before` = the oldest loaded entry's
+   * started_at_ms for infinite scroll, null seeds from the newest. */
+  async historyPage(before: number | null, limit: number): Promise<HistoryEntry[]> {
+    if (!IN_TAURI) {
+      let end = mockHistory.length;
+      if (before !== null) {
+        const i = mockHistory.findIndex((e) => e.started_at_ms >= before);
+        if (i !== -1) end = i;
+      }
+      return mockHistory.slice(Math.max(0, end - limit), end).reverse();
+    }
+    return invoke<HistoryEntry[]>("history_page", { beforeStartedAtMs: before, limit });
+  },
+  /** Push a downscaled cover into the thumb cache — once per art revision
+   * (App's useHistoryThumb owns the gating). */
+  historyThumb(key: string, dataUrl: string): void {
+    if (IN_TAURI) void invoke("history_thumb", { key, dataUrl });
+  },
+  /** Thumb for an identity key, or null when never captured / evicted. */
+  async historyThumbUrl(key: string): Promise<string | null> {
+    if (!IN_TAURI) return mockHistory.some((e) => e.key === key) ? mockArt() : null;
+    return invoke<string | null>("history_thumb_url", { key });
   },
   async lyrics(
     artist: string,

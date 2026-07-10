@@ -1,5 +1,6 @@
 mod audio;
 mod dock;
+mod history;
 mod lyrics;
 mod media;
 mod presence;
@@ -424,6 +425,7 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(ArtCache(Mutex::new(None)))
         .manage(LastEmit(Mutex::new(None)))
+        .manage(history::Tracker::default())
         .manage(UiReactive(Arc::new(AtomicBool::new(true))))
         .manage(dock::Dock::default())
         .manage(presence::Presence::default())
@@ -438,6 +440,9 @@ pub fn run() {
             media_lyrics,
             now_playing,
             set_reactive_enabled,
+            history::history_page,
+            history::history_thumb,
+            history::history_thumb_url,
             dock::set_window_size,
             dock::set_hit_size,
             dock::start_drag,
@@ -568,6 +573,9 @@ pub fn run() {
                 dock::spawn_hit_watcher(win);
             }
 
+            // Play-history: resolve the log dir + build the line index once.
+            history::init(app.handle());
+
             // Global hotkeys, each with its own action.
             type Action = fn(&AppHandle);
             let hotkeys: [(&str, Action); 6] = [
@@ -644,6 +652,12 @@ pub fn run() {
                 // window is open, which needs every tick.
                 let mut force_snapshot = true;
                 let mut last_tick: Option<media::TickKey> = None;
+                // Hidden-window history cadence: probe every Nth heartbeat
+                // (~5s) so listens keep logging under P1 conceal — the ONE
+                // narrow exception to "no work while hidden" (no art
+                // marshal, no emit; media::history_probe).
+                const HISTORY_PROBE_BEATS: u32 = 10;
+                let mut hidden_beats = 0u32;
                 loop {
                     if let Some(w) = watch.as_mut() {
                         w.resubscribe(std::mem::take(&mut resubscribe));
@@ -653,18 +667,29 @@ pub fn run() {
                         .and_then(|w| w.is_visible().ok())
                         .unwrap_or(true);
                     let playing = if visible {
+                        hidden_beats = 0;
                         let tick = media::tick_key();
                         let probing = media::art_probing(&handle.state::<ArtCache>());
                         let p = if std::mem::take(&mut force_snapshot) || probing || tick != last_tick {
-                            emit_now(&handle).status == "playing"
+                            let np = emit_now(&handle);
+                            history::ingest(&handle, &np);
+                            np.status == "playing"
                         } else {
                             tick.as_ref().is_some_and(|k| k.3 == "playing")
                         };
                         last_tick = tick;
                         p
                     } else {
+                        hidden_beats += 1;
+                        if hidden_beats >= HISTORY_PROBE_BEATS {
+                            hidden_beats = 0;
+                            history::ingest(&handle, &media::history_probe());
+                        }
                         false
                     };
+                    // Grace-expiry sweep for a vanish-pending entry (a gone
+                    // session produces no ticks to ride).
+                    history::tick(&handle);
                     let reactive = ui_reactive.load(Ordering::Relaxed);
                     audio_switch.store(visible && playing && reactive, Ordering::Relaxed);
                     use std::sync::mpsc::RecvTimeoutError;
@@ -689,6 +714,13 @@ pub fn run() {
             });
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            // Quit mid-song still logs the listen — the tracker's in-flight
+            // candidate finalizes on the way out.
+            if let tauri::RunEvent::Exit = event {
+                history::flush(app);
+            }
+        });
 }

@@ -39,6 +39,21 @@ src-tauri/src/
                 webview ("dock-corner" event + dock_corner seed command); corner
                 derived from the window-state-restored position, never stored
   lyrics.rs     LRCLIB get→search fallback, disk cache (bounded, app-data) + session miss set
+  history.rs    play-history: logs every track Pulse displays (player-agnostic —
+                GSMTC has no history API) to append-only app-data/history.jsonl,
+                no cap, paginated via an in-memory line index (history_page +
+                "history-appended" seed/event pair). Fed from the media loop:
+                visible rides emit_now's return; hidden probes ~5s via
+                media::history_probe (art-free, no emit — the ONE exception to
+                "no work while hidden", so P1-concealed listens still log).
+                ms_listened = wall-clock playing spans, NOT position projection
+                (that rule guards the UI clock). Dedupe: pause/resume = one
+                entry; AM session vanish + same track back within 10min resumes
+                it; raw-position restart past the bar = replay = new entry;
+                <1s listens dropped as skip churn; RunEvent::Exit flushes.
+                Thumbs: bounded app-data/thumbs cache (96px JPEG) — the
+                FRONTEND downscales once per art revision (useHistoryThumb;
+                rev bumps overwrite, so a stale first capture heals)
   presence.rs   presence engine: own 1s watcher
                 thread sensing fullscreen foreground content (rect-vs-monitor —
                 widget-monitor scoped — OR'd with SHQueryUserNotificationState's
