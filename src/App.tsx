@@ -720,15 +720,18 @@ const CORNER_SEAT: Record<DockCorner, string> = {
  * "opacity only, zero transforms; the fixed-point guarantee includes the
  * hidden state"). Hidden at rest (opacity 0, pointer-events none),
  * it reveals on widget hover (group/widget): opacity 0→1 over 140ms EASE.out,
- * no motion. Also reveals on focus-within — the buttons stay in the Tab
- * order the whole time (hidden ≠ inert), so a hover-only reveal would strand
- * keyboard users on an invisible, invisibly-outlined control (quick-review
- * catch, 2026-07-08).
+ * no motion. Also reveals on KEYBOARD focus — has-[:focus-visible], NOT
+ * focus-within: the buttons stay in the Tab order the whole time (hidden ≠
+ * inert), so a hover-only reveal would strand keyboard users on an
+ * invisible, invisibly-outlined control (quick-review catch, 2026-07-08) —
+ * but plain focus-within also matched the residual focus a mouse click
+ * leaves on the clicked button, pinning the chrome open after the cursor
+ * left (Thien, 2026-07-10). Mouse clicks don't set :focus-visible; Tab does.
  */
 function ModeCluster({ mode, onStep }: { mode: Mode; onStep: (d: -1 | 1) => void }) {
   return (
     <div
-      className="pointer-events-none absolute bottom-[4px] right-[7px] z-20 flex items-center gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-hover/widget:pointer-events-auto group-hover/widget:opacity-100 group-focus-within/widget:pointer-events-auto group-focus-within/widget:opacity-100"
+      className="pointer-events-none absolute bottom-[4px] right-[7px] z-20 flex items-center gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-hover/widget:pointer-events-auto group-hover/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100"
       // Swallow mousedown: pointer-events-none makes a DISABLED button
       // transparent to hit-testing, so without this a press on it (or the
       // 4px gap between the buttons) would fall through to the root drag
@@ -768,9 +771,10 @@ function readViewPref(): "lyrics" | "art" {
 /**
  * The expanded view's art ⇄ lyrics toggle: one 28px seat at the top-right —
  * the corner the anchored cluster's move to the bottom freed up. Same
- * hover/focus-within reveal contract as the cluster (hidden at rest, opacity
- * only, hidden ≠ inert — see ModeCluster), same mousedown swallow so a press
- * never falls through to the window drag. The glyph names the DESTINATION:
+ * hover/keyboard-focus reveal contract as the cluster (hidden at rest,
+ * opacity only, hidden ≠ inert, has-[:focus-visible] not focus-within — see
+ * ModeCluster), same mousedown swallow so a press never falls through to
+ * the window drag. The glyph names the DESTINATION:
  * mic = show lyrics (karaoke), note = show album cover; a track with no
  * synced lyrics disables the seat in place as a crossed-out mic — the seat
  * never unmounts, so there's nothing to hunt for and nothing shifts. */
@@ -787,7 +791,7 @@ function ViewToggle({
 }) {
   return (
     <div
-      className="pointer-events-none absolute right-2 top-2 z-10 opacity-0 transition-opacity duration-2 ease-out-tk group-hover/widget:pointer-events-auto group-hover/widget:opacity-100 group-focus-within/widget:pointer-events-auto group-focus-within/widget:opacity-100"
+      className="pointer-events-none absolute right-2 top-2 z-10 opacity-0 transition-opacity duration-2 ease-out-tk group-hover/widget:pointer-events-auto group-hover/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100"
       onMouseDown={(e) => e.stopPropagation()}
     >
       <button
@@ -1066,10 +1070,10 @@ function Hairline({ np }: { np: NowPlaying }) {
  * opacity-only on widget hover (ANIMATIONS.md §3) so the title/artist line
  * never reflows as the controls take the corner. aria-hidden: the pill's
  * Hairline progressbar already announces position, so the visible label is a
- * glance-only duplicate. Also fades on focus-within — the swap must track
- * the same reveal signal as the controls it's trading places with, or a
- * keyboard user tabbing to play/pause would see it fight the still-visible
- * time label. */
+ * glance-only duplicate. Also fades on keyboard focus (has-[:focus-visible],
+ * matching the controls' reveal signal exactly) — a keyboard user tabbing to
+ * play/pause must not see it fight the still-visible time label, and a
+ * mouse click's residual focus must not keep it hidden. */
 function PillTime({ np }: { np: NowPlaying }) {
   const timeRef = useRef<HTMLSpanElement>(null);
   // Label only: the bar/fill refs stay unattached (useProgressDom null-guards
@@ -1081,7 +1085,7 @@ function PillTime({ np }: { np: NowPlaying }) {
     <span
       ref={timeRef}
       aria-hidden
-      className="shrink-0 text-[11px] leading-4 tabular-nums text-muted transition-opacity duration-2 ease-out-tk group-hover/widget:opacity-0 group-focus-within/widget:opacity-0"
+      className="shrink-0 text-[11px] leading-4 tabular-nums text-muted transition-opacity duration-2 ease-out-tk group-hover/widget:opacity-0 group-has-[:focus-visible]/widget:opacity-0"
     />
   );
 }
@@ -1579,11 +1583,13 @@ function App() {
                 the incoming control. 180px wide, play/pause ending 76px from
                 the shell right edge — an 8px gap before the corner cluster.
                 Stops 2px above the bottom so the progress hairline stays lit.
-                Also reveals on focus-within (play/pause stays tabbable the
-                whole time — a hover-only reveal would strand keyboard users
-                on an invisible button, quick-review catch 2026-07-08). */}
+                Also reveals on keyboard focus (has-[:focus-visible], not
+                focus-within — see ModeCluster; play/pause stays tabbable the
+                whole time, and a mouse click's residual focus must not pin
+                the scrim open, quick-review catch 2026-07-08 / Thien
+                2026-07-10). */}
             <div
-              className="pointer-events-none absolute bottom-0.5 right-0 top-0 flex w-[180px] items-center justify-end pr-[76px] opacity-0 transition-opacity duration-2 ease-out-tk group-hover/widget:pointer-events-auto group-hover/widget:opacity-100 group-focus-within/widget:pointer-events-auto group-focus-within/widget:opacity-100"
+              className="pointer-events-none absolute bottom-0.5 right-0 top-0 flex w-[180px] items-center justify-end pr-[76px] opacity-0 transition-opacity duration-2 ease-out-tk group-hover/widget:pointer-events-auto group-hover/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100"
               style={{ background: "linear-gradient(90deg, transparent, rgb(var(--surface) / 0.96) 45%)" }}
               // Swallow mousedown, same reason as ModeCluster: pointer-events
               // only turns on for the 180px scrim, but the button inside it
