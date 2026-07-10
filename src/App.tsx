@@ -1580,8 +1580,17 @@ function App() {
   // anti-haunt latch falls out of it).
   const ambient = presence.user === "away" && playing && !nothing && !presence.concealed;
   const [presenceOverride, setPresenceOverride] = useState<Mode | null>(null);
+  // Disarmed by a manual dismissal until the user has actually been active
+  // again: presence stays "away" for up to a tick after input (and playing/
+  // nothing can flicker inside that window — AM tears its session down on
+  // pause), so deriving purely from `ambient` could re-assert an override
+  // the user JUST dismissed (quick-review catch, 2026-07-09).
+  const ambientArmed = useRef(true);
   useEffect(() => {
-    setPresenceOverride(ambient ? "expanded" : null);
+    if (presence.user === "active") ambientArmed.current = true;
+  }, [presence.user]);
+  useEffect(() => {
+    setPresenceOverride(ambient && ambientArmed.current ? "expanded" : null);
   }, [ambient]);
   // What the widget actually shows. Every mode consumer below keys on THIS;
   // `mode` itself is only the persisted user intent.
@@ -1656,18 +1665,21 @@ function App() {
   };
 
   // The anchored cluster steps this ladder one rung per click; the end
-  // buttons disable instead of wrapping.
+  // buttons disable instead of wrapping. Steps from the EFFECTIVE mode, so
+  // a press during an ambient override does exactly what its label says
+  // ("Collapse to card" lands on card — three review agents independently
+  // caught the earlier jump-to-persisted-mode version lying to AT/tooltips)
+  // and the result persists like any explicit choice. The press also
+  // dismisses the override and disarms re-fire until a fresh active period.
   const stepMode = (d: -1 | 1) => {
-    // While the ambient override shows a different view than the user's
-    // mode, the first press just reclaims control (back to their mode) —
-    // it must NOT also step the persisted intent underneath: the user is
-    // reacting to the override's view, not to their own last choice.
-    if (presenceOverride !== null && presenceOverride !== mode) {
-      setPresenceOverride(null);
-      return;
-    }
+    ambientArmed.current = false;
     setPresenceOverride(null);
-    setMode((m) => MODE_ORDER[Math.min(Math.max(MODE_ORDER.indexOf(m) + d, 0), MODE_ORDER.length - 1)]);
+    setMode(
+      () =>
+        MODE_ORDER[
+          Math.min(Math.max(MODE_ORDER.indexOf(effectiveMode) + d, 0), MODE_ORDER.length - 1)
+        ],
+    );
   };
 
   // Browser mock: there is no OS window to be the widget, so emulate one —

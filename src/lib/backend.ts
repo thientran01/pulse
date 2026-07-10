@@ -192,7 +192,11 @@ const MOCK_PRESENCE: PresenceState = !IN_TAURI
   ? {
       fullscreen: new URLSearchParams(window.location.search).has("fs"),
       user: new URLSearchParams(window.location.search).has("away") ? "away" : "active",
-      concealed: false,
+      // Mirror the real engine: settled fullscreen ⇒ concealed (P1), so
+      // ?away&fs correctly exercises "conceal beats ambient" in preview —
+      // a mock that leaves this false would green-light a regression of
+      // the gate (quick-review catch, 2026-07-09).
+      concealed: new URLSearchParams(window.location.search).has("fs"),
     }
   : { fullscreen: false, user: "active", concealed: false };
 
