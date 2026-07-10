@@ -521,7 +521,14 @@ pub fn on_moved(window: &Window) {
 /// this is the manual belt-and-braces path.
 pub fn reset_position(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else { return };
-    let _ = window.show();
+    // An explicit summons: clear manual hide, snooze any conceal episode,
+    // and let apply_visibility (the only show/hide caller) reconcile.
+    let vis = app.state::<crate::VisIntent>();
+    vis.user_hidden.store(false, Ordering::Relaxed);
+    if vis.concealed.load(Ordering::Relaxed) {
+        vis.conceal_snoozed.store(true, Ordering::Relaxed);
+    }
+    crate::apply_visibility(app);
     let dock = app.state::<Dock>();
     *dock.corner.lock().unwrap_or_else(PoisonError::into_inner) = Some(Corner::BottomRight);
     emit_corner(&window, Corner::BottomRight);
