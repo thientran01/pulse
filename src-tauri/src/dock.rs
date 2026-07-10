@@ -188,7 +188,9 @@ fn apply_pos(window: &WebviewWindow, x: i32, y: i32, size: Option<(i32, i32)>) {
 /// Physical state of the primary mouse button (drag may still be in flight).
 /// GetAsyncKeyState reports physical buttons — respect SM_SWAPBUTTON so a
 /// left-handed mouse (dragging with physical-right) is read correctly.
-fn primary_button_down() -> bool {
+/// pub(crate): the presence conceal also defers while a press is in flight
+/// (hiding the window mid-drag would yank it out from under the hand).
+pub(crate) fn primary_button_down() -> bool {
     unsafe {
         let swapped = GetSystemMetrics(SM_SWAPBUTTON) != 0;
         let vk = if swapped { VK_RBUTTON } else { VK_LBUTTON };

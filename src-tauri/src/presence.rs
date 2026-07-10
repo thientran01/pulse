@@ -362,7 +362,10 @@ pub fn spawn(app: AppHandle) {
             let vis = app.state::<crate::VisIntent>();
             let companion = vis.companion.load(Ordering::Relaxed);
             if fs_settled && companion {
-                if !vis.concealed.load(Ordering::Relaxed) {
+                // Defer (not skip) while a press is in flight: hiding the
+                // window mid-drag would yank it out from under the hand —
+                // the next 1s tick conceals once the button is up.
+                if !vis.concealed.load(Ordering::Relaxed) && !crate::dock::primary_button_down() {
                     vis.concealed.store(true, Ordering::Relaxed);
                     crate::apply_visibility(&app);
                 }
