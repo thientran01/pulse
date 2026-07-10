@@ -1537,7 +1537,7 @@ function App() {
           inside the 6px window gutter — anything larger hard-clips at the
           transparent window edge and reads as a gray box on light surfaces. */}
       <div
-        className={`absolute overflow-hidden rounded-xl border border-border/10 bg-surface/95 shadow-[0_1px_3px_rgb(0_0_0/0.18),0_3px_6px_rgb(0_0_0/0.12)] [transition:width_200ms_var(--ease-in-out-tk),height_200ms_var(--ease-in-out-tk)] ${SHELL_SEAT[dockCorner]}`}
+        className={`absolute overflow-hidden rounded-xl border border-border/10 bg-surface/97 shadow-[0_1px_3px_rgb(0_0_0/0.18),0_3px_6px_rgb(0_0_0/0.12)] [transition:width_200ms_var(--ease-in-out-tk),height_200ms_var(--ease-in-out-tk)] ${SHELL_SEAT[dockCorner]}`}
         style={{
           width: MODE_SIZES[mode][0] - SHELL_GUTTER_PX,
           height: MODE_SIZES[mode][1] - SHELL_GUTTER_PX,
@@ -1610,16 +1610,19 @@ function App() {
                     header / lg hero) — it overpowered the 12px artist·album
                     line as a separator, so that line keeps a static dot and
                     the waveform sits where the card has presence to spare
-                    (Thien, 2026-07-10). One living instance per view. */}
-                <p className="truncate text-[15px] font-medium text-fg">
-                  {np.title}
-                  {/* ml-1 on top of the waveform's own mx-1.5: a 10px gap —
-                      at mx-1.5 alone the capsules crowded the title. Inert
-                      at rest (trailing renders nothing visible). */}
-                  <span className="ml-1">
+                    (Thien, 2026-07-10). One living instance per view.
+                    FLEX row, not inline flow, same as the lyrics header: the
+                    title truncates in its own box, and items-center seats the
+                    capsules on the line box's center — inline align-middle
+                    hangs an md box ~5px under the baseline, visibly low
+                    against a cap-height bold title. ml-1 over the waveform's
+                    own mx-1.5 = the 10px gap. */}
+                <div className="flex min-w-0 items-center">
+                  <p className="min-w-0 truncate text-[15px] font-medium text-fg">{np.title}</p>
+                  <span className="ml-1 flex shrink-0 items-center">
                     <Waveform size="md" trailing />
                   </span>
-                </p>
+                </div>
                 <p className="truncate text-xs leading-4 text-muted">
                   {np.artist}
                   {np.album && <SeparatorDot />}
