@@ -1680,9 +1680,18 @@ function App() {
         <motion.div key={mode} {...morph} className="absolute inset-0">
         <ModeContent mode={mode} corner={dockCorner}>
         {nothing ? (
-          <div className="flex h-full w-full items-center justify-center gap-2 text-muted">
+          /* The resting state: the note glyph, the words, and the living
+             separator's resting middot with nothing to separate — breathing
+             (opacity only, 8s) while it waits for a song. The ONE licensed
+             ambient element outside the separator's bars (CLAUDE.md
+             Presence clause 2). Geometry borrowed from SeparatorDot;
+             Waveform's phase machine stays untouched. */
+          <div className="flex h-full w-full items-center justify-center gap-1 text-muted">
             <MorphIcon name="note" size={22} />
-            <span className="text-sm">Nothing playing</span>
+            <span className="ml-1 text-sm">Nothing playing</span>
+            <span className="relative inline-flex h-[11px] w-[5px] items-center" aria-hidden>
+              <span className="resting-pulse absolute left-1/2 top-1/2 h-[3px] w-[3px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-muted" />
+            </span>
           </div>
         ) : mode === "pill" ? (
           /* "5a — time at rest" (ANIMATIONS.md §3): at rest the pill is pure

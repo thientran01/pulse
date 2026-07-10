@@ -22,6 +22,11 @@ const AM_PROFILE = !IN_TAURI && new URLSearchParams(window.location.search).has(
  * art ↔ lyrics arrival transition in preview. */
 const LYRICS_PARAM = IN_TAURI ? null : new URLSearchParams(window.location.search).get("lyrics");
 
+/** `?nothing` forces the no-session state (player "none") so the resting
+ * pulse is preview-iterable — live it appears whenever Apple Music stops
+ * and deregisters its session. */
+const NOTHING_PARAM = !IN_TAURI && new URLSearchParams(window.location.search).has("nothing");
+
 /** The AM profile's hidden ms-precise timeline. Payloads only ever carry its
  * floor — the lost fraction is what makes pushes project backwards, so the
  * truth must live outside the payload (re-deriving it from a floored
@@ -101,6 +106,18 @@ export function onNowPlaying(cb: (np: NowPlaying) => void): () => void {
     return () => {
       un.then((f) => f());
     };
+  }
+  if (NOTHING_PARAM) {
+    cb({
+      ...mock,
+      player: "none",
+      status: "none",
+      title: "",
+      artist: "",
+      album: "",
+      art_id: null,
+    });
+    return () => {};
   }
   if (AM_PROFILE) {
     let i = 0;
