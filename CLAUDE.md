@@ -39,6 +39,18 @@ src-tauri/src/
                 webview ("dock-corner" event + dock_corner seed command); corner
                 derived from the window-state-restored position, never stored
   lyrics.rs     LRCLIB get→search fallback, disk cache (bounded, app-data) + session miss set
+  presence.rs   presence engine (P0: SENSE-ONLY, no actions yet): own 1s watcher
+                thread sensing fullscreen foreground content (rect-vs-monitor +
+                SHQueryUserNotificationState, hysteresis-settled 2s in / 1s out,
+                self/shell excluded, widget-monitor scoped) and input idleness
+                (GetLastInputInfo; away at 180s, 15s in debug builds) → settled
+                "presence" events (diff-suppressed + presence_state seed) plus a
+                raw "presence-debug" stream while the dev overlay subscribes.
+                docs/presence-signal-matrix.md is the source of truth for what
+                Windows reports per scenario — no behavior ships on an
+                unmeasured signal. QUNS_BUSY is NOT a fullscreen signal (the
+                alt-tab switcher fires it). Behaviors (conceal, AFK ambient,
+                working-quiet) land P1+ per the presence-engine plan
   audio.rs      WASAPI loopback (cpal input stream on the output device) → FFT →
                 smoothed auto-gained band energies at ~30Hz; capture runs ONLY
                 while visible AND playing (stream dropped otherwise)

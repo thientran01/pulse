@@ -3,14 +3,22 @@ import { AnimatePresence, motion, useIsPresent, useReducedMotion } from "motion/
 import type { MorphName } from "./icons/geometry";
 import { MorphIcon } from "./icons/MorphIcon";
 import { useSeekTick } from "./icons/useSeekTick";
-import { commands, onCursorLeft, onDockCorner, onNowPlaying, type DockCorner } from "./lib/backend";
+import {
+  commands,
+  onCursorLeft,
+  onDockCorner,
+  onNowPlaying,
+  onPresence,
+  onPresenceDebug,
+  type DockCorner,
+} from "./lib/backend";
 import { currentLineIndex, msUntilNextLine, parseLrc, VOCAL_LEAD_MS, type LyricLine } from "./lib/lrc";
 import { extractAccent } from "./lib/palette";
 import * as posClock from "./lib/posClock";
 import { initReactive } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
 import { SeparatorDot, Waveform } from "./Waveform";
-import { IN_TAURI, type NowPlaying } from "./types";
+import { IN_TAURI, type NowPlaying, type PresenceDebug, type PresenceState } from "./types";
 
 // Keep in sync with SEEK_STEP_MS in src-tauri/src/lib.rs (global hotkeys).
 const SEEK_STEP_MS = 10_000;
@@ -1411,6 +1419,53 @@ function ExpandedView({
   );
 }
 
+/** DEV-only presence observability (P0, sense-only): the settled "presence"
+ * state plus the raw "presence-debug" signals behind it. Enabled by
+ * `?presence` in the browser mock, or localStorage "pulse.presenceOverlay"
+ * = "1" in the app (flip from devtools, then reload). Off = zero cost: the
+ * component never mounts and the backend's debug stream stays voted off. */
+const PRESENCE_OVERLAY =
+  import.meta.env.DEV &&
+  (IN_TAURI
+    ? (() => {
+        try {
+          return localStorage.getItem("pulse.presenceOverlay") === "1";
+        } catch {
+          return false;
+        }
+      })()
+    : new URLSearchParams(window.location.search).has("presence"));
+
+function PresenceOverlay() {
+  const [state, setState] = useState<PresenceState | null>(null);
+  const [dbg, setDbg] = useState<PresenceDebug | null>(null);
+  useEffect(() => onPresence(setState), []);
+  // Subscribing votes the backend's raw stream on; unmount votes it off.
+  useEffect(() => onPresenceDebug(setDbg), []);
+  return (
+    // Sits in the oversized window's gutter (display-only — the gutter is
+    // click-through in-app, and pointer-events-none keeps the mock honest).
+    <div className="pointer-events-none absolute left-1.5 top-1.5 z-50 rounded-md bg-black/70 px-2 py-1 font-mono text-[10px] leading-4 text-white/85">
+      <div>
+        {state
+          ? `presence fs=${state.fullscreen ? "YES" : "no"} user=${state.user} concealed=${state.concealed ? "YES" : "no"}`
+          : "presence …"}
+      </div>
+      {dbg && (
+        <>
+          <div>
+            fg={dbg.fg_exe || "?"} rect={dbg.rect_verdict}
+            {dbg.on_widget_monitor ? "" : " (other monitor)"} raw-fs={dbg.fs_raw ? "YES" : "no"}
+          </div>
+          <div>
+            quns={dbg.quns_name} idle={dbg.idle_s}s
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const [np, setNp] = useState<NowPlaying | null>(null);
   useEffect(
@@ -1581,6 +1636,7 @@ function App() {
       onMouseLeave={() => setHot(false)}
       onMouseDown={onDragStart}
     >
+      {PRESENCE_OVERLAY && <PresenceOverlay />}
       {/* THE widget box — persistent across modes: the chrome never remounts
           or fades, only the content layers crossfade inside it. It glides
           between mode boxes (200ms EASE.inOut, the house morph curve) out of

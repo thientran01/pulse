@@ -4,7 +4,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { IN_TAURI, type NowPlaying } from "../types";
+import { IN_TAURI, type NowPlaying, type PresenceDebug, type PresenceState } from "../types";
 import * as posClock from "./posClock";
 
 const MOCK_DURATION = 204_000;
@@ -166,6 +166,69 @@ export function onCursorLeft(cb: () => void): () => void {
   return () => {
     un.then((f) => f());
   };
+}
+
+/** `?fs` / `?away` seed the browser mock's presence state so presence-driven
+ * UI (P1+ behaviors, the dev overlay) is preview-iterable without a live
+ * fullscreen app or a real idle wait. */
+const MOCK_PRESENCE: PresenceState = !IN_TAURI
+  ? {
+      fullscreen: new URLSearchParams(window.location.search).has("fs"),
+      user: new URLSearchParams(window.location.search).has("away") ? "away" : "active",
+      concealed: false,
+    }
+  : { fullscreen: false, user: "active", concealed: false };
+
+/** Settled presence states (presence.rs) — diff-suppressed, ~1s cadence. */
+export function onPresence(cb: (p: PresenceState) => void): () => void {
+  if (IN_TAURI) {
+    let gotEvent = false;
+    const un = listen<PresenceState>("presence", (e) => {
+      gotEvent = true;
+      cb(e.payload);
+    });
+    // Seed like onNowPlaying: emits are diff-suppressed, so a fresh webview
+    // reads the last settled state once; an event that lands first wins.
+    void invoke<PresenceState>("presence_state").then((p) => {
+      if (!gotEvent) cb(p);
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }
+  cb(MOCK_PRESENCE);
+  return () => {};
+}
+
+/** Raw presence signals — flows only while some consumer (the dev overlay)
+ * is subscribed: subscription votes the backend's debug flag on, unsubscribe
+ * votes it back off. */
+export function onPresenceDebug(cb: (d: PresenceDebug) => void): () => void {
+  if (IN_TAURI) {
+    const un = listen<PresenceDebug>("presence-debug", (e) => cb(e.payload));
+    void invoke("set_presence_debug", { enabled: true });
+    return () => {
+      void invoke("set_presence_debug", { enabled: false });
+      un.then((f) => f());
+    };
+  }
+  // Mock: a synthetic tick mirroring MOCK_PRESENCE so the overlay renders.
+  const id = window.setInterval(() => {
+    cb({
+      fg_exe: "mock.exe",
+      fg_class: "MockWindow",
+      fg_pid: 0,
+      rect_verdict: MOCK_PRESENCE.fullscreen ? "fullscreen" : "windowed",
+      on_widget_monitor: true,
+      quns: 5,
+      quns_name: "ACCEPTS_NOTIFICATIONS",
+      idle_s: MOCK_PRESENCE.user === "away" ? 300 : 0,
+      fs_raw: MOCK_PRESENCE.fullscreen,
+      fs_settled: MOCK_PRESENCE.fullscreen,
+      user: MOCK_PRESENCE.user,
+    });
+  }, 1000);
+  return () => window.clearInterval(id);
 }
 
 export const SPECTRUM_BINS = 16;

@@ -21,4 +21,31 @@ export interface NowPlaying {
   art_id: string | null;
 }
 
+/** Settled device-context state from the presence engine (presence.rs).
+ * P0: sense-only — no behavior keys off it yet; the dev overlay observes it. */
+export interface PresenceState {
+  /** Hysteresis-settled: fullscreen content owns the widget's monitor. */
+  fullscreen: boolean;
+  /** Input idleness ("working" arrives in P4). */
+  user: "active" | "away";
+  /** What the engine did about it — always false until P1 ships conceal. */
+  concealed: boolean;
+}
+
+/** Raw per-tick signals behind the settled state — "presence-debug" stream,
+ * emitted only while the dev overlay has voted for it. */
+export interface PresenceDebug {
+  fg_exe: string;
+  fg_class: string;
+  fg_pid: number;
+  rect_verdict: "fullscreen" | "maximized" | "windowed" | "none" | "shell" | "self";
+  on_widget_monitor: boolean;
+  quns: number;
+  quns_name: string;
+  idle_s: number;
+  fs_raw: boolean;
+  fs_settled: boolean;
+  user: "active" | "away";
+}
+
 export const IN_TAURI = "__TAURI_INTERNALS__" in window;
