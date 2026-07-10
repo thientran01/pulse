@@ -222,7 +222,11 @@ impl VisIntent {
 pub(crate) fn apply_visibility(app: &AppHandle) {
     let Some(win) = app.get_webview_window("main") else { return };
     let want = app.state::<VisIntent>().effective_visible();
-    let is = win.is_visible().unwrap_or(true);
+    // On an is_visible() error, assume the OPPOSITE of intent so the
+    // reconcile always acts (show/hide are idempotent). A fixed default
+    // could silently skip the show() that restores a concealed window —
+    // the worst failure class here (quick-review catch, 2026-07-09).
+    let is = win.is_visible().unwrap_or(!want);
     if want && !is {
         let _ = win.show();
         // The poll loop skips hidden windows — refresh immediately on show.
@@ -268,7 +272,11 @@ fn save_companion(app: &AppHandle, on: bool) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(path, serde_json::json!({ "companion": on }).to_string());
+    // In-session behavior rides the atomic either way; a failed write only
+    // surfaces at next launch — say so instead of diverging silently.
+    if let Err(e) = std::fs::write(path, serde_json::json!({ "companion": on }).to_string()) {
+        eprintln!("companion setting not persisted: {e}");
+    }
 }
 
 /// Push a label/enabled change to a tray menu item from any thread — menu
@@ -392,6 +400,11 @@ pub fn run() {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
                 apply_visibility(&app);
+                // Unconditional refresh, preserving the old handler's
+                // behavior for an ALREADY-visible widget (apply_visibility
+                // only emits on an actual show). Diff-suppressed — a
+                // redundant call costs nothing.
+                emit_now(&app);
                 if let Some(win) = app.get_webview_window("main") {
                     let _ = win.set_focus();
                 }
