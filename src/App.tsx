@@ -1621,8 +1621,11 @@ function App() {
 
   // Which work-area corner the window docks to (dock.rs owns the derivation;
   // bottom-right until it reports). ModeContent pins the content plane there.
-  const [dockCorner, setDockCorner] = useState<DockCorner>("bottom-right");
+  // Starts null — not the default — so the seat FLIP below can tell the
+  // launch seed (null → corner, never animated) from a real corner change.
+  const [dockCorner, setDockCorner] = useState<DockCorner | null>(null);
   useEffect(() => onDockCorner(setDockCorner), []);
+  const corner = dockCorner ?? "bottom-right";
 
   const [mode, setMode] = useState<Mode>(() => {
     try {
@@ -1641,6 +1644,41 @@ function App() {
   }, [mode]);
 
   const reducedMotion = useReducedMotion();
+
+  // A dock-corner CHANGE re-seats the shell across the fixed-size window —
+  // as a bare class flip it teleports the visible widget mid-snap, which
+  // blended into the native glide as one too-fast lurch (Thien, live,
+  // 2026-07-10). FLIP it instead: start the shell at its old seat via
+  // `translate` and release to 0, so the re-seat glides (EASE.out, DUR 3 =
+  // SNAP_MS — .shell-glide) in step with the native window glide, composing
+  // into one continuous motion from drop point to dock. The null-start on
+  // dockCorner exempts the launch seed; only real corner changes animate.
+  const shellRef = useRef<HTMLDivElement>(null);
+  const prevCornerRef = useRef<DockCorner | null>(null);
+  useLayoutEffect(() => {
+    const prev = prevCornerRef.current;
+    prevCornerRef.current = dockCorner;
+    const el = shellRef.current;
+    if (!prev || !dockCorner || prev === dockCorner || !el || reducedMotion) return;
+    const inset = SHELL_GUTTER_PX / 2;
+    const w = MODE_SIZES[mode][0] - SHELL_GUTTER_PX;
+    const h = MODE_SIZES[mode][1] - SHELL_GUTTER_PX;
+    // SHELL_SEAT's geometry in numbers: the seat's top-left within the window.
+    const seat = (c: DockCorner): [number, number] => [
+      c.endsWith("right") ? WINDOW_MAX[0] - inset - w : inset,
+      c.startsWith("bottom") ? WINDOW_MAX[1] - inset - h : inset,
+    ];
+    const [px, py] = seat(prev);
+    const [nx, ny] = seat(dockCorner);
+    if (px === nx && py === ny) return;
+    // Classic FLIP: jump to the old seat with the transition muted, flush
+    // styles so the jump is the transition's start value, then release.
+    el.style.transition = "none";
+    el.style.translate = `${px - nx}px ${py - ny}px`;
+    void el.offsetWidth;
+    el.style.transition = "";
+    el.style.translate = "0px 0px";
+  }, [dockCorner, mode, reducedMotion]);
 
   // One-time launch dock: the window is born at WINDOW_MAX (tauri.conf.json
   // matches, so this never resizes anything) — it positions the window in
@@ -1774,13 +1812,15 @@ function App() {
       onMouseLeave={() => setHot(false)}
       onMouseDown={onDragStart}
     >
-      {PRESENCE_OVERLAY && <PresenceOverlay corner={dockCorner} />}
+      {PRESENCE_OVERLAY && <PresenceOverlay corner={corner} />}
       {/* THE widget box — persistent across modes: the chrome never remounts
           or fades, only the content layers crossfade inside it. It glides
           between mode boxes (200ms EASE.inOut, the house morph curve) out of
           the docked corner inside the never-resizing window — the webview
           compositor owns the entire visible resize, which is why it cannot
-          shake or blink (see dock.rs's module comment). Shadow must die out
+          shake or blink (see dock.rs's module comment). Corner changes glide
+          too: the FLIP effect above rides `translate` back to the new seat
+          (all three properties in .shell-glide). Shadow must die out
           inside the 6px window gutter — anything larger hard-clips at the
           transparent window edge and reads as a gray box on light surfaces.
           Opaque, not translucent: without a blur primitive (CSS backdrop-filter
@@ -1788,7 +1828,8 @@ function App() {
           window, gutter included) any alpha reads as a hole in the widget,
           not a material — measured at /97, desktop text ghosted through. */}
       <div
-        className={`absolute overflow-hidden rounded-xl border border-border/10 bg-surface shadow-[0_1px_3px_rgb(0_0_0/0.18),0_3px_6px_rgb(0_0_0/0.12)] [transition:width_200ms_var(--ease-in-out-tk),height_200ms_var(--ease-in-out-tk)] ${SHELL_SEAT[dockCorner]}`}
+        ref={shellRef}
+        className={`shell-glide absolute overflow-hidden rounded-xl border border-border/10 bg-surface shadow-[0_1px_3px_rgb(0_0_0/0.18),0_3px_6px_rgb(0_0_0/0.12)] ${SHELL_SEAT[corner]}`}
         style={{
           width: MODE_SIZES[mode][0] - SHELL_GUTTER_PX,
           height: MODE_SIZES[mode][1] - SHELL_GUTTER_PX,
@@ -1797,7 +1838,7 @@ function App() {
       {/* Crossfading content layers, clipped by the gliding shell above. */}
       <AnimatePresence>
         <motion.div key={mode} {...morph} className="absolute inset-0">
-        <ModeContent mode={mode} corner={dockCorner}>
+        <ModeContent mode={mode} corner={corner}>
         {nothing ? (
           /* The resting state: the note glyph, the words, and the living
              separator's resting middot with nothing to separate — breathing
