@@ -214,6 +214,18 @@ export function onPresence(cb: (p: PresenceState) => void): () => void {
     };
   }
   cb(MOCK_PRESENCE);
+  // Mock the real engine's return-on-input: seeded away (?away), the first
+  // pointer/key input flips to active — so the ambient grow AND its return
+  // glide are both exercisable in preview.
+  if (MOCK_PRESENCE.user === "away") {
+    const onInput = () => cb({ ...MOCK_PRESENCE, user: "active" });
+    window.addEventListener("pointermove", onInput, { once: true });
+    window.addEventListener("keydown", onInput, { once: true });
+    return () => {
+      window.removeEventListener("pointermove", onInput);
+      window.removeEventListener("keydown", onInput);
+    };
+  }
   return () => {};
 }
 
