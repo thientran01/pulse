@@ -2,9 +2,15 @@
  * Corner docking: the widget always rests in one of the four corners of the
  * monitor's work area (above the taskbar, MARGIN_LOGICAL from the edges).
  * Drags stay free; on release the window glides to the nearest corner. Mode
- * resizes grow/shrink out of the docked corner — size and position move in
- * the same SetWindowPos each frame (Tauri's setSize/setPosition pair paints
- * one frame at the wrong anchor).
+ * resizes are ONE corner-pinned SetWindowPos snap — the visible 200ms glide
+ * is the shell's CSS inside the webview (App.tsx sequences: grow snaps the
+ * window first, shrink snaps it after the glide). Animating the native
+ * bounds per frame can never look smooth here: a corner-docked resize moves
+ * the ORIGIN every frame, the rect updates synchronously while WebView2's
+ * composited content lags a frame behind, and the stale pixels ride the
+ * moving top-left — the whole UI visibly shakes (measured live, v0.5.0).
+ * Pure MOVES are exempt (content rides the translation rigidly), which is
+ * why the drag-release glide stays native.
  *
  * Corner persistence is derived, not stored: tauri-plugin-window-state
  * restores the last position, and the first positioning call (or the launch
@@ -22,7 +28,7 @@ use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SetWindowPos, SystemParametersInfoW, SET_WINDOW_POS_FLAGS, SM_SWAPBUTTON,
-    SPI_GETCLIENTAREAANIMATION, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+    SPI_GETCLIENTAREAANIMATION, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOSIZE, SWP_NOZORDER,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
@@ -150,6 +156,12 @@ fn apply_pos(window: &WebviewWindow, x: i32, y: i32, size: Option<(i32, i32)>) {
     let mut flags: SET_WINDOW_POS_FLAGS = SWP_NOZORDER | SWP_NOACTIVATE;
     if size.is_none() {
         flags |= SWP_NOSIZE;
+    } else {
+        // A sized snap moves the origin; letting the OS re-present the stale
+        // client bits translated to the new origin would flash the whole UI
+        // displaced for a frame. Discarding them shows (transparent) nothing
+        // for that frame instead — invisible on a transparent window.
+        flags |= SWP_NOCOPYBITS;
     }
     let (cx, cy) = size.unwrap_or((0, 0));
     unsafe {
@@ -209,15 +221,10 @@ fn cubic_bezier(x1: f64, y1: f64, x2: f64, y2: f64, p: f64) -> f64 {
 
 /// EASE.out — for the drag-release snap: a direct response to letting go, it
 /// starts fast to read as inheriting the drag's momentum (iOS-PiP-style).
-/// Deliberately NOT used for the mode resize.
+/// (The mode resize's EASE.inOut lives in the webview now — the shell's CSS
+/// glide — since the window side of a mode change is a single snap.)
 fn ease_out(p: f64) -> f64 {
     cubic_bezier(0.16, 1.0, 0.3, 1.0, p)
-}
-
-/// EASE.inOut — for the mode resize: a morph of an element already on screen
-/// (Emil's framework: morph → ease-in-out; ease-out reads as "shoved open").
-fn ease_in_out(p: f64) -> f64 {
-    cubic_bezier(0.65, 0.0, 0.35, 1.0, p)
 }
 
 /// Glide the window to `target` over SNAP_MS with the EASE.out curve.
@@ -317,14 +324,17 @@ fn snap_to_nearest(window: &WebviewWindow) {
     animate_to(window, (pos.x, pos.y), target);
 }
 
-/// Resize to the mode's logical size, growing/shrinking out of the docked
-/// corner — per-frame the size interpolates and the origin is re-derived from
-/// the corner, so the anchored edges stay pixel-fixed while the container
-/// visibly changes size. First call after launch derives the corner from
-/// wherever window-state restored us — that IS the startup snap.
+/// Resize to the given logical size in ONE corner-pinned snap — origin and
+/// size land in the same SetWindowPos, derived from the docked corner. No
+/// native animation: the visible glide is the shell's CSS in the webview,
+/// and App.tsx sequences the snaps around it (grow: snap to the union first
+/// so the glide has room; shrink: glide, then snap) — see the module
+/// comment for why per-frame native resizes shake on WebView2. First call
+/// after launch derives the corner from wherever window-state restored us —
+/// that IS the startup dock.
 #[tauri::command]
 pub fn set_window_size(window: WebviewWindow, dock: State<Dock>, width: f64, height: f64) {
-    dock.epoch.fetch_add(1, Ordering::SeqCst); // cancel any in-flight animation
+    dock.epoch.fetch_add(1, Ordering::SeqCst); // cancel any in-flight glide
     let Some(wa) = work_area(&window) else {
         // No monitor info at all — still honor the size so the native window
         // matches the React layout; position keeps its last value.
@@ -345,20 +355,10 @@ pub fn set_window_size(window: WebviewWindow, dock: State<Dock>, width: f64, hei
         })
     };
     emit_corner(&window, corner);
-    if (w0, h0) == (w, h) {
-        // Same size (launch, usually) — just make sure we're docked.
-        let (x, y) = corner_origin(corner, &wa, w, h, margin);
-        dock.animating.store(true, Ordering::SeqCst);
-        apply_pos(&window, x, y, Some((w, h)));
-        dock.animating.store(false, Ordering::SeqCst);
-        return;
-    }
-    spawn_animation(&window, ease_in_out, move |win, e| {
-        let wi = (w0 as f64 + (w - w0) as f64 * e).round() as i32;
-        let hi = (h0 as f64 + (h - h0) as f64 * e).round() as i32;
-        let (xi, yi) = corner_origin(corner, &wa, wi, hi, margin);
-        apply_pos(win, xi, yi, Some((wi, hi)));
-    });
+    let (x, y) = corner_origin(corner, &wa, w, h, margin);
+    dock.animating.store(true, Ordering::SeqCst);
+    apply_pos(&window, x, y, Some((w, h)));
+    dock.animating.store(false, Ordering::SeqCst);
 }
 
 /// One-shot corner read for webview mount/reload — the event stream's seed

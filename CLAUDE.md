@@ -24,11 +24,16 @@ src-tauri/src/
                 (splits into media_core/ + adapters/ when M5 adds Spotify Web API)
   dock.rs       corner docking: window lives in one of the 4 work-area corners (12px
                 margin, above the taskbar); free drag snaps to the nearest corner on
-                release (Moved-debounce + GetAsyncKeyState — no drag-end event exists);
-                mode resizes grow/shrink out of the docked corner (200ms EASE.inOut —
-                on-screen morph; the snap glide keeps EASE.out, momentum inheritance;
-                size+origin per frame in one SetWindowPos); corner derived from the
-                window-state-restored position, never stored
+                release (Moved-debounce + GetAsyncKeyState — no drag-end event exists;
+                glide stays native EASE.out — pure moves never shake). Mode resizes
+                are ONE corner-pinned SetWindowPos snap; the visible 200ms EASE.inOut
+                glide is the SHELL's CSS in the webview (App.tsx sequences: grow =
+                snap-to-union then glide, shrink = glide then snap) — NEVER animate
+                native bounds per frame: an origin-moving resize translates WebView2's
+                lagging frame every tick and the whole UI shakes (measured v0.5.0).
+                Docked corner is pushed to the webview ("dock-corner" event +
+                dock_corner seed command); corner derived from the window-state-
+                restored position, never stored
   lyrics.rs     LRCLIB get→search fallback, disk cache (bounded, app-data) + session miss set
   audio.rs      WASAPI loopback (cpal input stream on the output device) → FFT →
                 smoothed auto-gained band energies at ~30Hz; capture runs ONLY

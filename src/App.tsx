@@ -608,21 +608,31 @@ function ModeButton({
 /** Ordered mode ladder the anchored cluster steps through. */
 const MODE_ORDER: readonly Mode[] = ["pill", "card", "expanded"];
 
+/** The 6px transparent gutter per side between the window edge and shell. */
+const SHELL_GUTTER_PX = 12;
 /** What the shell's chrome takes from the window before content: the 6px
- * transparent inset per side (inset-1.5) + the shell's 1px border per side.
- * Change the inset or border, change this. */
+ * gutter per side (SHELL_SEAT's 1.5 inset) + the shell's 1px border per
+ * side. Change the seat inset or border, change this. */
 const SHELL_CHROME_PX = 14;
 
+/** Where the gliding shell seats within the window: on the docked corner, so
+ * its size glide radiates out of the one corner that never moves. */
+const SHELL_SEAT: Record<DockCorner, string> = {
+  "top-left": "left-1.5 top-1.5",
+  "top-right": "right-1.5 top-1.5",
+  "bottom-left": "bottom-1.5 left-1.5",
+  "bottom-right": "bottom-1.5 right-1.5",
+};
+
 /** The mode's content plane: laid out at its FINAL size from the first
- * frame, anchored to the docked corner, while the shell (a plain surface —
- * cheap to paint) tracks the animating window and clip-reveals it
- * (ANIMATIONS_FROM_ZERO §2: "content lays out at final size immediately;
- * the growing window reveals it"). Before this the content filled the live
- * window instead: every native resize frame reflowed the whole interior —
- * rows sliding, boxes re-flexing — which read as the UI "catching up with
- * the expansion" instead of being revealed by it (Thien, live, 2026-07-09).
- * The fixed box also keeps the exiting mode's content from squashing while
- * it fades.
+ * frame, anchored to the docked corner, while the shell glides between mode
+ * boxes and clip-reveals it (ANIMATIONS_FROM_ZERO §2: "content lays out at
+ * final size immediately; the growing window reveals it"). Before this the
+ * content filled the live box instead: every resize frame reflowed the whole
+ * interior — rows sliding, boxes re-flexing — which read as the UI "catching
+ * up with the expansion" instead of being revealed by it (Thien, live,
+ * 2026-07-09). The fixed box also keeps the exiting mode's content from
+ * squashing while it fades.
  *
  * Also marks the exiting subtree inert for the crossfade: the shell-level
  * exit pointerEvents can't do it alone — CSS pointer-events inherits, so a
@@ -1404,25 +1414,69 @@ function App() {
     } catch {
       // non-fatal: mode resets to card on next launch
     }
-    const [w, h] = MODE_SIZES[mode];
-    commands.setWindowSize(w, h);
+  }, [mode]);
+
+  /** Shell's glide target — lags `mode` by the grow snap (below) so the CSS
+   * glide never starts before the window has made room for it. */
+  const [shellMode, setShellMode] = useState<Mode>(mode);
+  /** Mock only: the fake OS window's size. Snaps, never transitions — it
+   * emulates dock.rs, and the real window side of a mode change is a snap. */
+  const [mockWin, setMockWin] = useState<[number, number]>(() => MODE_SIZES[mode]);
+
+  // The resize gesture, sequenced. The OS window SNAPS (one corner-pinned
+  // SetWindowPos — dock.rs; per-frame native resizes shake on WebView2)
+  // while the shell glides 200ms EASE.inOut between mode boxes. The window
+  // is transparent, so the shell's glide is the only visible motion and the
+  // webview compositor owns it end-to-end. Grow: snap out to the union of
+  // old/new first so the glide has room; shrink: glide, then snap down once
+  // the shell has settled (the timer's slack absorbs a late paint frame).
+  // Interrupting mid-glide clears the pending down-snap and re-runs against
+  // the union of LOGICAL sizes — the window is only ever at a mode size or
+  // a union of two, so the target union covers wherever it actually is.
+  const prevSize = useRef<[number, number] | null>(null);
+  useEffect(() => {
+    const [w1, h1] = MODE_SIZES[mode];
+    // First run snaps straight to the target: launch docking (the restored
+    // window can be a different mode's size than the persisted pulse.mode).
+    const [w0, h0] = prevSize.current ?? [0, 0];
+    prevSize.current = [w1, h1];
+    const uw = Math.max(w0, w1);
+    const uh = Math.max(h0, h1);
+    let timer: number | undefined;
+    let alive = true;
+    const snap = (w: number, h: number): Promise<void> => {
+      if (IN_TAURI) return commands.setWindowSize(w, h);
+      setMockWin([w, h]);
+      return Promise.resolve();
+    };
+    void snap(uw, uh).then(() => {
+      if (!alive) return;
+      setShellMode(mode);
+      if (uw !== w1 || uh !== h1) {
+        timer = window.setTimeout(() => void snap(w1, h1), DUR[3] + 80);
+      }
+    });
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
   }, [mode]);
 
   const reducedMotion = useReducedMotion();
   const morph = {
-    // Opacity ONLY — no scale. The native window growth is the mode swap's
-    // single motion system; a content zoom stacked on it ran slightly out of
-    // phase (EASE.out over EASE.inOut) and wobbled the shell edges — part of
-    // the "bouncy" live feel (Thien, 2026-07-09). Dropping it also honors
-    // spec failure-mode #2: growth must never read as a zoom.
+    // Opacity ONLY — no scale. The shell's size glide is the mode swap's
+    // single motion system; a content zoom stacked on it runs out of phase
+    // (EASE.out over EASE.inOut) and wobbles the edges — part of the
+    // "bouncy" live feel (Thien, 2026-07-09). Also spec failure-mode #2:
+    // growth must never read as a zoom.
     initial: reducedMotion ? {} : { opacity: 0 },
     animate: { opacity: 1 },
-    // The outgoing shell dissolves in place (opacity only, no transform — the
-    // house exit rule) UNDER the incoming one's 200ms fade: without it the
-    // swap blinks the whole translucent widget toward the desktop for the
-    // morph's first frames (ANIMATIONS_FROM_ZERO §1 — outgoing 140ms EASE.out
-    // while both layers share the native resize window). pointerEvents dies
-    // at exit start so a stray click can't land on dead controls.
+    // The outgoing content layer dissolves in place (opacity only, no
+    // transform — the house exit rule) UNDER the incoming one's 200ms fade,
+    // both clipped by the persistent shell, which itself never fades — the
+    // widget can't blink toward the desktop mid-swap (ANIMATIONS_FROM_ZERO
+    // §1: outgoing 140ms EASE.out sharing the resize window). pointerEvents
+    // dies at exit start so a stray click can't land on dead controls.
     exit: {
       opacity: 0,
       pointerEvents: "none" as const,
@@ -1463,11 +1517,11 @@ function App() {
   return (
     <div
       className={`group/widget relative ${IN_TAURI ? "h-screen" : ""}`}
-      // The mock window frame (browser dev only): a MODE_SIZES box docked
-      // 12px off the viewport's bottom-right like dock.rs's corner, width and
-      // height sharing one 200ms EASE.inOut window — the handoff prototype's
-      // reference implementation of the corner-anchored native resize, so the
-      // mock previews the content crossfade composed with "window" growth.
+      // The mock window frame (browser dev only): the fake OS window, docked
+      // 12px off the viewport's bottom-right like dock.rs's corner. It SNAPS
+      // (mockWin, driven by the same sequencing effect as the real window) —
+      // the visible glide belongs to the shell in both worlds, so the mock
+      // previews the exact live composition.
       style={
         IN_TAURI
           ? undefined
@@ -1475,25 +1529,30 @@ function App() {
               position: "fixed",
               right: 12,
               bottom: 12,
-              width: MODE_SIZES[mode][0],
-              height: MODE_SIZES[mode][1],
-              transition: "width 200ms var(--ease-in-out-tk), height 200ms var(--ease-in-out-tk)",
+              width: mockWin[0],
+              height: mockWin[1],
             }
       }
       onMouseDown={onDragStart}
     >
-      {/* AnimatePresence keeps the outgoing shell mounted for its 140ms exit
-          fade; absolute inset (not flow + root padding) lets the two shells
-          stack during the crossfade instead of pushing each other. */}
+      {/* THE widget box — persistent across modes: the chrome never remounts
+          or fades, only the content layers crossfade inside it. It glides
+          between mode boxes (200ms EASE.inOut, the house morph curve) out of
+          the docked corner while the OS window snaps around it — the webview
+          compositor owns the whole visible resize (see the sequencing effect
+          + dock.rs). Shadow must die out inside the 6px window gutter —
+          anything larger hard-clips at the transparent window edge and reads
+          as a gray box on light surfaces. */}
+      <div
+        className={`absolute overflow-hidden rounded-xl border border-border/10 bg-surface/95 shadow-[0_1px_3px_rgb(0_0_0/0.18),0_3px_6px_rgb(0_0_0/0.12)] [transition:width_200ms_var(--ease-in-out-tk),height_200ms_var(--ease-in-out-tk)] ${SHELL_SEAT[dockCorner]}`}
+        style={{
+          width: MODE_SIZES[shellMode][0] - SHELL_GUTTER_PX,
+          height: MODE_SIZES[shellMode][1] - SHELL_GUTTER_PX,
+        }}
+      >
+      {/* Crossfading content layers, clipped by the gliding shell above. */}
       <AnimatePresence>
-        <motion.div
-          key={mode}
-          {...morph}
-          // Shadow must die out inside the 6px window inset (inset-1.5) —
-          // anything larger hard-clips at the transparent window edge and
-          // reads as a gray box on light surfaces.
-          className="absolute inset-1.5 flex flex-col overflow-hidden rounded-xl border border-border/10 bg-surface/95 shadow-[0_1px_3px_rgb(0_0_0/0.18),0_3px_6px_rgb(0_0_0/0.12)]"
-        >
+        <motion.div key={mode} {...morph} className="absolute inset-0">
         <ModeContent mode={mode} corner={dockCorner}>
         {nothing ? (
           <div className="flex h-full w-full items-center justify-center gap-2 text-muted">
@@ -1571,6 +1630,7 @@ function App() {
         </ModeContent>
         </motion.div>
       </AnimatePresence>
+      </div>
       {/* Outside the mode-keyed remount: the cluster never fades or rescales
           with the content morph, and — docked bottom-right — never moves on
           screen. See ModeCluster. */}

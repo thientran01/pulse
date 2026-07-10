@@ -209,10 +209,13 @@ export const commands = {
   startDrag(): void {
     if (IN_TAURI) void invoke("start_drag");
   },
-  /** Resize the native window to the mode's logical size, anchored to the
-   * docked corner (Rust owns all positioning — see src-tauri/src/dock.rs). */
-  setWindowSize(width: number, height: number): void {
-    if (IN_TAURI) void invoke("set_window_size", { width, height });
+  /** Snap the native window to a logical size, anchored to the docked corner
+   * (Rust owns all positioning — see src-tauri/src/dock.rs). ONE SetWindowPos,
+   * no native animation: the visible glide is the shell's CSS, and App.tsx
+   * awaits this promise to sequence snap-then-glide (grow) / glide-then-snap
+   * (shrink). */
+  async setWindowSize(width: number, height: number): Promise<void> {
+    if (IN_TAURI) await invoke("set_window_size", { width, height });
   },
   playPause(): void {
     if (IN_TAURI) {
