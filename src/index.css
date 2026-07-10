@@ -110,6 +110,11 @@ body {
 }
 
 .resting-pulse {
+  /* Base opacity = the keyframe's resting trough: under the reduced-motion
+   * kill (iteration-count 1 at 0.01ms, no fill) the animation stops
+   * affecting opacity and the element reverts to THIS — a dim static dot,
+   * not a full-opacity pop (quick-review catch, 2026-07-09). */
+  opacity: 0.35;
   animation: resting-breathe 8s var(--ease-in-out-tk) infinite;
 }
 
