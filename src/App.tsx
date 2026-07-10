@@ -3,7 +3,7 @@ import { AnimatePresence, motion, useIsPresent, useReducedMotion } from "motion/
 import type { MorphName } from "./icons/geometry";
 import { MorphIcon } from "./icons/MorphIcon";
 import { useSeekTick } from "./icons/useSeekTick";
-import { commands, onDockCorner, onNowPlaying, type DockCorner } from "./lib/backend";
+import { commands, onCursorLeft, onDockCorner, onNowPlaying, type DockCorner } from "./lib/backend";
 import { currentLineIndex, msUntilNextLine, parseLrc, VOCAL_LEAD_MS, type LyricLine } from "./lib/lrc";
 import { extractAccent } from "./lib/palette";
 import * as posClock from "./lib/posClock";
@@ -509,6 +509,19 @@ function TruncateTip({ text, className }: { text: string; className: string }) {
     timer.current = null;
   };
   useEffect(() => clear, []);
+  // The window can go click-through while the cursor rests on this line —
+  // no mouseleave ever arrives then (see onCursorLeft), so the hover-hold
+  // timer would open a tooltip over an unattended widget with nothing left
+  // to close it. Drop the hold and the tooltip on the signal.
+  useEffect(
+    () =>
+      onCursorLeft(() => {
+        if (timer.current !== null) window.clearTimeout(timer.current);
+        timer.current = null;
+        setOpen(false);
+      }),
+    [],
+  );
   const reducedMotion = useReducedMotion();
   return (
     <span className="relative block min-w-0">
@@ -719,8 +732,10 @@ const CORNER_SEAT: Record<DockCorner, string> = {
  * fixed-point guarantee, no drift even while hidden (ANIMATIONS.md §2 —
  * "opacity only, zero transforms; the fixed-point guarantee includes the
  * hidden state"). Hidden at rest (opacity 0, pointer-events none),
- * it reveals on widget hover (group/widget): opacity 0→1 over 140ms EASE.out,
- * no motion. Also reveals on KEYBOARD focus — has-[:focus-visible], NOT
+ * it reveals on widget hover — the root's data-hot, JS-owned (mousemove
+ * arms, mouseleave + the Rust cursor-left event clear; CSS :hover freezes
+ * true once the window goes click-through): opacity 0→1 over 140ms
+ * EASE.out, no motion. Also reveals on KEYBOARD focus — has-[:focus-visible], NOT
  * focus-within: the buttons stay in the Tab order the whole time (hidden ≠
  * inert), so a hover-only reveal would strand keyboard users on an
  * invisible, invisibly-outlined control (quick-review catch, 2026-07-08) —
@@ -731,7 +746,7 @@ const CORNER_SEAT: Record<DockCorner, string> = {
 function ModeCluster({ mode, onStep }: { mode: Mode; onStep: (d: -1 | 1) => void }) {
   return (
     <div
-      className="pointer-events-none absolute bottom-[4px] right-[7px] z-20 flex items-center gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-hover/widget:pointer-events-auto group-hover/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100"
+      className="pointer-events-none absolute bottom-[4px] right-[7px] z-20 flex items-center gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-data-[hot]/widget:pointer-events-auto group-data-[hot]/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100"
       // Swallow mousedown: pointer-events-none makes a DISABLED button
       // transparent to hit-testing, so without this a press on it (or the
       // 4px gap between the buttons) would fall through to the root drag
@@ -791,7 +806,7 @@ function ViewToggle({
 }) {
   return (
     <div
-      className="pointer-events-none absolute right-2 top-2 z-10 opacity-0 transition-opacity duration-2 ease-out-tk group-hover/widget:pointer-events-auto group-hover/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100"
+      className="pointer-events-none absolute right-2 top-2 z-10 opacity-0 transition-opacity duration-2 ease-out-tk group-data-[hot]/widget:pointer-events-auto group-data-[hot]/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100"
       onMouseDown={(e) => e.stopPropagation()}
     >
       <button
@@ -1085,7 +1100,7 @@ function PillTime({ np }: { np: NowPlaying }) {
     <span
       ref={timeRef}
       aria-hidden
-      className="shrink-0 text-[11px] leading-4 tabular-nums text-muted transition-opacity duration-2 ease-out-tk group-hover/widget:opacity-0 group-has-[:focus-visible]/widget:opacity-0"
+      className="shrink-0 text-[11px] leading-4 tabular-nums text-muted transition-opacity duration-2 ease-out-tk group-data-[hot]/widget:opacity-0 group-has-[:focus-visible]/widget:opacity-0"
     />
   );
 }
@@ -1454,11 +1469,42 @@ function App() {
   // Report the mode's interactive footprint: outside it the fixed-size
   // window is click-through (dock.rs hit watcher), so the invisible gutter
   // above a small shell can't eat clicks — or start drags — meant for
-  // whatever is beneath the widget.
+  // whatever is beneath the widget. Shrinks are DEFERRED past the glide:
+  // the hit rect must never be smaller than the shell still on screen, or
+  // clicks on the visibly-shrinking shell would fall through mid-glide
+  // (quick-review catch, 2026-07-10). Grows apply instantly — the gutter
+  // intercepting 200ms early is invisible; the shell arriving into a dead
+  // zone would not be. hitCommanded keeps interrupted shrinks honest (the
+  // winCommanded lesson from the snap era).
+  const hitCommanded = useRef<[number, number] | null>(null);
   useEffect(() => {
-    const [w, h] = MODE_SIZES[mode];
-    commands.setHitSize(w, h);
-  }, [mode]);
+    const [w1, h1] = MODE_SIZES[mode];
+    const [cw, ch] = hitCommanded.current ?? [w1, h1];
+    const uw = Math.max(w1, cw);
+    const uh = Math.max(h1, ch);
+    hitCommanded.current = [uw, uh];
+    commands.setHitSize(uw, uh);
+    let timer: number | undefined;
+    if (uw !== w1 || uh !== h1) {
+      timer = window.setTimeout(
+        () => {
+          hitCommanded.current = [w1, h1];
+          commands.setHitSize(w1, h1);
+        },
+        reducedMotion ? 0 : DUR[3] + 80,
+      );
+    }
+    return () => window.clearTimeout(timer);
+  }, [mode, reducedMotion]);
+
+  // JS-owned hover: mousemove arms it, mouseleave clears it, and the Rust
+  // cursor-left event clears it for gutter exits — once the window goes
+  // click-through the webview receives no more mouse events at all, so a
+  // CSS :hover would freeze true and pin the revealed chrome open
+  // (quick-review catch, 2026-07-10). Every reveal surface keys on the
+  // root's data-hot instead of group-hover.
+  const [hot, setHot] = useState(false);
+  useEffect(() => onCursorLeft(() => setHot(false)), []);
 
   const morph = {
     // Opacity ONLY — no scale. The shell's size glide is the mode swap's
@@ -1530,6 +1576,9 @@ function App() {
               height: WINDOW_MAX[1],
             }
       }
+      data-hot={hot || undefined}
+      onMouseMove={() => setHot(true)}
+      onMouseLeave={() => setHot(false)}
       onMouseDown={onDragStart}
     >
       {/* THE widget box — persistent across modes: the chrome never remounts
@@ -1589,7 +1638,7 @@ function App() {
                 the scrim open, quick-review catch 2026-07-08 / Thien
                 2026-07-10). */}
             <div
-              className="pointer-events-none absolute bottom-0.5 right-0 top-0 flex w-[180px] items-center justify-end pr-[76px] opacity-0 transition-opacity duration-2 ease-out-tk group-hover/widget:pointer-events-auto group-hover/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100"
+              className="pointer-events-none absolute bottom-0.5 right-0 top-0 flex w-[180px] items-center justify-end pr-[76px] opacity-0 transition-opacity duration-2 ease-out-tk group-data-[hot]/widget:pointer-events-auto group-data-[hot]/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100"
               style={{ background: "linear-gradient(90deg, transparent, rgb(var(--surface) / 0.96) 45%)" }}
               // Swallow mousedown, same reason as ModeCluster: pointer-events
               // only turns on for the 180px scrim, but the button inside it

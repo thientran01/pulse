@@ -155,6 +155,19 @@ export function onDockCorner(cb: (corner: DockCorner) => void): () => void {
   };
 }
 
+/** Fires when the window goes click-through (the cursor left the interactive
+ * footprint — dock.rs hit watcher): WS_EX_TRANSPARENT stops all mouse
+ * messages, so the webview never receives that exit's mouseleave. Hover
+ * state must be JS-owned and dropped on this signal — CSS :hover would
+ * freeze true. */
+export function onCursorLeft(cb: () => void): () => void {
+  if (!IN_TAURI) return () => {}; // mock: real mouseleave always fires
+  const un = listen("cursor-left", () => cb());
+  return () => {
+    un.then((f) => f());
+  };
+}
+
 export const SPECTRUM_BINS = 16;
 
 export interface AudioBands {

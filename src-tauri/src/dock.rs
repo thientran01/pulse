@@ -432,10 +432,24 @@ pub fn spawn_hit_watcher(window: WebviewWindow) {
                             }
                         };
                         // inside == ignoring means the state is wrong-way —
-                        // flip it, unless a press is in flight.
-                        if inside == ignoring && !primary_button_down() {
+                        // flip it, unless a press is in flight. The mirror
+                        // only advances when the OS call lands, so a failed
+                        // call retries next poll instead of desyncing.
+                        if inside == ignoring
+                            && !primary_button_down()
+                            && window.set_ignore_cursor_events(!inside).is_ok()
+                        {
                             ignoring = !inside;
-                            let _ = window.set_ignore_cursor_events(ignoring);
+                            if ignoring {
+                                // WS_EX_TRANSPARENT stops ALL mouse messages
+                                // the instant it lands — the webview never
+                                // receives the mouseleave, so Chromium's
+                                // :hover freezes true and pins the
+                                // hover-revealed chrome open. Tell the
+                                // frontend to drop its hover state instead
+                                // (quick-review catch, 2026-07-10).
+                                let _ = window.emit("cursor-left", ());
+                            }
                         }
                     }
                 }
