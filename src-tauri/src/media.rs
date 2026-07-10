@@ -230,7 +230,11 @@ fn player_kind(app_id: &str) -> &'static str {
     }
 }
 
-fn art_key(app_id: &str, title: &str, artist: &str) -> String {
+/// The track identity hash — shared vocabulary across the app: the art cache
+/// key, the emitted art_id's key prefix, AND history.rs's entry/thumb key
+/// (posClock keys on the same raw tuple frontend-side). Album and duration
+/// are deliberately NOT included (that's the lyrics key).
+pub(crate) fn ident_key(app_id: &str, title: &str, artist: &str) -> String {
     let mut h = DefaultHasher::new();
     (app_id, title, artist).hash(&mut h);
     format!("{:x}", h.finish())
@@ -300,16 +304,19 @@ fn art_data_url(bytes: &[u8], mime: &str) -> String {
     format!("data:{};base64,{}", mime, B64.encode(bytes))
 }
 
-/// Snapshot the current session into a NowPlaying payload, refreshing the art
-/// cache when the (app, title, artist) key changes.
-pub fn snapshot(art_cache: &ArtCache) -> NowPlaying {
-    let Some(session) = current_session() else {
-        return NowPlaying {
-            player: "none".into(),
-            status: "none".into(),
-            ..Default::default()
-        };
-    };
+fn none_now() -> NowPlaying {
+    NowPlaying {
+        player: "none".into(),
+        status: "none".into(),
+        ..Default::default()
+    }
+}
+
+/// Metadata + status + raw timeline for a session — everything but art.
+/// Shared by snapshot() (which adds the art pipeline) and history_probe()
+/// (the hidden-window history feed, which must do zero art work). Returns
+/// the payload (art_id None) plus whether a thumbnail stream exists.
+fn base_snapshot(session: &Session) -> (NowPlaying, bool) {
     let app_id = session
         .SourceAppUserModelId()
         .map(|h| h.to_string())
@@ -337,14 +344,50 @@ pub fn snapshot(art_cache: &ArtCache) -> NowPlaying {
         title = "Unknown".into();
     }
 
-    let (status, can_seek) = playback_info(&session);
-    let (mut position_ms, duration_ms, position_at_ms) = raw_timeline(&session);
+    let (status, can_seek) = playback_info(session);
+    let (mut position_ms, duration_ms, position_at_ms) = raw_timeline(session);
     if duration_ms > 0 {
         position_ms = position_ms.clamp(0, duration_ms);
     }
 
-    let art_id = if has_thumb {
-        let key = art_key(&app_id, &title, &artist);
+    (
+        NowPlaying {
+            app_id,
+            player,
+            title,
+            artist,
+            album,
+            status: status.to_string(),
+            position_ms,
+            duration_ms,
+            position_at_ms,
+            can_seek,
+            art_id: None,
+        },
+        has_thumb,
+    )
+}
+
+/// Art-free observation for the history tracker while the window is hidden —
+/// the ONE narrow exception to "the media loop does no work while hidden"
+/// (~5s cadence, no art marshal, no emit; see lib.rs's media loop).
+pub fn history_probe() -> NowPlaying {
+    match current_session() {
+        Some(session) => base_snapshot(&session).0,
+        None => none_now(),
+    }
+}
+
+/// Snapshot the current session into a NowPlaying payload, refreshing the art
+/// cache when the (app, title, artist) key changes.
+pub fn snapshot(art_cache: &ArtCache) -> NowPlaying {
+    let Some(session) = current_session() else {
+        return none_now();
+    };
+    let (mut np, has_thumb) = base_snapshot(&session);
+
+    np.art_id = if has_thumb {
+        let key = ident_key(&np.app_id, &np.title, &np.artist);
         // Never hold the lock across the WinRT stream read — media_art (IPC)
         // shares this mutex. Sample the cached state, drop the lock, then read.
         let cached: Option<(u32, bool, Option<u64>, i64, bool)> = {
@@ -442,20 +485,7 @@ pub fn snapshot(art_cache: &ArtCache) -> NowPlaying {
     } else {
         None
     };
-
-    NowPlaying {
-        app_id,
-        player,
-        title,
-        artist,
-        album,
-        status: status.to_string(),
-        position_ms,
-        duration_ms,
-        position_at_ms,
-        can_seek,
-        art_id,
-    }
+    np
 }
 
 /// Raw GSMTC timeline triple: (position_ms, duration_ms, last_updated_unix_ms).
