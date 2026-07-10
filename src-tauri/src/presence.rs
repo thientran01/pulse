@@ -1,9 +1,12 @@
 /*
  * Presence engine: senses the user's device context — fullscreen foreground
- * content and input idleness — and emits derived, hysteresis-settled states
- * to the frontend. P0 is SENSE-ONLY: it observes and reports, it never acts
- * (no conceal, no mode overrides). Behaviors land in P1+ on top of this
- * stream once docs/presence-signal-matrix.md is measured.
+ * content and input idleness — emits derived, hysteresis-settled states to
+ * the frontend, and acts on them in the licensed ways only (CLAUDE.md
+ * "Presence" doctrine). P1: courtesy conceal — settled fullscreen hides the
+ * native window via lib.rs's VisIntent/apply_visibility (manual intent
+ * always wins; the tray "Companion mode" switch stops all actions).
+ * docs/presence-signal-matrix.md is the source of truth for what Windows
+ * reports — no behavior ships on an unmeasured signal.
  *
  * Derivation deliberately lives HERE, not in the webview (diverging from
  * media.rs's raw-relay philosophy): webview timers throttle/freeze exactly
@@ -59,7 +62,8 @@ pub struct PresenceState {
     pub fullscreen: bool,
     /// "active" | "away" — input idleness. A third tier ("working") is P4.
     pub user: &'static str,
-    /// What the engine did about it. Always false in P0 (sense-only).
+    /// What the engine did about it: the window is currently hidden by the
+    /// courtesy conceal (false while a manual show snoozes the episode).
     pub concealed: bool,
 }
 
@@ -97,11 +101,40 @@ pub struct Presence {
     /// Frontend's vote: emit the raw "presence-debug" stream (the dev
     /// overlay flips this on while mounted).
     debug: AtomicBool,
+    /// Dev tray "Simulate fullscreen": the loop treats fs_raw as true until
+    /// this instant (hysteresis still applies, so the conceal/restore cycle
+    /// exercises the real path).
+    sim_fs_until: Mutex<Option<std::time::Instant>>,
 }
 
 impl Default for Presence {
     fn default() -> Self {
-        Self { last: Mutex::new(None), debug: AtomicBool::new(false) }
+        Self {
+            last: Mutex::new(None),
+            debug: AtomicBool::new(false),
+            sim_fs_until: Mutex::new(None),
+        }
+    }
+}
+
+impl Presence {
+    /// Dev-only conceal test affordance (tray item, debug builds).
+    #[cfg(debug_assertions)]
+    pub fn simulate_fullscreen(&self, for_dur: Duration) {
+        *self.sim_fs_until.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(std::time::Instant::now() + for_dur);
+    }
+
+    fn sim_fs_active(&self) -> bool {
+        let mut until = self.sim_fs_until.lock().unwrap_or_else(PoisonError::into_inner);
+        match *until {
+            Some(t) if std::time::Instant::now() < t => true,
+            Some(_) => {
+                *until = None;
+                false
+            }
+            None => false,
+        }
     }
 }
 
@@ -303,6 +336,11 @@ pub fn spawn(app: AppHandle) {
                 continue;
             };
 
+            let presence_st = app.state::<Presence>();
+            if presence_st.sim_fs_active() {
+                dbg.fs_raw = true;
+            }
+
             if dbg.fs_raw != fs_settled {
                 disagree_ms += PRESENCE_POLL_MS;
                 let needed = if fs_settled { FS_EXIT_MS } else { FS_ENTER_MS };
@@ -316,10 +354,31 @@ pub fn spawn(app: AppHandle) {
 
             let user = if dbg.idle_s >= AWAY_AFTER_S { "away" } else { "active" };
 
+            // P1 — courtesy conceal, the engine's only action: settled
+            // fullscreen (companion on) hides the native window; episode end
+            // restores it and clears any manual-show snooze. All show/hide
+            // flows through apply_visibility, so a manual hide stays sticky
+            // and a snoozed episode stays visible without special cases here.
+            let vis = app.state::<crate::VisIntent>();
+            let companion = vis.companion.load(Ordering::Relaxed);
+            if fs_settled && companion {
+                if !vis.concealed.load(Ordering::Relaxed) {
+                    vis.concealed.store(true, Ordering::Relaxed);
+                    crate::apply_visibility(&app);
+                }
+            } else if vis.concealed.load(Ordering::Relaxed) {
+                vis.concealed.store(false, Ordering::Relaxed);
+                vis.conceal_snoozed.store(false, Ordering::Relaxed);
+                crate::apply_visibility(&app);
+            }
+
             let state = PresenceState {
                 fullscreen: fs_settled,
                 user,
-                concealed: false, // P0: the engine never acts
+                // "The engine is currently hiding the window": a snoozed
+                // episode is fullscreen but NOT concealed.
+                concealed: vis.concealed.load(Ordering::Relaxed)
+                    && !vis.conceal_snoozed.load(Ordering::Relaxed),
             };
 
             let presence = app.state::<Presence>();

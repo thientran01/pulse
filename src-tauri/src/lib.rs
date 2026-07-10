@@ -177,19 +177,98 @@ fn emit_now(app: &AppHandle) -> media::NowPlaying {
     np
 }
 
-fn toggle_widget(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        match win.is_visible() {
-            Ok(true) => {
-                let _ = win.hide();
-            }
-            _ => {
-                let _ = win.show();
-                // The poll loop skips hidden windows — refresh immediately on show.
-                emit_now(app);
-            }
+/// Visibility INTENT — the single owner of WHY the window is shown or
+/// hidden. `is_visible()` stays the OS truth, but every mutation flows
+/// through apply_visibility (the ONLY caller of show()/hide() — grep rule),
+/// which reconciles the window to:
+///   effective = !user_hidden && !(concealed && !conceal_snoozed)
+pub struct VisIntent {
+    /// Sticky manual hide (hotkey/tray while visible). Survives conceal
+    /// episodes: a game ending must not resurrect a widget the user hid.
+    pub user_hidden: AtomicBool,
+    /// The presence engine's courtesy conceal (settled fullscreen).
+    pub concealed: AtomicBool,
+    /// Manual show DURING a conceal episode: the user summoned the widget
+    /// over fullscreen content — it stays until the episode ends.
+    pub conceal_snoozed: AtomicBool,
+    /// Master kill switch for presence ACTIONS (tray "Companion mode",
+    /// persisted in app-data settings.json): sensing continues, behaviors
+    /// stop. Persisted because a setting that silently resets erodes trust.
+    pub companion: AtomicBool,
+}
+
+impl Default for VisIntent {
+    fn default() -> Self {
+        Self {
+            user_hidden: AtomicBool::new(false),
+            concealed: AtomicBool::new(false),
+            conceal_snoozed: AtomicBool::new(false),
+            companion: AtomicBool::new(true),
         }
     }
+}
+
+impl VisIntent {
+    pub fn effective_visible(&self) -> bool {
+        !self.user_hidden.load(Ordering::Relaxed)
+            && !(self.concealed.load(Ordering::Relaxed)
+                && !self.conceal_snoozed.load(Ordering::Relaxed))
+    }
+}
+
+/// Reconcile the OS window to the current intent. Safe from any thread that
+/// may touch GSMTC (emit_now runs inline on show — the toggle_widget
+/// precedent); from the single-instance WndProc, defer to the async pool.
+pub(crate) fn apply_visibility(app: &AppHandle) {
+    let Some(win) = app.get_webview_window("main") else { return };
+    let want = app.state::<VisIntent>().effective_visible();
+    let is = win.is_visible().unwrap_or(true);
+    if want && !is {
+        let _ = win.show();
+        // The poll loop skips hidden windows — refresh immediately on show.
+        emit_now(app);
+    } else if !want && is {
+        let _ = win.hide();
+    }
+}
+
+fn toggle_widget(app: &AppHandle) {
+    let Some(win) = app.get_webview_window("main") else { return };
+    let vis = app.state::<VisIntent>();
+    // Decide from what the user actually SEES, not the intent flags — this
+    // self-heals any intent/OS desync. Hiding is always a user act; showing
+    // during a conceal episode snoozes the conceal for that episode (the
+    // widget stays over the fullscreen content until it ends).
+    if win.is_visible().unwrap_or(false) {
+        vis.user_hidden.store(true, Ordering::Relaxed);
+    } else {
+        vis.user_hidden.store(false, Ordering::Relaxed);
+        if vis.concealed.load(Ordering::Relaxed) {
+            vis.conceal_snoozed.store(true, Ordering::Relaxed);
+        }
+    }
+    apply_visibility(app);
+}
+
+/// Companion-mode persistence: one tiny JSON next to the lyrics cache.
+fn settings_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path().app_data_dir().ok().map(|d| d.join("settings.json"))
+}
+
+fn load_companion(app: &AppHandle) -> bool {
+    settings_path(app)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("companion").and_then(|b| b.as_bool()))
+        .unwrap_or(true)
+}
+
+fn save_companion(app: &AppHandle, on: bool) {
+    let Some(path) = settings_path(app) else { return };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, serde_json::json!({ "companion": on }).to_string());
 }
 
 /// Push a label/enabled change to a tray menu item from any thread — menu
@@ -299,18 +378,24 @@ pub fn run() {
         // app" checkbox) hands off before any other plugin does work: the new
         // process exits and the running widget surfaces instead.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.show();
-                let _ = win.set_focus();
-                // This callback runs in a WndProc on the main/STA thread
-                // (SendMessageW from the second process) — emit_now touches
-                // GSMTC, which must never block there (see the async-command
-                // note above). Defer it to the async pool like the commands.
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    emit_now(&app);
-                });
+            // An explicit summons: clear any manual hide and snooze an
+            // active conceal episode. This callback runs in a WndProc on
+            // the main/STA thread (SendMessageW from the second process) —
+            // apply_visibility's emit_now touches GSMTC, which must never
+            // block there (see the async-command note above), so the whole
+            // reconcile defers to the async pool.
+            let vis = app.state::<VisIntent>();
+            vis.user_hidden.store(false, Ordering::Relaxed);
+            if vis.concealed.load(Ordering::Relaxed) {
+                vis.conceal_snoozed.store(true, Ordering::Relaxed);
             }
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                apply_visibility(&app);
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.set_focus();
+                }
+            });
         }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -329,6 +414,7 @@ pub fn run() {
         .manage(UiReactive(Arc::new(AtomicBool::new(true))))
         .manage(dock::Dock::default())
         .manage(presence::Presence::default())
+        .manage(VisIntent::default())
         .invoke_handler(tauri::generate_handler![
             media_play_pause,
             media_next,
@@ -370,12 +456,42 @@ pub fn run() {
                 autostart_on,
                 None::<&str>,
             )?;
+            // Presence-behavior master switch (sensing keeps running for the
+            // debug stream; ACTIONS stop). Loaded from settings.json so a
+            // turned-off companion stays off across launches.
+            let companion_on = load_companion(app.handle());
+            app.state::<VisIntent>()
+                .companion
+                .store(companion_on, Ordering::Relaxed);
+            let companion = CheckMenuItem::with_id(
+                app,
+                "companion",
+                "Companion mode",
+                true,
+                companion_on,
+                None::<&str>,
+            )?;
             let update_check =
                 MenuItem::with_id(app, "update", "Check for updates", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Pulse", true, None::<&str>)?;
-            let menu =
-                Menu::with_items(app, &[&show_hide, &reset, &autostart, &update_check, &quit])?;
+            // Dev-only conceal test affordance: fullscreen apps are awkward
+            // to summon on demand; this feeds the presence loop a synthetic
+            // fullscreen verdict for 10s (hysteresis still applies).
+            #[cfg(debug_assertions)]
+            let sim_fs =
+                MenuItem::with_id(app, "simfs", "Simulate fullscreen (10s)", true, None::<&str>)?;
+            #[cfg(debug_assertions)]
+            let menu = Menu::with_items(
+                app,
+                &[&show_hide, &reset, &autostart, &companion, &sim_fs, &update_check, &quit],
+            )?;
+            #[cfg(not(debug_assertions))]
+            let menu = Menu::with_items(
+                app,
+                &[&show_hide, &reset, &autostart, &companion, &update_check, &quit],
+            )?;
             let autostart_item = autostart.clone();
+            let companion_item = companion.clone();
             let update_item = update_check.clone();
             TrayIconBuilder::with_id("pulse-tray")
                 .icon(app.default_window_icon().unwrap().clone())
@@ -399,6 +515,27 @@ pub fn run() {
                         // the registry's actual state so a failed toggle
                         // doesn't leave the checkmark lying.
                         let _ = autostart_item.set_checked(al.is_enabled().unwrap_or(false));
+                    }
+                    "companion" => {
+                        let vis = app.state::<VisIntent>();
+                        let on = !vis.companion.load(Ordering::Relaxed);
+                        vis.companion.store(on, Ordering::Relaxed);
+                        save_companion(app, on);
+                        // Re-sync like autostart: the item flips itself on
+                        // click; assert the state we actually hold.
+                        let _ = companion_item.set_checked(on);
+                        // Turning it off releases an active conceal NOW, not
+                        // on the next presence tick — the user is asking the
+                        // widget to stop acting.
+                        if !on && vis.concealed.swap(false, Ordering::Relaxed) {
+                            vis.conceal_snoozed.store(false, Ordering::Relaxed);
+                            apply_visibility(app);
+                        }
+                    }
+                    #[cfg(debug_assertions)]
+                    "simfs" => {
+                        app.state::<presence::Presence>()
+                            .simulate_fullscreen(Duration::from_secs(10));
                     }
                     "update" => {
                         // Disable before spawning — we're on the main thread
