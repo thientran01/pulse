@@ -38,6 +38,11 @@ windows = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Media",
+    # presence.rs (P0): fullscreen/idle sensing
+    "Win32_UI_Shell",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_Graphics_Gdi",
 ] }
 
 # Full debuginfo is most of what makes `tauri dev` builds crawl (codegen +

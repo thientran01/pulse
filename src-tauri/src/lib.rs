@@ -2,6 +2,7 @@ mod audio;
 mod dock;
 mod lyrics;
 mod media;
+mod presence;
 
 use media::ArtCache;
 use serde::Serialize;
@@ -327,6 +328,7 @@ pub fn run() {
         .manage(LastEmit(Mutex::new(None)))
         .manage(UiReactive(Arc::new(AtomicBool::new(true))))
         .manage(dock::Dock::default())
+        .manage(presence::Presence::default())
         .invoke_handler(tauri::generate_handler![
             media_play_pause,
             media_next,
@@ -340,7 +342,9 @@ pub fn run() {
             dock::set_window_size,
             dock::set_hit_size,
             dock::start_drag,
-            dock::dock_corner
+            dock::dock_corner,
+            presence::presence_state,
+            presence::set_presence_debug
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Moved(_) = event {
@@ -459,6 +463,10 @@ pub fn run() {
             // launch runs the current version.
             #[cfg(not(debug_assertions))]
             spawn_update_check(app.handle(), None);
+
+            // Presence engine (P0: sense-only) → "presence" events. Keeps
+            // sensing while the widget is hidden — that's the point.
+            presence::spawn(app.handle().clone());
 
             // Audio-reactive capture switch: on ONLY while visible AND playing
             // (plan M4 — a hidden or paused widget does zero audio work).
