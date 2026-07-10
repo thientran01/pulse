@@ -1603,15 +1603,20 @@ function App() {
             <div className="flex min-h-0 flex-1 items-center gap-3">
               <Art url={shownArt} size={52} radiusPx={8} />
               <div className="min-w-0 flex-1">
-                <p className="truncate text-[15px] font-medium text-fg">{np.title}</p>
-                {/* md, not sm: the card's container is ~3× the pill's, and a
-                    pill-scale separator read as an accident of reuse next to
-                    the expanded hero's ladder (Thien, 2026-07-10) — the size
-                    rung steps with the container: pill sm → card md →
-                    expanded md header / lg hero. */}
+                {/* The living separator rides the TITLE here, trailing (rest =
+                    nothing, bars only while playing): at md — the size rung
+                    steps with the container (pill sm → card md → expanded md
+                    header / lg hero) — it overpowered the 12px artist·album
+                    line as a separator, so that line keeps a static dot and
+                    the waveform sits where the card has presence to spare
+                    (Thien, 2026-07-10). One living instance per view. */}
+                <p className="truncate text-[15px] font-medium text-fg">
+                  {np.title}
+                  <Waveform size="md" trailing />
+                </p>
                 <p className="truncate text-xs leading-4 text-muted">
                   {np.artist}
-                  <Waveform size="md" trailing={!np.album} />
+                  {np.album && <SeparatorDot />}
                   {np.album}
                 </p>
               </div>
