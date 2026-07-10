@@ -1819,9 +1819,13 @@ function App() {
           compositor owns the entire visible resize, which is why it cannot
           shake or blink (see dock.rs's module comment). Shadow must die out
           inside the 6px window gutter — anything larger hard-clips at the
-          transparent window edge and reads as a gray box on light surfaces. */}
+          transparent window edge and reads as a gray box on light surfaces.
+          Opaque, not translucent: without a blur primitive (CSS backdrop-filter
+          can't sample the desktop; native acrylic frosts the whole oversized
+          window, gutter included) any alpha reads as a hole in the widget,
+          not a material — measured at /97, desktop text ghosted through. */}
       <div
-        className={`absolute overflow-hidden rounded-xl border border-border/10 bg-surface/97 shadow-[0_1px_3px_rgb(0_0_0/0.18),0_3px_6px_rgb(0_0_0/0.12)] [transition:width_200ms_var(--ease-in-out-tk),height_200ms_var(--ease-in-out-tk)] ${SHELL_SEAT[dockCorner]}`}
+        className={`absolute overflow-hidden rounded-xl border border-border/10 bg-surface shadow-[0_1px_3px_rgb(0_0_0/0.18),0_3px_6px_rgb(0_0_0/0.12)] [transition:width_200ms_var(--ease-in-out-tk),height_200ms_var(--ease-in-out-tk)] ${SHELL_SEAT[dockCorner]}`}
         style={{
           width: MODE_SIZES[effectiveMode][0] - SHELL_GUTTER_PX,
           height: MODE_SIZES[effectiveMode][1] - SHELL_GUTTER_PX,
