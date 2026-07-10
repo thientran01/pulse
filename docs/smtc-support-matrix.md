@@ -15,6 +15,7 @@ Behavior is version-dependent — re-run the spike if either app updates signifi
 | Next / prev | ✅ (⚠️ stop quirk, below) | ✅ flags true; playpause verified, next/prev not fired |
 | **Seek** (`TryChangePlaybackPosition`) | ❌ **ignored** — playing AND paused; flag honestly reports `false` | ✅ **±10 s lands within ~50 ms, both directions** |
 | FF / RW control flags | `false` | `true` |
+| Play history | ✅ Pulse-logged | ✅ Pulse-logged — GSMTC has no history API; history.rs builds it from Pulse's own stream (⚠️ finding 10) |
 
 ## Findings that change the plan
 
@@ -27,6 +28,7 @@ Behavior is version-dependent — re-run the spike if either app updates signifi
 7. *(M1, 2026-07-06)* **AM's thumbnail `ContentType` is a comma-separated LIST** (`image/jpeg,image/jpe,image/jpg`) — commas are invalid inside a `data:` URL; take the first entry. Spotify reports a single `image/png`.
 8. *(M1, 2026-07-06)* **Thumbnail `ReadAsync` may return fewer bytes than requested** — a single read can yield a truncated image that fails to decode. Read chunked until the declared size is reached (and cap the final request to the remainder).
 9. *(soak, 2026-07-07)* **AM's real backward-projection jitter tail reaches ~1.5 s**, not the ≤1 s the granularity alone implies: floor quantization stacks with stamp/delivery lag. Measured from a 2,265-payload live capture — 8 of 13 tracks produced one ~1.2–1.5 s backward step. posClock's apple_music jitter band is sized 2 s with headroom above the measured tail; nothing legitimate lives under 2 s on AM (no programmatic seek, manual scrubs are larger). Same capture: LRCLIB can degrade to 7–9 s first-byte — the lyrics timeout must stay well above that.
+10. *(queue/history PR 1, 2026-07-10)* **Play history is Pulse-built, not an OS/API read** — neither GSMTC nor either player exposes history. history.rs tracks the media loop's own stream: pause/resume = one entry; an AM session vanish (finding 4) followed by the same track within 10 min resumes the same entry; a raw-position restart near 0 after passing max(30 s, 60% duration) = a replay = a new entry; listens under 1 s are dropped as skip-through churn. While the window is hidden (P1 conceal) an art-free `history_probe` keeps feeding it at ~5 s cadence — the one narrow exception to "the media loop does no work while hidden."
 
 ## Apple Music seek fallbacks tested (2026-07-06, M1)
 

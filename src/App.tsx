@@ -132,6 +132,33 @@ function useArt(artId: string | null): string | null {
   return artId ? url : null;
 }
 
+/** Feed the history thumb cache (history.rs): downscale the current cover to
+ * a 96px JPEG once per ART REVISION — a rev bump means the first capture had
+ * the previous track's image (the stale-art probe), so it must overwrite.
+ * The key handed to the backend is the art_id's prefix (media::ident_key),
+ * which is also the history entry's `key`. Fire-and-forget; the mock no-ops. */
+function useHistoryThumb(artId: string | null, artUrl: string | null): void {
+  const lastId = useRef<string | null>(null);
+  useEffect(() => {
+    if (!artId || !artUrl || artId === lastId.current) return;
+    lastId.current = artId;
+    const img = new Image();
+    img.onload = () => {
+      const side = 96;
+      const c = document.createElement("canvas");
+      c.width = side;
+      c.height = side;
+      const ctx = c.getContext("2d");
+      if (!ctx || img.width === 0 || img.height === 0) return;
+      // Cover-crop the (usually already square) art into the square thumb.
+      const s = Math.min(img.width, img.height);
+      ctx.drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, side, side);
+      commands.historyThumb(artId.split(":")[0], c.toDataURL("image/jpeg", 0.8));
+    };
+    img.src = artUrl;
+  }, [artId, artUrl]);
+}
+
 type LyricsState =
   | { status: "loading" | "none" }
   | { status: "synced"; lines: LyricLine[]; key: string };
@@ -1540,6 +1567,7 @@ function App() {
   const [brokenArtUrl, setBrokenArtUrl] = useState<string | null>(null);
   const shownArt = artUrl !== null && artUrl !== brokenArtUrl ? artUrl : null;
   useArtAccent(shownArt);
+  useHistoryThumb(np?.art_id ?? null, shownArt);
   const lyrics = useLyrics(np);
   // Assert the reduced-motion capture vote even before any separator mounts.
   useEffect(() => initReactive(), []);

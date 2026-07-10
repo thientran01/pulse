@@ -53,4 +53,26 @@ export interface PresenceDebug {
   work_duty: number;
 }
 
+/** One finalized listen from the local play-history log (history.rs) —
+ * player-agnostic, built from Pulse's own GSMTC stream. */
+export interface HistoryEntry {
+  /** Schema version — the seam for later columns. */
+  v: number;
+  /** Identity hash of (app_id, title, artist) — equals an art_id's key
+   * prefix, and the thumb-cache filename (history_thumb_url). */
+  key: string;
+  app_id: string;
+  player: NowPlaying["player"];
+  title: string;
+  artist: string;
+  album: string;
+  started_at_ms: number;
+  ended_at_ms: number;
+  /** Accumulated wall-clock ms spent in status "playing". */
+  ms_listened: number;
+  duration_ms: number;
+  /** Stamped by the up-next engine while Spotify is connected (PR 3). */
+  spotify_uri: string | null;
+}
+
 export const IN_TAURI = "__TAURI_INTERNALS__" in window;
