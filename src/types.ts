@@ -28,8 +28,9 @@ export interface PresenceState {
    * GLOBAL QUNS state (exclusive D3D / presentation mode) is active — the
    * QUNS methods carry no monitor scoping. */
   fullscreen: boolean;
-  /** Input idleness ("working" arrives in P4). */
-  user: "active" | "away";
+  /** Input idleness/intensity. Away wins over working (they can't
+   * physically co-occur). */
+  user: "active" | "working" | "away";
   /** What the engine did about it — always false until P1 ships conceal. */
   concealed: boolean;
 }
@@ -47,7 +48,9 @@ export interface PresenceDebug {
   idle_s: number;
   fs_raw: boolean;
   fs_settled: boolean;
-  user: "active" | "away";
+  user: "active" | "working" | "away";
+  /** Input duty over the working window, 0..1. */
+  work_duty: number;
 }
 
 export const IN_TAURI = "__TAURI_INTERNALS__" in window;

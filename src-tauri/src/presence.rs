@@ -52,6 +52,14 @@ const FS_EXIT_MS: u64 = 1000;
 /// builds compile a short threshold so the transition is feel-checkable in
 /// one sitting.
 const AWAY_AFTER_S: u64 = if cfg!(debug_assertions) { 15 } else { 180 };
+/// Working = sustained input duty: at least WORK_DUTY of the last
+/// WORK_WINDOW_S one-second windows saw fresh input. Entry is inherently
+/// hysteretic (the window must FILL that dense — ≥72 input-seconds of the
+/// last 120), and exit needs the duty to decay below the bar (~50-60s of
+/// quiet), matching the arc plan's enter-slow/exit-slow shape without a
+/// second state machine. Coarse GetLastInputInfo deltas only — no hooks.
+const WORK_WINDOW_S: usize = if cfg!(debug_assertions) { 20 } else { 120 };
+const WORK_DUTY: f32 = 0.6;
 
 /// The settled, behavior-grade state. Emitted diff-suppressed on "presence";
 /// P1+ behaviors key off exactly these fields.
@@ -60,7 +68,9 @@ pub struct PresenceState {
     /// Hysteresis-settled: fullscreen content owns the WIDGET's monitor
     /// (or a global presentation/D3D state is active).
     pub fullscreen: bool,
-    /// "active" | "away" — input idleness. A third tier ("working") is P4.
+    /// "active" | "working" | "away" — input idleness/intensity. Away wins
+    /// over working (they can't physically co-occur: away needs 180s of
+    /// silence, working needs dense recent input).
     pub user: &'static str,
     /// What the engine did about it: the window is currently hidden by the
     /// courtesy conceal (false while a manual show snoozes the episode).
@@ -91,6 +101,8 @@ struct PresenceDebug {
     fs_raw: bool,
     fs_settled: bool,
     user: &'static str,
+    /// Input duty over the working window, 0..1 (filled by the loop).
+    work_duty: f32,
 }
 
 pub struct Presence {
@@ -302,6 +314,7 @@ fn sample(widget_hwnd: Option<HWND>, own_pid: u32) -> Option<PresenceDebug> {
             fs_raw,
             fs_settled: false, // filled by the loop after hysteresis
             user: "",          // filled by the loop
+            work_duty: 0.0,    // filled by the loop
         })
     }
 }
@@ -317,6 +330,12 @@ pub fn spawn(app: AppHandle) {
         // Consecutive milliseconds the raw verdict has disagreed with the
         // settled one; flips the settled state once past the threshold.
         let mut disagree_ms: u64 = 0;
+        // Working-detection ring: one bool per second — did that second see
+        // fresh input? Holds (doesn't advance) across secure-desktop gaps,
+        // like every other derived state.
+        let mut work_ring = [false; WORK_WINDOW_S];
+        let mut work_i: usize = 0;
+        let mut work_filled: usize = 0;
         loop {
             let widget_hwnd = app
                 .get_webview_window("main")
@@ -352,7 +371,20 @@ pub fn spawn(app: AppHandle) {
                 disagree_ms = 0;
             }
 
-            let user = if dbg.idle_s >= AWAY_AFTER_S { "away" } else { "active" };
+            work_ring[work_i] = dbg.idle_s <= 1;
+            work_i = (work_i + 1) % WORK_WINDOW_S;
+            work_filled = (work_filled + 1).min(WORK_WINDOW_S);
+            let duty =
+                work_ring.iter().filter(|b| **b).count() as f32 / WORK_WINDOW_S as f32;
+            let working = work_filled == WORK_WINDOW_S && duty >= WORK_DUTY;
+
+            let user = if dbg.idle_s >= AWAY_AFTER_S {
+                "away"
+            } else if working {
+                "working"
+            } else {
+                "active"
+            };
 
             // P1 — courtesy conceal, the engine's only action: settled
             // fullscreen (companion on) hides the native window; episode end
@@ -405,6 +437,7 @@ pub fn spawn(app: AppHandle) {
             if presence.debug.load(Ordering::Relaxed) {
                 dbg.fs_settled = fs_settled;
                 dbg.user = user;
+                dbg.work_duty = duty;
                 let _ = app.emit("presence-debug", &dbg);
             }
 

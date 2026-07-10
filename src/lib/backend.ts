@@ -185,13 +185,17 @@ export function onCursorLeft(cb: () => void): () => void {
   };
 }
 
-/** `?fs` / `?away` seed the browser mock's presence state so presence-driven
- * UI (P1+ behaviors, the dev overlay) is preview-iterable without a live
- * fullscreen app or a real idle wait. */
+/** `?fs` / `?away` / `?working` seed the browser mock's presence state so
+ * presence-driven UI (P1+ behaviors, the dev overlay) is preview-iterable
+ * without a live fullscreen app, a real idle wait, or 2 minutes of typing. */
 const MOCK_PRESENCE: PresenceState = !IN_TAURI
   ? {
       fullscreen: new URLSearchParams(window.location.search).has("fs"),
-      user: new URLSearchParams(window.location.search).has("away") ? "away" : "active",
+      user: new URLSearchParams(window.location.search).has("away")
+        ? "away"
+        : new URLSearchParams(window.location.search).has("working")
+          ? "working"
+          : "active",
       // Mirror the real engine: settled fullscreen ⇒ concealed (P1), so
       // ?away&fs correctly exercises "conceal beats ambient" in preview —
       // a mock that leaves this false would green-light a regression of
@@ -259,6 +263,7 @@ export function onPresenceDebug(cb: (d: PresenceDebug) => void): () => void {
       fs_raw: MOCK_PRESENCE.fullscreen,
       fs_settled: MOCK_PRESENCE.fullscreen,
       user: MOCK_PRESENCE.user,
+      work_duty: MOCK_PRESENCE.user === "working" ? 0.8 : 0.1,
     });
   }, 1000);
   return () => window.clearInterval(id);
