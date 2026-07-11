@@ -104,7 +104,14 @@ src-tauri/src/
                 pending fed item keeps it armed and fires one reconcile
                 read (still queued at Spotify → keep waiting; consumed
                 where Pulse couldn't see → drop + unmark, feeder moves on)
-                — the fed marker never floats free of ground truth. Fed-pop
+                — the fed marker never floats free of ground truth. A next
+                pressed IN PULSE (transport / Ctrl+Alt+N) is QUEUE-AWARE:
+                upnext::try_queue_skip runs the play_now jump on the front
+                (falling back to plain GSMTC next when it can't act), so a
+                mid-song skip lands on the queued item instead of the
+                playlist — the one transition feed-late missed; the
+                "spotify-jump" event arms the pill's announcement
+                suppression for it. Fed-pop
                 bookkeeping and HISTORY ingestion both suspend while a
                 play_now jump flickers through intermediates. Honest limits
                 (matrix finding 11): chain holds only while Pulse runs +
@@ -202,7 +209,7 @@ Design rule: chrome stays neutral (house semantic tokens); the album-art palette
 
 - `Ctrl+Alt+K` play/pause (Space variant was taken system-wide on this machine)
 - `Ctrl+Alt+←/→` seek ∓10s (current session; the hotkey always fires the SMTC call — Apple Music silently ignores it, only the UI buttons are capability-gated)
-- `Ctrl+Alt+N/P` next/previous track
+- `Ctrl+Alt+N/P` next/previous track (next is queue-aware: lands on the up-next front when one exists)
 - `Ctrl+Alt+M` show/hide the widget
 
 Commands route to the OS "current" media session, which Windows re-points to

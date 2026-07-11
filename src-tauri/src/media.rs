@@ -536,6 +536,19 @@ fn playback_status(session: &Session) -> &'static str {
     playback_info(session).0
 }
 
+/// The CURRENT session's player bucket ("apple_music"|"spotify"|"other"|
+/// "none") — the queue-aware skip's cheap gate (one session read, no
+/// metadata marshal).
+pub fn current_player() -> &'static str {
+    match current_session() {
+        Some(s) => s
+            .SourceAppUserModelId()
+            .map(|h| player_kind(&h.to_string()))
+            .unwrap_or("other"),
+        None => "none",
+    }
+}
+
 /// Cheap heartbeat probe: (app_id, timeline Position + LastUpdatedTime ticks,
 /// status). The media loop skips the full snapshot (metadata marshal + art
 /// work + emit) when this hasn't moved since the previous tick. Position is

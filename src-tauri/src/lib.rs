@@ -53,6 +53,13 @@ async fn media_play_pause(app: AppHandle) -> bool {
 
 #[tauri::command]
 async fn media_next(app: AppHandle) -> bool {
+    // Queue-aware: a next pressed in Pulse lands on the up-next front when
+    // there is one (upnext::try_queue_skip) — the mid-song skip is the one
+    // transition the feed-late model missed. Falls through to the plain
+    // GSMTC skip otherwise.
+    if upnext::try_queue_skip(&app) {
+        return true;
+    }
     let ok = media::next();
     emit_now(&app);
     ok
@@ -161,7 +168,7 @@ struct Stamped {
 /// the position pipeline (ad-hoc emit_now callers included).
 struct LastEmit(Mutex<Option<media::NowPlaying>>);
 
-fn emit_now(app: &AppHandle) -> media::NowPlaying {
+pub(crate) fn emit_now(app: &AppHandle) -> media::NowPlaying {
     let cache = app.state::<ArtCache>();
     let last = app.state::<LastEmit>();
     // Snapshot INSIDE the lock: concurrent callers (media loop, commands,
@@ -655,9 +662,13 @@ pub fn run() {
                 (HK_SEEK_FWD, |_app| {
                     media::seek_rel_ms(SEEK_STEP_MS);
                 }),
+                // Queue-aware like the media_next command — same one gesture,
+                // same landing.
                 (HK_NEXT, |app| {
-                    media::next();
-                    emit_now(app);
+                    if !upnext::try_queue_skip(app) {
+                        media::next();
+                        emit_now(app);
+                    }
                 }),
                 (HK_PREV, |app| {
                     media::prev();

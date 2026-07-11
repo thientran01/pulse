@@ -159,6 +159,33 @@ function mockQueueTrack(t: { title: string; artist: string; album: string }) {
   };
 }
 
+const mockSpotifyJumpListeners = new Set<(t: { title: string; artist: string }) => void>();
+
+/** A backend-initiated jump's target (the queue-aware skip) — App arms the
+ * pill's announcement suppression with it, exactly like a frontend play-now. */
+export function onSpotifyJump(cb: (t: { title: string; artist: string }) => void): () => void {
+  if (IN_TAURI) {
+    const un = listen<{ title: string; artist: string }>("spotify-jump", (e) => cb(e.payload));
+    return () => {
+      un.then((f) => f());
+    };
+  }
+  mockSpotifyJumpListeners.add(cb);
+  return () => {
+    mockSpotifyJumpListeners.delete(cb);
+  };
+}
+
+/** The backend jump fell back to a plain skip — the armed suppression must
+ * clear so that legitimate track change announces. */
+export function onSpotifyJumpCancel(cb: () => void): () => void {
+  if (!IN_TAURI) return () => {}; // mock next never takes the fallback path
+  const un = listen("spotify-jump-cancel", () => cb());
+  return () => {
+    un.then((f) => f());
+  };
+}
+
 /** Connection state (OAuth tokens present) — seed + event pairing. */
 export function onSpotifyStatus(cb: (s: SpotifyStatus) => void): () => void {
   if (IN_TAURI) {
@@ -521,8 +548,24 @@ export const commands = {
     }
   },
   next(): void {
-    if (IN_TAURI) void invoke("media_next");
-    else mockSkip(1);
+    if (IN_TAURI) {
+      void invoke("media_next");
+      return;
+    }
+    // Queue-aware like the backend (upnext::try_queue_skip): with a
+    // connected session and a queued front that maps to a ring track, next
+    // lands ON it (mockJumpTo pops the matching front) instead of walking
+    // the ring — so the preview mirrors the real skip semantics.
+    const front = mockUpNext[0];
+    const ringIdx = front
+      ? MOCK_TRACKS.findIndex((t) => mockQueueTrack(t).uri === front.uri)
+      : -1;
+    if (mockSpotifyConnected && ringIdx !== -1) {
+      mockSpotifyJumpListeners.forEach((cb) => cb({ title: front.title, artist: front.artist }));
+      mockJumpTo(ringIdx);
+    } else {
+      mockSkip(1);
+    }
   },
   prev(): void {
     if (IN_TAURI) void invoke("media_prev");

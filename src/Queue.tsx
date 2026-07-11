@@ -160,10 +160,24 @@ export function isAnnounceSuppressed(np: Pick<NowPlaying, "title" | "artist"> | 
   return !(a.includes(b) || b.includes(a));
 }
 
-async function playTrackNow(t: { uri: string; title: string; artist: string }): Promise<string> {
+/** Arm the suppression window for a jump toward `t`. Exported for
+ * backend-initiated jumps (the queue-aware skip) — App wires the
+ * "spotify-jump" event to this so hotkey/transport skips suppress exactly
+ * like frontend-initiated play-now. */
+export function armSuppression(t: { title: string; artist: string }): void {
   suppression.until = Date.now() + 6000;
   suppression.title = t.title.trim().toLowerCase();
   suppression.artist = t.artist.trim().toLowerCase();
+}
+
+/** A backend jump armed suppression but fell back to a plain skip — that
+ * legitimate track change must announce ("spotify-jump-cancel"). */
+export function clearSuppression(): void {
+  suppression.until = 0;
+}
+
+async function playTrackNow(t: { uri: string; title: string; artist: string }): Promise<string> {
+  armSuppression(t);
   const result = await commands.playNow(t.uri);
   if (result !== "ok" && result !== "partial") {
     suppression.until = 0; // nothing landed — nothing to suppress

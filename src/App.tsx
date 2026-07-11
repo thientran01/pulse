@@ -12,6 +12,8 @@ import {
   onNowPlaying,
   onPresence,
   onPresenceDebug,
+  onSpotifyJump,
+  onSpotifyJumpCancel,
   type DockCorner,
 } from "./lib/backend";
 import { currentLineIndex, msUntilNextLine, parseLrc, VOCAL_LEAD_MS, type LyricLine } from "./lib/lrc";
@@ -20,6 +22,8 @@ import * as posClock from "./lib/posClock";
 import { initReactive } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
 import {
+  armSuppression,
+  clearSuppression,
   isAnnounceSuppressed,
   POPOVER_GAP,
   POPOVER_W,
@@ -1768,6 +1772,13 @@ function App() {
   const spotifyConnected = useSpotifyConnected();
   // Jump-intermediate suppression for the pill's announcement layer.
   const announceSuppressed = isAnnounceSuppressed(np);
+  // Backend-initiated jumps (the queue-aware skip: transport next /
+  // Ctrl+Alt+N landing on the up-next front) arm the same suppression the
+  // frontend's own play-now does — one announcement, on the target — and
+  // clear it when the backend fell back to a plain skip (that legitimate
+  // change must announce).
+  useEffect(() => onSpotifyJump(armSuppression), []);
+  useEffect(() => onSpotifyJumpCancel(clearSuppression), []);
 
   // Which work-area corner the window docks to (dock.rs owns the derivation;
   // bottom-right until it reports). ModeContent pins the content plane there.

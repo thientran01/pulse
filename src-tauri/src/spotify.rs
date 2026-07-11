@@ -803,7 +803,11 @@ fn jump(app: &AppHandle, target: &str) -> &'static str {
                 }
                 let q2 = queue_fresh(app);
                 if q2.status != "ok" {
-                    return "diverged";
+                    // Nothing has been skipped yet — "gone" keeps this in
+                    // the pre-skip class (callers may safely fall back to a
+                    // plain next; "diverged" is reserved for skips-happened-
+                    // landing-unverified).
+                    return "gone";
                 }
                 let Some(k) = q2.queue.iter().position(|t| t.uri == target) else {
                     return "gone";
@@ -813,11 +817,15 @@ fn jump(app: &AppHandle, target: &str) -> &'static str {
         };
 
     // 2. Skip to it. A failure midway leaves playback partway — re-queue
-    // what was already consumed (best effort) and report.
+    // what was already consumed (best effort) and report "diverged": skips
+    // happened but the target's arrival is unconfirmed. ("partial" is
+    // reserved for a VERIFIED landing whose re-queue was incomplete —
+    // callers pop the queue front on it, so it must imply the target
+    // actually played; quick-review catch, 2026-07-11.)
     for i in 0..skips {
         if next_track(app).is_err() {
             requeue(app, &skipped[..i.min(skipped.len())]);
-            return "partial";
+            return "diverged";
         }
         std::thread::sleep(Duration::from_millis(150));
     }
