@@ -3,6 +3,8 @@ import { AnimatePresence, motion, useIsPresent, useReducedMotion } from "motion/
 import type { MorphName } from "./icons/geometry";
 import { MorphIcon } from "./icons/MorphIcon";
 import { useSeekTick } from "./icons/useSeekTick";
+import { useSkipFlick } from "./icons/useSkipFlick";
+import { useBracketPulse } from "./icons/useBracketPulse";
 import {
   commands,
   onCursorLeft,
@@ -648,6 +650,7 @@ function ModeButton({
   onClick: () => void;
 }) {
   const reducedMotion = useReducedMotion();
+  const { scope, pulse } = useBracketPulse(to);
   return (
     <motion.button
       type="button"
@@ -675,14 +678,23 @@ function ModeButton({
       aria-label={label}
       title={label}
       aria-disabled={disabled || undefined}
-      onClick={() => {
-        if (!disabled) onClick();
+      // Pulse on pointerdown like every optimistic press response
+      // (play/pause morph, seek spin); the mode change itself stays on click.
+      onPointerDown={(e) => {
+        if (e.button === 0 && !disabled) pulse();
+      }}
+      onClick={(e) => {
+        if (disabled) return;
+        if (e.detail === 0) pulse(); // keyboard never fires pointerdown
+        onClick();
       }}
       className={`grid h-7 w-7 place-items-center rounded-md transition-colors duration-2 ease-out-tk ${
         disabled ? "pointer-events-none text-muted" : "text-fg hover:bg-fg/10"
       }`}
     >
-      <MorphIcon name={to} size={13} slot={slot} dur={DUR[3]} ease={EASE.inOut} />
+      <span ref={scope} className="grid place-items-center will-change-transform">
+        <MorphIcon name={to} size={13} slot={slot} dur={DUR[3]} ease={EASE.inOut} />
+      </span>
     </motion.button>
   );
 }
@@ -1178,6 +1190,39 @@ function Art({ url, size, radiusPx }: { url: string | null; size: number; radius
   );
 }
 
+/** Prev/next with the pass-through flick (useSkipFlick): a masked strip of
+ * three glyph copies — the live one plus ghosts parked at ±width, which the
+ * hook's wrap-on-mash frame-identity depends on. The mask is the glyph's own
+ * 16px box, so the wipe happens inside the button and never brushes the
+ * neighboring seek button. */
+function SkipButton({ dir, size }: { dir: -1 | 1; size?: "xs" | "sm" | "md" }) {
+  const { scope, tick } = useSkipFlick(dir, 16);
+  const glyph = dir < 0 ? "prev" : "next";
+  return (
+    <IconButton
+      size={size}
+      label={dir < 0 ? "Previous track" : "Next track"}
+      onPointerDown={(e) => e.button === 0 && void tick()}
+      onClick={(e) => {
+        if (e.detail === 0) void tick(); // keyboard gets the flick too
+        (dir < 0 ? commands.prev : commands.next)();
+      }}
+    >
+      <span className="grid h-4 w-4 place-items-center overflow-hidden">
+        <span ref={scope} className="relative grid place-items-center will-change-transform">
+          <MorphIcon name={glyph} size={16} />
+          <span aria-hidden className="absolute right-full top-0 grid">
+            <MorphIcon name={glyph} size={16} />
+          </span>
+          <span aria-hidden className="absolute left-full top-0 grid">
+            <MorphIcon name={glyph} size={16} />
+          </span>
+        </span>
+      </span>
+    </IconButton>
+  );
+}
+
 /** compact = the card's bottom row: 24px buttons on an 8px gap. Expanded
  * keeps the 32px/4px transport — both center in a full-width bottom row. */
 function Transport({
@@ -1194,15 +1239,11 @@ function Transport({
   const size = compact ? "xs" : "md";
   return (
     <div className={`flex items-center ${compact ? "gap-2" : "gap-1"}`}>
-      <IconButton size={size} label="Previous track" onClick={commands.prev}>
-        <MorphIcon name="prev" size={16} />
-      </IconButton>
+      <SkipButton size={size} dir={-1} />
       <SeekButton size={size} dir={-1} seekable={seekable} player={np.player} />
       <PlayPauseButton size={size} playing={playing} />
       <SeekButton size={size} dir={1} seekable={seekable} player={np.player} />
-      <IconButton size={size} label="Next track" onClick={commands.next}>
-        <MorphIcon name="next" size={16} />
-      </IconButton>
+      <SkipButton size={size} dir={1} />
     </div>
   );
 }

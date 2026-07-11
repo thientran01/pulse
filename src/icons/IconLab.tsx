@@ -11,6 +11,8 @@ import { ICONS, type MorphName } from "./geometry";
 import { MorphIcon } from "./MorphIcon";
 import { PlayerMark, type PlayerId } from "./badges";
 import { useSeekTick } from "./useSeekTick";
+import { useSkipFlick } from "./useSkipFlick";
+import { useBracketPulse } from "./useBracketPulse";
 
 const NAMES = Object.keys(ICONS) as MorphName[];
 const SIZES = [13, 16, 18, 22, 48] as const;
@@ -107,6 +109,49 @@ function SeekDemo({ dir }: { dir: -1 | 1 }) {
   );
 }
 
+/** App's SkipButton strip, verbatim: masked 16px box, live glyph + ghosts at
+ * ±width (the hook's wrap-on-mash frame-identity needs all three). */
+function SkipDemo({ dir }: { dir: -1 | 1 }) {
+  const { scope, tick } = useSkipFlick(dir, 16);
+  const glyph = dir < 0 ? "prev" : "next";
+  return (
+    <button
+      type="button"
+      aria-label={dir < 0 ? "Skip flick back" : "Skip flick forward"}
+      onPointerDown={() => void tick()}
+      className="grid h-8 w-8 place-items-center rounded-md text-fg transition-colors duration-2 ease-out-tk hover:bg-fg/10"
+    >
+      <span className="grid h-4 w-4 place-items-center overflow-hidden">
+        <span ref={scope} className="relative grid place-items-center will-change-transform">
+          <MorphIcon name={glyph} size={16} />
+          <span aria-hidden className="absolute right-full top-0 grid">
+            <MorphIcon name={glyph} size={16} />
+          </span>
+          <span aria-hidden className="absolute left-full top-0 grid">
+            <MorphIcon name={glyph} size={16} />
+          </span>
+        </span>
+      </span>
+    </button>
+  );
+}
+
+function BracketPulseDemo({ verb }: { verb: "expand" | "contract" }) {
+  const { scope, pulse } = useBracketPulse(verb);
+  return (
+    <button
+      type="button"
+      aria-label={verb === "expand" ? "Expand pulse" : "Contract pulse"}
+      onPointerDown={pulse}
+      className="grid h-7 w-7 place-items-center rounded-md text-fg transition-colors duration-2 ease-out-tk hover:bg-fg/10 active:scale-95"
+    >
+      <span ref={scope} className="grid place-items-center will-change-transform">
+        <MorphIcon name={verb} size={13} />
+      </span>
+    </button>
+  );
+}
+
 /** Mock of App's mode ladder: same key={mode} remount, same layoutId slots,
  * same destination-named buttons — verifies the glide + cross-remount glyph
  * morph without a Tauri window. */
@@ -173,6 +218,18 @@ export function IconLab() {
           <div className="flex items-center gap-1">
             <SeekDemo dir={-1} />
             <SeekDemo dir={1} />
+          </div>
+        </Section>
+        <Section title="Skip flick — pass-through travel, mash re-launches mid-stream">
+          <div className="flex items-center gap-1">
+            <SkipDemo dir={-1} />
+            <SkipDemo dir={1} />
+          </div>
+        </Section>
+        <Section title="Bracket pulse — expand bursts apart, contract pulls together">
+          <div className="flex items-center gap-1">
+            <BracketPulseDemo verb="contract" />
+            <BracketPulseDemo verb="expand" />
           </div>
         </Section>
         <Section title="Mode ladder — destination-named buttons, layoutId glide + slot morph">
