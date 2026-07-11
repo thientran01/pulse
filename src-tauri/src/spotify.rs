@@ -694,6 +694,10 @@ pub(crate) fn queue_fresh(app: &AppHandle) -> QueueResult {
     queue_impl(app, false)
 }
 
+/// `use_cache: false` (the jump's reads) neither reads NOR writes the shared
+/// cache and skips enrichment: mid-jump snapshots reflect transient
+/// skipped-through tracks — caching one would poison what the UI shows for
+/// up to 5s, and enriching from one could stamp a wrong uri.
 fn queue_impl(app: &AppHandle, use_cache: bool) -> QueueResult {
     if use_cache {
         let auth = app.state::<SpotifyAuth>();
@@ -723,18 +727,20 @@ fn queue_impl(app: &AppHandle, use_cache: bool) -> QueueResult {
     // Cache ok/no_playback (real answers); transient failures retry freely.
     // Guarded on tokens still existing so a concurrent disconnect's cache
     // clear can't be repopulated by this in-flight read.
-    if result.status == "ok" || result.status == "no_playback" {
-        let auth = app.state::<SpotifyAuth>();
-        let mut inner = lock(&auth);
-        if inner.tokens.is_some() {
-            inner.queue_cache = Some((unix_ms(), result.clone()));
+    if use_cache {
+        if result.status == "ok" || result.status == "no_playback" {
+            let auth = app.state::<SpotifyAuth>();
+            let mut inner = lock(&auth);
+            if inner.tokens.is_some() {
+                inner.queue_cache = Some((unix_ms(), result.clone()));
+            }
         }
-    }
-    // Opportunistic history enrichment: every successful read tells us the
-    // current track's uri — stamp it onto history's in-flight candidate so
-    // history rows can replay without a search round-trip.
-    if let Some(cp) = &result.currently_playing {
-        crate::history::enrich_uri(app, &cp.title, &cp.artist, &cp.uri);
+        // Opportunistic history enrichment: a settled read tells us the
+        // current track's uri — stamp it onto history's in-flight candidate
+        // so history rows can replay without a search round-trip.
+        if let Some(cp) = &result.currently_playing {
+            crate::history::enrich_uri(app, &cp.title, &cp.artist, &cp.uri);
+        }
     }
     result
 }
@@ -810,12 +816,12 @@ fn jump(app: &AppHandle, target: &str) -> &'static str {
 
     // 3. Verify the landing — never keep acting on an unconfirmed state
     // (matrix finding 3: never trust command bools; re-read).
-    let mut landed = false;
+    let mut landing: Option<QueueTrack> = None;
     for _ in 0..4 {
         std::thread::sleep(Duration::from_millis(300));
         let v = queue_fresh(app);
         if v.currently_playing.as_ref().is_some_and(|t| t.uri == target) {
-            landed = true;
+            landing = v.currently_playing;
             break;
         }
     }
@@ -825,9 +831,12 @@ fn jump(app: &AppHandle, target: &str) -> &'static str {
     // plays right after the target (upnext's fed marker stays armed; its
     // tick suspends fed-pop bookkeeping while jump_in_flight is set).
     let requeued_ok = requeue(app, &skipped);
-    if !landed {
+    let Some(t) = landing else {
         return "diverged"; // concurrent user action — stopped, not forced
-    }
+    };
+    // The verified landing is trustworthy — enrich here (mid-jump reads
+    // deliberately don't).
+    crate::history::enrich_uri(app, &t.title, &t.artist, &t.uri);
     if !requeued_ok {
         return "partial";
     }

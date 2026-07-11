@@ -32,6 +32,11 @@ use tauri::{AppHandle, Emitter, Manager, State};
 const FEED_REMAINING_MS: i64 = 15_000;
 /// Minimum gap between feed attempts (throttles offline retries).
 const FEED_RETRY_MS: i64 = 5_000;
+/// Same-key replay detection (history.rs's rule): a raw position back under
+/// this after passing the bar means the track started over — repeat-one, or
+/// a re-queued copy of the currently-playing track beginning to play.
+const RESTART_NEAR_START_MS: i64 = 10_000;
+const RESTART_MIN_PROGRESS_MS: i64 = 30_000;
 
 #[derive(Serialize, Deserialize, Default)]
 struct Persisted {
@@ -48,6 +53,8 @@ pub struct UpNext {
     /// One feed HTTP call at a time (fired from the media loop, runs on the
     /// blocking pool — the loop itself must never block on network).
     feed_in_flight: AtomicBool,
+    /// One fed-marker reconcile read at a time (see request_reconcile).
+    reconcile_in_flight: AtomicBool,
 }
 
 #[derive(Default)]
@@ -60,6 +67,8 @@ struct Inner {
     /// Identity key of the last observed track — change detection. A session
     /// vanish does NOT clear it (AM-style stop/resume is not a track change).
     last_track: Option<String>,
+    /// Last raw position of the observed track — same-key replay detection.
+    last_raw_pos_ms: i64,
 }
 
 fn unix_ms() -> i64 {
@@ -122,60 +131,104 @@ fn matches_track(np: &NowPlaying, t: &QueueTrack) -> bool {
     !a.is_empty() && !b.is_empty() && (a.contains(&b) || b.contains(&a))
 }
 
+/// Pop the fed item (it played) — caller holds the lock via &mut Inner.
+/// Returns the list for emitting.
+fn pop_fed(inner: &mut Inner, fed_uri: &str) -> Vec<QueueTrack> {
+    if let Some(i) = inner.list.iter().position(|t| t.uri == fed_uri) {
+        inner.list.remove(i);
+    }
+    inner.fed = None;
+    persist(inner);
+    inner.list.clone()
+}
+
 /// One media-loop observation. Handles track-change bookkeeping (pop a fed
 /// item that just started playing) and fires the feeder when the current
 /// track nears its end.
 pub fn tick(app: &AppHandle, np: &NowPlaying) {
     let upnext = app.state::<UpNext>();
+    let jump_active = spotify::jump_active(app);
 
     // Track-change bookkeeping. While a play_now jump is skipping through
-    // the queue, intermediate tracks flicker as "playing" for ~150ms each —
-    // the fed item among them must NOT be popped as played; the jump
-    // re-queues everything it skipped over.
+    // the queue, intermediate tracks flicker as "playing" — the fed item
+    // among them must NOT be popped as played (the jump re-queues everything
+    // it skipped over); a change that slips through the window self-heals
+    // via the reconcile read on the next genuine change.
     if np.player != "none" && np.status != "none" {
-        let jump_active = spotify::jump_active(app);
         let key = media::ident_key(&np.app_id, &np.title, &np.artist);
-        let popped = {
+        let (popped, want_reconcile) = {
             let mut inner = lock(&upnext);
-            if inner.last_track.as_deref() == Some(key.as_str()) {
-                None
+            let same = inner.last_track.as_deref() == Some(key.as_str());
+            // Same-key replay (repeat-one, or a re-queued copy of the
+            // currently-playing track starting): raw position back near 0
+            // after having passed the bar. Uses history.rs's rule.
+            let bar = RESTART_MIN_PROGRESS_MS.max(np.duration_ms * 6 / 10);
+            let restarted = same
+                && np.position_at_ms > 0
+                && np.position_ms < RESTART_NEAR_START_MS
+                && inner.last_raw_pos_ms > bar;
+            if np.position_at_ms > 0 || !same {
+                inner.last_raw_pos_ms = if np.position_at_ms > 0 { np.position_ms } else { 0 };
+            }
+            if same && !restarted {
+                (None, false)
             } else if jump_active {
                 inner.last_track = Some(key);
-                None
+                (None, false)
+            } else if restarted {
+                // Repeat-one restarting an UNRELATED track keeps the fed
+                // item armed (it's still waiting in Spotify's queue — a
+                // re-feed would duplicate it). A restart that IS the fed
+                // item means its queued copy just started: pop it.
+                match inner.fed.clone() {
+                    Some(fed_uri)
+                        if inner
+                            .list
+                            .iter()
+                            .find(|t| t.uri == fed_uri)
+                            .is_some_and(|t| matches_track(np, t)) =>
+                    {
+                        (Some(pop_fed(&mut inner, &fed_uri)), false)
+                    }
+                    _ => (None, false),
+                }
             } else {
                 inner.last_track = Some(key);
-                match inner.fed.take() {
-                    Some(fed_uri) => {
-                        let fed_idx = inner.list.iter().position(|t| t.uri == fed_uri);
-                        match fed_idx {
-                            // The fed item started playing — it left Spotify's
-                            // queue and leaves Pulse's list. A change to any
-                            // OTHER track (user skipped in the Spotify app,
-                            // radio jump) just unmarks: the item is still in
-                            // Spotify's queue and will surface eventually,
-                            // but Pulse no longer counts on it.
-                            Some(i) if matches_track(np, &inner.list[i]) => {
-                                inner.list.remove(i);
-                                persist(&inner);
-                                Some(inner.list.clone())
-                            }
-                            _ => {
-                                persist(&inner);
-                                None
-                            }
-                        }
+                match inner.fed.clone() {
+                    // The fed item started playing — it left Spotify's queue
+                    // and leaves Pulse's list.
+                    Some(fed_uri)
+                        if inner
+                            .list
+                            .iter()
+                            .find(|t| t.uri == fed_uri)
+                            .is_some_and(|t| matches_track(np, t)) =>
+                    {
+                        (Some(pop_fed(&mut inner, &fed_uri)), false)
                     }
-                    None => None,
+                    // A change to some OTHER track while a fed item is
+                    // pending: it usually just means the user jumped around
+                    // and the fed item still waits in Spotify's queue (keep
+                    // it armed — unmarking would re-feed a duplicate). But
+                    // it can also mean the fed item was CONSUMED where we
+                    // couldn't see (in-app skip, app downtime) and will
+                    // never pop by playing — ask Spotify which it is.
+                    Some(_) => (None, true),
+                    None => (None, false),
                 }
             }
         };
         if let Some(list) = popped {
             emit_list(app, &list);
         }
+        if want_reconcile {
+            request_reconcile(app);
+        }
     }
 
-    // Feeder.
-    if np.player != "spotify" || np.status != "playing" {
+    // Feeder. Never while a jump is rewriting the queue (two writers to one
+    // external resource), and never twice for the same front (fed marker).
+    if jump_active || np.player != "spotify" || np.status != "playing" {
         return;
     }
     if np.duration_ms <= 0 || np.position_at_ms <= 0 {
@@ -216,11 +269,67 @@ pub fn tick(app: &AppHandle, np: &NowPlaying) {
         let upnext = app.state::<UpNext>();
         if ok {
             let mut inner = lock(&upnext);
-            inner.fed = Some(front.uri);
-            persist(&inner);
+            // The list may have mutated during the HTTP round-trip. Only arm
+            // the marker if the fed track is still the front — otherwise the
+            // POSTed copy is the documented one-track leak and must not
+            // block feeding the REAL front.
+            if inner.list.first().is_some_and(|t| t.uri == front.uri) {
+                inner.fed = Some(front.uri);
+                persist(&inner);
+            } else {
+                eprintln!("upnext: front changed mid-feed — {} leaked to Spotify's queue", front.uri);
+            }
         }
         upnext.feed_in_flight.store(false, Ordering::SeqCst);
     });
+}
+
+/// A track change bypassed a pending fed item — find out (off-thread, one at
+/// a time) whether it still waits in Spotify's queue or was consumed where
+/// Pulse couldn't see (in-app skip, downtime between sessions). Consumed →
+/// it will never pop by playing: drop it and unmark so the feeder moves on.
+/// This read is the reconciliation for the fed marker (derived state must
+/// not float free of the ground truth forever).
+fn request_reconcile(app: &AppHandle) {
+    let upnext = app.state::<UpNext>();
+    if !spotify::connected(app) {
+        return;
+    }
+    if upnext
+        .reconcile_in_flight
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        reconcile_fed(&app);
+        app.state::<UpNext>().reconcile_in_flight.store(false, Ordering::SeqCst);
+    });
+}
+
+fn reconcile_fed(app: &AppHandle) {
+    let upnext = app.state::<UpNext>();
+    let Some(fed_uri) = lock(&upnext).fed.clone() else { return };
+    let q = spotify::queue_fresh(app);
+    if q.status != "ok" {
+        return; // can't tell right now — keep waiting, a later change retries
+    }
+    let still_there = q.queue.iter().any(|t| t.uri == fed_uri)
+        || q.currently_playing.as_ref().is_some_and(|t| t.uri == fed_uri);
+    if still_there {
+        return;
+    }
+    let list = {
+        let mut inner = lock(&upnext);
+        // Re-check under the lock — the marker may have resolved meanwhile.
+        if inner.fed.as_deref() != Some(fed_uri.as_str()) {
+            return;
+        }
+        pop_fed(&mut inner, &fed_uri)
+    };
+    emit_list(app, &list);
 }
 
 /// Run a mutation, persist, emit. Everything the UI does routes through here.

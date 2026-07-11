@@ -732,7 +732,14 @@ pub fn run() {
                         let probing = media::art_probing(&handle.state::<ArtCache>());
                         let p = if std::mem::take(&mut force_snapshot) || probing || tick != last_tick {
                             let np = emit_now(&handle);
-                            history::ingest(&handle, &np);
+                            // A play_now jump flickers intermediate tracks as
+                            // "playing" (and a slow skip can hold one past the
+                            // 1s history floor) — those are navigation, not
+                            // listening. upnext::tick still runs: it owns the
+                            // jump-aware bookkeeping.
+                            if !spotify::jump_active(&handle) {
+                                history::ingest(&handle, &np);
+                            }
                             upnext::tick(&handle, &np);
                             np.status == "playing"
                         } else {
@@ -745,7 +752,9 @@ pub fn run() {
                         if hidden_beats >= HISTORY_PROBE_BEATS {
                             hidden_beats = 0;
                             let np = media::history_probe();
-                            history::ingest(&handle, &np);
+                            if !spotify::jump_active(&handle) {
+                                history::ingest(&handle, &np);
+                            }
                             upnext::tick(&handle, &np);
                         }
                         false
