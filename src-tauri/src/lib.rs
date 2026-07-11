@@ -281,41 +281,11 @@ fn save_companion(app: &AppHandle, on: bool) {
     }
 }
 
-/// The tray's Spotify item, kept reachable so BOTH connect paths (tray click
-/// and the spotify_connect command) narrate onto the same label — the label
-/// text doubles as the connection state ("Connect Spotify" ⇄ "Disconnect
-/// Spotify", with progress strings in between).
-#[derive(Default)]
-struct SpotifyMenuItem(Mutex<Option<tauri::menu::MenuItem<tauri::Wry>>>);
-
-/// Narration closure for spotify::start_connect — dynamic strings, so it
-/// can't ride set_menu_label's &'static str.
-fn spotify_narrator(
-    item: Option<tauri::menu::MenuItem<tauri::Wry>>,
-) -> impl Fn(&AppHandle, &str) + Send + 'static {
-    move |app, text| {
-        let Some(item) = item.clone() else { return };
-        let text = text.to_string();
-        let _ = app.run_on_main_thread(move || {
-            let _ = item.set_text(text);
-        });
-    }
-}
-
-fn spotify_menu_item(app: &AppHandle) -> Option<tauri::menu::MenuItem<tauri::Wry>> {
-    app.state::<SpotifyMenuItem>()
-        .0
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
-}
-
 /// Frontend-initiated connect (the queue UI's gate state, PR 4) — same flow
-/// and narration as the tray click.
+/// and tray narration as the tray click (spotify.rs holds the narrator).
 #[tauri::command]
 async fn spotify_connect(app: AppHandle) {
-    let item = spotify_menu_item(&app);
-    spotify::start_connect(&app.clone(), spotify_narrator(item));
+    spotify::start_connect(&app);
 }
 
 /// Push a label/enabled change to a tray menu item from any thread — menu
@@ -465,7 +435,6 @@ pub fn run() {
         .manage(LastEmit(Mutex::new(None)))
         .manage(history::Tracker::default())
         .manage(spotify::SpotifyAuth::default())
-        .manage(SpotifyMenuItem::default())
         .manage(UiReactive(Arc::new(AtomicBool::new(true))))
         .manage(dock::Dock::default())
         .manage(presence::Presence::default())
@@ -534,7 +503,9 @@ pub fn run() {
                 None::<&str>,
             )?;
             // Spotify Web API connection (spotify.rs) — the label doubles as
-            // the state; loaded tokens flip it to Disconnect at launch.
+            // the state; loaded tokens flip it to Disconnect at launch. The
+            // narrator lives in spotify.rs so EVERY state change re-syncs
+            // the label (background invalid_grant included), not just clicks.
             spotify::init(app.handle());
             let spotify_label = if spotify::connected(app.handle()) {
                 "Disconnect Spotify"
@@ -543,10 +514,16 @@ pub fn run() {
             };
             let spotify_item =
                 MenuItem::with_id(app, "spotify", spotify_label, true, None::<&str>)?;
-            *app.state::<SpotifyMenuItem>()
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(spotify_item.clone());
+            {
+                let item = spotify_item.clone();
+                spotify::set_narrator(app.handle(), move |app, text| {
+                    let item = item.clone();
+                    let text = text.to_string();
+                    let _ = app.run_on_main_thread(move || {
+                        let _ = item.set_text(text);
+                    });
+                });
+            }
             let update_check =
                 MenuItem::with_id(app, "update", "Check for updates", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Pulse", true, None::<&str>)?;
@@ -620,11 +597,8 @@ pub fn run() {
                     "spotify" => {
                         if spotify::connected(app) {
                             spotify::disconnect(app);
-                            let item = spotify_menu_item(app);
-                            spotify_narrator(item)(app, "Connect Spotify");
                         } else {
-                            let item = spotify_menu_item(app);
-                            spotify::start_connect(app, spotify_narrator(item));
+                            spotify::start_connect(app);
                         }
                     }
                     #[cfg(debug_assertions)]

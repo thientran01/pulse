@@ -125,7 +125,8 @@ if (!IN_TAURI) {
 /** `?spotify=off` forces the disconnected gate state in preview; the mock is
  * otherwise connected so the queue surface is iterable at plain `/`.
  * `?queue=empty` forces the no_playback answer. */
-const SPOTIFY_OFF = !IN_TAURI && new URLSearchParams(window.location.search).has("spotify");
+const SPOTIFY_OFF =
+  !IN_TAURI && new URLSearchParams(window.location.search).get("spotify") === "off";
 const QUEUE_EMPTY =
   !IN_TAURI && new URLSearchParams(window.location.search).get("queue") === "empty";
 

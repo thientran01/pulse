@@ -8,6 +8,13 @@
 //! settings.json, which is a whole-file clobber write. Plaintext on disk is
 //! the standard desktop-app tradeoff: the file is user-profile-scoped and
 //! holds a refresh token limited to this app's scopes.
+//!
+//! Token-destruction policy (quick-review hardening, 2026-07-10): tokens are
+//! cleared ONLY on evidence the session itself is dead — a 400-class answer
+//! from the token endpoint (invalid_grant/invalid_client), or a fresh
+//! access token still answering 401. Transport failures, 5xx, and 403s
+//! (which Spotify also serves for non-scope reasons, e.g. Premium-required)
+//! never destroy a session a re-consent couldn't improve.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
@@ -33,8 +40,7 @@ const SPOTIFY_CLIENT_ID: &str = "";
 const REDIRECT_PORT: u16 = 43117;
 /// read = queue/currently-playing; modify = add-to-queue/skip (play-now and
 /// the up-next feeder, PR 3+) — requested up front so PR 3 needs no
-/// re-consent. A 403 insufficient-scope (tokens from an older consent) is
-/// treated as disconnected so the tray prompts a reconnect.
+/// re-consent.
 const SCOPES: &str = "user-read-playback-state user-modify-playback-state";
 const UA: &str = "Pulse/0.1 (https://github.com/thientran01/pulse)";
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -57,11 +63,23 @@ struct Tokens {
     scope: String,
 }
 
+type Narrator = Box<dyn Fn(&AppHandle, &str) + Send + Sync + 'static>;
+
 #[derive(Default)]
 pub struct SpotifyAuth {
     inner: Mutex<Inner>,
     /// One consent flow at a time (double tray click, launch races).
     connect_in_flight: AtomicBool,
+    /// Single-flight for token refreshes: two callers sharing one stale
+    /// refresh token would otherwise race the rotation — the loser's
+    /// invalid_grant could clear the winner's just-saved valid tokens.
+    /// NEVER held at the same time as `inner` (gate first, inner inside).
+    refresh_gate: Mutex<()>,
+    /// Tray-label narration, registered by lib.rs at setup. Kept here so
+    /// EVERY connection-state change narrates — including backend-triggered
+    /// clears (invalid_grant, dead session) and frontend disconnects, not
+    /// just tray clicks. The label doubles as the connection state.
+    narrator: Mutex<Option<Narrator>>,
 }
 
 #[derive(Default)]
@@ -136,14 +154,33 @@ pub fn init(app: &AppHandle) {
     inner.tokens = tokens;
 }
 
+/// Register the tray-label narrator (lib.rs setup, capturing the menu item).
+pub fn set_narrator(app: &AppHandle, f: impl Fn(&AppHandle, &str) + Send + Sync + 'static) {
+    let auth = app.state::<SpotifyAuth>();
+    *auth.narrator.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(f));
+}
+
+fn narrate(app: &AppHandle, text: &str) {
+    let auth = app.state::<SpotifyAuth>();
+    let narrator = auth.narrator.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(f) = narrator.as_ref() {
+        f(app, text);
+    }
+}
+
 pub fn connected(app: &AppHandle) -> bool {
     let auth = app.state::<SpotifyAuth>();
     let inner = lock(&auth);
     inner.tokens.is_some()
 }
 
+/// Emit the connection state AND re-sync the tray label to it — the label is
+/// derived state and every transition flows through here (tray, frontend
+/// command, background invalid_grant), so it can never go stale.
 fn emit_status(app: &AppHandle) {
-    let _ = app.emit("spotify-status", SpotifyStatus { connected: connected(app) });
+    let connected = connected(app);
+    let _ = app.emit("spotify-status", SpotifyStatus { connected });
+    narrate(app, if connected { "Disconnect Spotify" } else { "Connect Spotify" });
 }
 
 fn save_tokens(inner: &Inner) {
@@ -156,7 +193,7 @@ fn save_tokens(inner: &Inner) {
     }
 }
 
-/// Drop tokens + file; the caller emits status / narrates the tray.
+/// Drop tokens + file; callers follow with emit_status.
 fn clear_tokens(app: &AppHandle) {
     let auth = app.state::<SpotifyAuth>();
     let mut inner = lock(&auth);
@@ -165,6 +202,12 @@ fn clear_tokens(app: &AppHandle) {
     }
     inner.tokens = None;
     inner.queue_cache = None;
+}
+
+/// Shared by the command and the tray click.
+pub fn disconnect(app: &AppHandle) {
+    clear_tokens(app);
+    emit_status(app);
 }
 
 // ---- PKCE consent flow ----
@@ -189,9 +232,46 @@ fn urlenc(s: &str) -> String {
     out
 }
 
-/// Start the consent flow on its own thread; narration lands on the tray
-/// item via the provided callback. No-op when a flow is already running.
-pub fn start_connect(app: &AppHandle, narrate: impl Fn(&AppHandle, &str) + Send + 'static) {
+/// Percent-decode a query component (the authorization code is opaque server
+/// data with no charset guarantee — using it raw would double-encode any
+/// escaped byte in the token exchange).
+fn urldec(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3])
+                    .ok()
+                    .and_then(|h| u8::from_str_radix(h, 16).ok());
+                match hex {
+                    Some(b) => {
+                        out.push(b);
+                        i += 3;
+                    }
+                    None => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Start the consent flow on its own thread; progress narrates on the tray
+/// label via the registered narrator. No-op when a flow is already running.
+pub fn start_connect(app: &AppHandle) {
     if SPOTIFY_CLIENT_ID.is_empty() {
         narrate(app, "Spotify setup needed (no client id)");
         return;
@@ -206,13 +286,10 @@ pub fn start_connect(app: &AppHandle, narrate: impl Fn(&AppHandle, &str) + Send 
     }
     let app = app.clone();
     std::thread::spawn(move || {
-        let outcome = run_consent(&app, &narrate);
+        let outcome = run_consent(&app);
         app.state::<SpotifyAuth>().connect_in_flight.store(false, Ordering::SeqCst);
         match outcome {
-            Ok(()) => {
-                emit_status(&app);
-                narrate(&app, "Disconnect Spotify");
-            }
+            Ok(()) => emit_status(&app),
             Err(msg) => {
                 eprintln!("spotify connect failed: {msg}");
                 narrate(&app, "Spotify connect failed — retry");
@@ -221,7 +298,7 @@ pub fn start_connect(app: &AppHandle, narrate: impl Fn(&AppHandle, &str) + Send 
     });
 }
 
-fn run_consent(app: &AppHandle, narrate: &impl Fn(&AppHandle, &str)) -> Result<(), String> {
+fn run_consent(app: &AppHandle) -> Result<(), String> {
     let verifier = b64url_random(64);
     let challenge = B64URL.encode(Sha256::digest(verifier.as_bytes()));
     let state = b64url_random(16);
@@ -256,19 +333,53 @@ fn run_consent(app: &AppHandle, narrate: &impl Fn(&AppHandle, &str)) -> Result<(
     Ok(())
 }
 
-/// One-shot loopback accept: poll until the redirect lands or the deadline
-/// passes. Returns the authorization code after verifying `state`.
+/// Read the request head (through the blank line) with a bounded loop — a
+/// single read() is not guaranteed to deliver the whole request line.
+fn read_request_head(stream: &mut std::net::TcpStream) -> String {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut buf = Vec::with_capacity(2048);
+    let mut chunk = [0u8; 2048];
+    while buf.len() < 16_384 {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+fn respond(stream: &mut std::net::TcpStream, status: &str, body: &str) {
+    let _ = stream.write_all(
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .as_bytes(),
+    );
+}
+
+fn consent_page(msg: &str) -> String {
+    format!(
+        "<html><body style=\"font-family:sans-serif;background:#141210;color:#f5efe6;display:grid;place-items:center;height:100vh;margin:0\"><p>{msg}</p></body></html>"
+    )
+}
+
+/// One-shot loopback accept: poll until OUR redirect lands (state verified)
+/// or the deadline passes. Callbacks whose state doesn't match are answered
+/// and ignored — any local process can hit this port, and a stray or forged
+/// request must not abort the real consent still pending in the browser.
 fn wait_for_callback(listener: &TcpListener, want_state: &str) -> Result<String, String> {
     let deadline = Instant::now() + AUTH_DEADLINE;
     loop {
         match listener.accept() {
             Ok((mut stream, _)) => {
-                let mut buf = [0u8; 4096];
-                let n = {
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-                    stream.read(&mut buf).unwrap_or(0)
-                };
-                let req = String::from_utf8_lossy(&buf[..n]);
+                let req = read_request_head(&mut stream);
                 let Some(query) = req
                     .lines()
                     .next()
@@ -276,7 +387,7 @@ fn wait_for_callback(listener: &TcpListener, want_state: &str) -> Result<String,
                     .and_then(|path| path.strip_prefix("/callback?"))
                 else {
                     // Favicons and strays — answer politely, keep waiting.
-                    let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                    let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                     continue;
                 };
                 let mut code = None;
@@ -285,26 +396,32 @@ fn wait_for_callback(listener: &TcpListener, want_state: &str) -> Result<String,
                 for pair in query.split('&') {
                     let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
                     match k {
-                        "code" => code = Some(v.to_string()),
-                        "state" => got_state = Some(v.to_string()),
-                        "error" => error = Some(v.to_string()),
+                        "code" => code = Some(urldec(v)),
+                        "state" => got_state = Some(urldec(v)),
+                        "error" => error = Some(urldec(v)),
                         _ => {}
                     }
                 }
-                let body = "<html><body style=\"font-family:sans-serif;background:#141210;color:#f5efe6;display:grid;place-items:center;height:100vh;margin:0\"><p>Pulse is connected — you can close this tab.</p></body></html>";
-                let _ = stream.write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .as_bytes(),
-                );
+                // State FIRST: a callback that isn't ours (wrong/absent
+                // state) gets ignored — even an error= one. Only Spotify's
+                // own redirect carries our state.
+                if got_state.as_deref() != Some(want_state) {
+                    respond(&mut stream, "404 Not Found", &consent_page("Not this session."));
+                    continue;
+                }
                 if let Some(e) = error {
+                    respond(
+                        &mut stream,
+                        "200 OK",
+                        &consent_page("Connection canceled — you can close this tab."),
+                    );
                     return Err(format!("consent denied: {e}"));
                 }
-                if got_state.as_deref() != Some(want_state) {
-                    return Err("state mismatch (stale or forged callback)".into());
-                }
+                respond(
+                    &mut stream,
+                    "200 OK",
+                    &consent_page("Pulse is connected — you can close this tab."),
+                );
                 return code.ok_or_else(|| "callback carried no code".into());
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -318,6 +435,7 @@ fn wait_for_callback(listener: &TcpListener, want_state: &str) -> Result<String,
     }
 }
 
+/// Errors: "offline: …" = transport; "token endpoint <code>: …" = served.
 fn token_request(form: &[(&str, &str)]) -> Result<Tokens, String> {
     let resp = ureq::post("https://accounts.spotify.com/api/token")
         .set("User-Agent", UA)
@@ -356,12 +474,26 @@ fn exchange_code(code: &str, redirect: &str, verifier: &str) -> Result<Tokens, S
     ])
 }
 
-/// A valid bearer token, refreshing on demand. Never holds the state lock
-/// across HTTP. Err = the caller's QueueResult status ("disconnected" when
-/// tokens are gone/invalid, "offline" on transport failure).
+/// A valid bearer token, refreshing on demand. Refreshes are single-flighted
+/// through `refresh_gate`; the state lock is never held across HTTP. On a
+/// refresh that CAN'T run (offline, 5xx) the old token is returned — callers
+/// distinguish "refresh actually happened" by the token changing.
+/// Err = "disconnected" (no/dead session) — 400-class token-endpoint answers
+/// (invalid_grant, invalid_client) clear the session, transient failures
+/// never do.
 fn ensure_access(app: &AppHandle) -> Result<String, &'static str> {
     let auth = app.state::<SpotifyAuth>();
-    let (access, refresh_token) = {
+    {
+        let inner = lock(&auth);
+        let Some(t) = &inner.tokens else { return Err("disconnected") };
+        if t.expires_at_ms - unix_ms() > REFRESH_MARGIN_MS {
+            return Ok(t.access_token.clone());
+        }
+    }
+    // Slow path: serialize refreshes; a waiter re-checks and usually finds
+    // the winner's fresh token.
+    let _gate = auth.refresh_gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (old_access, refresh_token) = {
         let inner = lock(&auth);
         let Some(t) = &inner.tokens else { return Err("disconnected") };
         if t.expires_at_ms - unix_ms() > REFRESH_MARGIN_MS {
@@ -370,8 +502,8 @@ fn ensure_access(app: &AppHandle) -> Result<String, &'static str> {
         (t.access_token.clone(), t.refresh_token.clone())
     };
     if refresh_token.is_empty() {
-        // Shouldn't happen (authorization always grants one) — treat as a
-        // dead session rather than silently riding an expiring token.
+        // Shouldn't happen (authorization always grants one) — a dead
+        // session, not a transient.
         clear_tokens(app);
         emit_status(app);
         return Err("disconnected");
@@ -391,18 +523,22 @@ fn ensure_access(app: &AppHandle) -> Result<String, &'static str> {
             save_tokens(&inner);
             Ok(access)
         }
-        Err(e) if e.contains("invalid_grant") => {
-            // Revoked / rotated away underneath us — a re-consent is the only
-            // fix; surface it as disconnected.
+        // 400-class served answer: the grant itself is dead (revoked,
+        // rotated away, bad client) — only a re-consent heals it. Clearing
+        // here also heals the "stale tokens presented as connected forever"
+        // restart state.
+        Err(e) if e.starts_with("token endpoint 4") => {
+            eprintln!("spotify refresh rejected: {e}");
             clear_tokens(app);
             emit_status(app);
             Err("disconnected")
         }
-        Err(e) if e.starts_with("offline") => {
-            // Transport failure: the old token may still be fine — try it.
-            Ok(access)
+        // Transport failure or 5xx: the session may be fine — hand back the
+        // old token and let the caller treat a repeat 401 as offline.
+        Err(e) => {
+            eprintln!("spotify refresh unavailable: {e}");
+            Ok(old_access)
         }
-        Err(_) => Err("disconnected"),
     }
 }
 
@@ -429,7 +565,7 @@ fn api_get(app: &AppHandle, url: &str) -> Result<Option<serde_json::Value>, &'st
             }
             Err(ureq::Error::Status(401, _)) if !refreshed => {
                 refreshed = true;
-                // Force a refresh by expiring the cached token first.
+                // Force a real refresh by expiring the cached token.
                 {
                     let auth = app.state::<SpotifyAuth>();
                     let mut inner = lock(&auth);
@@ -437,18 +573,26 @@ fn api_get(app: &AppHandle, url: &str) -> Result<Option<serde_json::Value>, &'st
                         t.expires_at_ms = 0;
                     }
                 }
-                token = ensure_access(app)?;
+                let fresh = ensure_access(app)?;
+                if fresh == token {
+                    // The refresh couldn't run (offline/5xx) — retrying the
+                    // same token would 401 into the destroy path below. The
+                    // session may be fine; report transient.
+                    return Err("offline");
+                }
+                token = fresh;
             }
             Err(ureq::Error::Status(401, _)) => {
+                // A genuinely fresh token still 401s — the session is dead.
                 clear_tokens(app);
                 emit_status(app);
                 return Err("disconnected");
             }
             Err(ureq::Error::Status(403, _)) => {
-                // Insufficient scope (tokens predate the current SCOPES) —
-                // only a re-consent fixes it.
-                clear_tokens(app);
-                emit_status(app);
+                // 403 is ambiguous: insufficient scope, but ALSO Spotify's
+                // Premium-required answer on player endpoints. Neither is
+                // healed by destroying the session (re-consent is available
+                // from the tray any time) — surface the gate, keep tokens.
                 return Err("disconnected");
             }
             Err(ureq::Error::Status(429, r)) if !waited_429 => {
@@ -460,6 +604,9 @@ fn api_get(app: &AppHandle, url: &str) -> Result<Option<serde_json::Value>, &'st
                     .min(10);
                 std::thread::sleep(Duration::from_secs(wait));
             }
+            // Served 5xx and transport failures both mean "can't read the
+            // queue right now" — deliberately one bucket for the UI (unlike
+            // lyrics.rs, nothing here must avoid caching a miss).
             Err(ureq::Error::Status(_, _)) => return Err("offline"),
             Err(_) => return Err("offline"),
         }
@@ -479,14 +626,15 @@ fn parse_track(v: &serde_json::Value) -> Option<QueueTrack> {
                 .join(", ")
         })
         .unwrap_or_default();
-    // Smallest image ≥64px wins; Spotify orders images largest-first.
+    // Smallest image ≥64px wins; Spotify orders images largest-first, so
+    // the fallback (no usable widths) is also the LAST entry.
     let art_url = v["album"]["images"]
         .as_array()
         .and_then(|imgs| {
             imgs.iter()
                 .filter(|i| i["width"].as_i64().unwrap_or(0) >= 64)
                 .last()
-                .or_else(|| imgs.first())
+                .or_else(|| imgs.last())
         })
         .and_then(|i| i["url"].as_str())
         .map(String::from);
@@ -530,10 +678,14 @@ pub fn queue(app: &AppHandle) -> QueueResult {
         }
     };
     // Cache ok/no_playback (real answers); transient failures retry freely.
+    // Guarded on tokens still existing so a concurrent disconnect's cache
+    // clear can't be repopulated by this in-flight read.
     if result.status == "ok" || result.status == "no_playback" {
         let auth = app.state::<SpotifyAuth>();
         let mut inner = lock(&auth);
-        inner.queue_cache = Some((unix_ms(), result.clone()));
+        if inner.tokens.is_some() {
+            inner.queue_cache = Some((unix_ms(), result.clone()));
+        }
     }
     result
 }
@@ -543,12 +695,6 @@ pub fn queue(app: &AppHandle) -> QueueResult {
 #[tauri::command]
 pub async fn spotify_status(app: AppHandle) -> SpotifyStatus {
     SpotifyStatus { connected: connected(&app) }
-}
-
-/// Shared by the command and the tray click.
-pub fn disconnect(app: &AppHandle) {
-    clear_tokens(app);
-    emit_status(app);
 }
 
 #[tauri::command]

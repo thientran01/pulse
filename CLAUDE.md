@@ -60,15 +60,21 @@ src-tauri/src/
                 public under PKCE, EMPTY until Thien's dashboard app exists —
                 tray narrates "setup needed"). Tokens in their own
                 app-data/spotify_tokens.json (NOT clobber-write settings.json);
-                refresh on demand <60s to expiry, rotation persisted,
-                invalid_grant/403-scope → disconnected + "spotify-status"
-                event (spotify_status seed). Scopes request read+modify up
-                front so PR 3's play-now/feeder needs no re-consent. Queue
-                read (spotify_queue) has a 5s response cache; ureq blocking
-                in spawn_blocking per the lyrics.rs discipline; art comes as
-                small remote URLs the webview loads directly. Tray item
-                "Connect Spotify" ⇄ "Disconnect Spotify" doubles as state +
-                flow narration; one consent flow at a time (in-flight guard)
+                refresh on demand <60s to expiry, single-flighted
+                (refresh_gate) with rotation persisted. Tokens are destroyed
+                ONLY on proof the session is dead (400-class token-endpoint
+                answer, or a FRESH token still 401ing) — transport failures,
+                5xx, and 403s (ambiguous: scope OR Premium-required) never
+                are. "spotify-status" event + spotify_status seed. Scopes
+                request read+modify up front so PR 3's play-now/feeder needs
+                no re-consent. Queue read (spotify_queue) has a 5s response
+                cache; ureq blocking in spawn_blocking per the lyrics.rs
+                discipline; art comes as small remote URLs the webview loads
+                directly. Tray item "Connect Spotify" ⇄ "Disconnect Spotify"
+                doubles as state + flow narration — spotify.rs owns the
+                narrator, so EVERY state transition re-syncs the label
+                (frontend disconnects and background clears included); one
+                consent flow at a time (in-flight guard)
   presence.rs   presence engine: own 1s watcher
                 thread sensing fullscreen foreground content (rect-vs-monitor —
                 widget-monitor scoped — OR'd with SHQueryUserNotificationState's
@@ -144,7 +150,7 @@ being controlled.
 - `npm run tauri build` — release build → NSIS per-user installer at `src-tauri/target/release/bundle/nsis/Pulse_<version>_x64-setup.exe` (unsigned; SmartScreen warns on other machines). Needs `TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/pulse.key)"` in the env now that updater artifacts are signed — without it the bundler errors after compiling (the `_PATH` variant does NOT work despite `tauri signer generate`'s help text — measured 2026-07-08).
 - `npm run dev` — frontend only (no Tauri window, limited use)
 
-Installed app: single-instance (relaunching surfaces the running widget), tray has an opt-in "Start at login" toggle (tauri-plugin-autostart, HKCU Run key — registers the current exe's path, so toggling from a dev build points it at the dev exe) and a "Companion mode" check item (presence-action master switch, persisted to app-data settings.json; dev builds add "Simulate fullscreen (10s)" for conceal testing). Tray "Check for updates" runs the update flow on demand (label narrates Checking…/Installing…/Up to date). App icon source: five living-separator capsules on a dark rounded square; regenerate the set with `npx tauri icon <1024px.png>`.
+Installed app: single-instance (relaunching surfaces the running widget), tray has an opt-in "Start at login" toggle (tauri-plugin-autostart, HKCU Run key — registers the current exe's path, so toggling from a dev build points it at the dev exe) and a "Companion mode" check item (presence-action master switch, persisted to app-data settings.json; dev builds add "Simulate fullscreen (10s)" for conceal testing). Tray "Connect Spotify" ⇄ "Disconnect Spotify" runs the Web API OAuth (spotify.rs — label doubles as connection state and flow narration). Tray "Check for updates" runs the update flow on demand (label narrates Checking…/Installing…/Up to date). App icon source: five living-separator capsules on a dark rounded square; regenerate the set with `npx tauri icon <1024px.png>`.
 
 Releases: bump `version` in tauri.conf.json (+ Cargo.toml/package.json to match), merge, then `git tag vX.Y.Z && git push origin vX.Y.Z` — the release.yml workflow builds, signs the updater artifacts, and publishes a GitHub Release with latest.json. Installed apps self-update at launch (release builds only; `#[cfg(not(debug_assertions))]`). Updater keypair: `~/.tauri/pulse.key` (private, empty password, mirrored in the repo's `TAURI_SIGNING_PRIVATE_KEY` secret — LOSING IT ORPHANS ALL INSTALLS) / pubkey pinned in tauri.conf.json.
 
