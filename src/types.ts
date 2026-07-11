@@ -28,10 +28,8 @@ export interface PresenceState {
    * GLOBAL QUNS state (exclusive D3D / presentation mode) is active — the
    * QUNS methods carry no monitor scoping. */
   fullscreen: boolean;
-  /** Input idleness/intensity. Away wins over working (they can't
-   * physically co-occur). */
-  user: "active" | "working" | "away";
-  /** What the engine did about it — always false until P1 ships conceal. */
+  /** What the engine did about it: the window is currently hidden by the
+   * courtesy conceal (false while a manual show snoozes the episode). */
   concealed: boolean;
 }
 
@@ -45,12 +43,8 @@ export interface PresenceDebug {
   on_widget_monitor: boolean;
   quns: number;
   quns_name: string;
-  idle_s: number;
   fs_raw: boolean;
   fs_settled: boolean;
-  user: "active" | "working" | "away";
-  /** Input duty over the working window, 0..1. */
-  work_duty: number;
 }
 
 /** One finalized listen from the local play-history log (history.rs) —

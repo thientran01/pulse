@@ -47,12 +47,6 @@ const MODE_SIZES: Record<Mode, [number, number]> = {
  * first-frame artifact). */
 const WINDOW_MAX: [number, number] = MODE_SIZES.expanded;
 
-/** An away stretch this long counts as a REAL absence and re-arms the
- * working-quiet latch after a manual overrule (anything shorter — reading
- * lyrics, listening between typing bursts — must not). The frontend can't
- * see debug_assertions; vite DEV ⇔ `npm run tauri dev` is the right proxy
- * for the short feel-check value. */
-const LONG_ABSENCE_MS = import.meta.env.DEV ? 45_000 : 15 * 60_000;
 
 function fmt(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -1283,18 +1277,12 @@ function ExpandedView({
   lyrics,
   seekable,
   playing,
-  plainArrival,
 }: {
   np: NowPlaying;
   artUrl: string | null;
   lyrics: LyricsState;
   seekable: boolean;
   playing: boolean;
-  /** True while this view exists because of the presence override (the
-   * ambient AFK grow): nobody is watching and nobody waited, so a lyric
-   * resolve during ambient must NOT earn the arrival cascade — the doctrine
-   * reserves celebration for a wait the user actually experienced. */
-  plainArrival: boolean;
 }) {
   const reducedMotion = useReducedMotion();
   // Key-stamped gate: never render the new track's header over the old
@@ -1341,7 +1329,6 @@ function ExpandedView({
   });
   const celebrate =
     !reducedMotion &&
-    !plainArrival &&
     artShownAt.current !== null &&
     performance.now() - artShownAt.current > SNAP_WINDOW_MS;
 
@@ -1559,7 +1546,7 @@ function PresenceOverlay({ corner }: { corner: DockCorner }) {
     >
       <div>
         {state
-          ? `presence fs=${state.fullscreen ? "YES" : "no"} user=${state.user} concealed=${state.concealed ? "YES" : "no"}`
+          ? `presence fs=${state.fullscreen ? "YES" : "no"} concealed=${state.concealed ? "YES" : "no"}`
           : "presence …"}
       </div>
       {dbg && (
@@ -1568,9 +1555,7 @@ function PresenceOverlay({ corner }: { corner: DockCorner }) {
             fg={dbg.fg_exe || "?"} rect={dbg.rect_verdict}
             {dbg.on_widget_monitor ? "" : " (other monitor)"} raw-fs={dbg.fs_raw ? "YES" : "no"}
           </div>
-          <div>
-            quns={dbg.quns_name} idle={dbg.idle_s}s
-          </div>
+          <div>quns={dbg.quns_name}</div>
         </>
       )}
     </div>
@@ -1673,109 +1658,22 @@ function App() {
   // root's data-hot instead of group-hover.
   const [hot, setHot] = useState(false);
   useEffect(() => onCursorLeft(() => setHot(false)), []);
-  // Settled device context (presence.rs). ONE subscription serves both
-  // consumers: conceal drops hover state (a hidden webview never receives
-  // the mouseleave), and the ambient override below keys off user/concealed.
-  const [presence, setPresence] = useState<PresenceState>({
-    fullscreen: false,
-    user: "active",
-    concealed: false,
-  });
+  // Presence (presence.rs) reaches the UI for exactly one reason now:
+  // conceal drops hover state (a hidden webview never receives the
+  // mouseleave), so the revealed chrome isn't pinned open on restore. The
+  // idle-driven mode overrides (P3 ambient grow, P4 working quiet) were
+  // removed 2026-07-11 after two weeks of soak — behaviors that GUESS at
+  // attention from idle timers fought manual intent badly enough to need
+  // latches on their latches; conceal acts on a fact and never did.
   useEffect(
     () =>
       onPresence((p) => {
-        setPresence(p);
         if (p.concealed) setHot(false);
       }),
     [],
   );
 
-  // P3 — the ambient AFK grow (CLAUDE.md Presence clause 3): away while
-  // music plays promotes the widget to the expanded view; ANY input returns
-  // it to the user's mode, fast and plain (input flips the backend to
-  // active within one 1s tick, and stepMode clears it instantly). The
-  // override layers over the persisted mode, which NEVER changes here; a
-  // re-fire needs a full new away period (backend state machine — the
-  // anti-haunt latch falls out of it).
-  const ambient = presence.user === "away" && playing && !nothing && !presence.concealed;
-  // P4 — working quiet (CLAUDE.md Presence clause 4): sustained input duty
-  // (typing/mousing ≥60% of the working window) shrinks a louder mode to
-  // the pill via the same override slot. Only meaningful when the user's
-  // mode is louder than pill; conceal wins (window hidden anyway).
-  const workingQuiet =
-    presence.user === "working" && !nothing && !presence.concealed && mode !== "pill";
-  const [presenceOverride, setPresenceOverride] = useState<Mode | null>(null);
-  // Arming latches, one per behavior. Ambient re-arms when presence returns
-  // to a non-away state (input happened): presence stays "away" for up to a
-  // tick after input (and playing/nothing can flicker inside that window —
-  // AM tears its session down on pause), so deriving purely from `ambient`
-  // could re-assert an override the user JUST dismissed (quick-review
-  // catch, 2026-07-09). Working-quiet's latch is much harsher: an overrule
-  // means "I chose this view while working" and brief idles (reading the
-  // lyrics he just expanded, listening between typing bursts) must NOT
-  // re-arm it — the first live soak showed every track change discarding
-  // his choice via the old any-away re-arm (Thien, 2026-07-10). Only a
-  // LONG real absence (lunch-length) or his own re-shrink to pill resets
-  // it (see stepMode).
-  const ambientArmed = useRef(true);
-  // The working pin survives webview reloads via sessionStorage (dies with
-  // the window — matching the "session-long" semantics): the dev build's
-  // HMR full reloads would otherwise silently un-pin an overrule and
-  // reproduce the exact discarded-choice complaint this latch fixes.
-  const workingArmed = useRef(
-    (() => {
-      try {
-        return sessionStorage.getItem("pulse.workingArmed") !== "0";
-      } catch {
-        return true;
-      }
-    })(),
-  );
-  const setWorkingArmed = (v: boolean) => {
-    workingArmed.current = v;
-    try {
-      sessionStorage.setItem("pulse.workingArmed", v ? "1" : "0");
-    } catch {
-      // non-fatal: the pin just won't survive a reload
-    }
-  };
-  const awaySince = useRef<number | null>(null);
-  useEffect(() => {
-    if (presence.user === "away") {
-      // Stamped at the away FLIP, so the effective absence is the away
-      // threshold PLUS this — close enough for a lunch-length bar.
-      awaySince.current ??= Date.now();
-    } else {
-      ambientArmed.current = true;
-      if (awaySince.current !== null && Date.now() - awaySince.current >= LONG_ABSENCE_MS) {
-        setWorkingArmed(true);
-      }
-      awaySince.current = null;
-    }
-  }, [presence.user]);
-  useEffect(() => {
-    // Branch order mirrors the documented precedence (conceal > working
-    // quiet > ambient): user states are mutually exclusive today, but the
-    // order must not silently invert the doctrine if that ever loosens.
-    if (workingQuiet && workingArmed.current) {
-      // Never shrink under the cursor: apply only while the pointer is
-      // away from the widget (hot=false). While hot, HOLD the current
-      // state — an already-applied quiet stays, a pending one waits for
-      // the next hot=false flip (this effect re-runs on it).
-      if (!hot) setPresenceOverride("pill");
-      return;
-    }
-    if (ambient && ambientArmed.current) {
-      setPresenceOverride("expanded");
-      return;
-    }
-    setPresenceOverride(null);
-  }, [ambient, workingQuiet, hot]);
-  // What the widget actually shows. Every mode consumer below keys on THIS;
-  // `mode` itself is only the persisted user intent.
-  const effectiveMode = presenceOverride ?? mode;
-
-  // Report the EFFECTIVE mode's interactive footprint: outside it the
+  // Report the mode's interactive footprint: outside it the
   // fixed-size window is click-through (dock.rs hit watcher), so the
   // invisible gutter above a small shell can't eat clicks — or start drags
   // — meant for whatever is beneath the widget. Shrinks are DEFERRED past
@@ -1784,13 +1682,10 @@ function App() {
   // mid-glide (quick-review catch, 2026-07-10). Grows apply instantly — the
   // gutter intercepting 200ms early is invisible; the shell arriving into a
   // dead zone would not be. hitCommanded keeps interrupted shrinks honest
-  // (the winCommanded lesson from the snap era). While ambient, the
-  // expanded footprint intercepts more desktop clicks — acceptable because
-  // reaching for the widget IS input, so the shell shrinks back within
-  // ~1.2s (1s presence tick + 200ms glide), before a deliberate click.
+  // (the winCommanded lesson from the snap era).
   const hitCommanded = useRef<[number, number] | null>(null);
   useEffect(() => {
-    const [w1, h1] = MODE_SIZES[effectiveMode];
+    const [w1, h1] = MODE_SIZES[mode];
     const [cw, ch] = hitCommanded.current ?? [w1, h1];
     const uw = Math.max(w1, cw);
     const uh = Math.max(h1, ch);
@@ -1807,7 +1702,7 @@ function App() {
       );
     }
     return () => window.clearTimeout(timer);
-  }, [effectiveMode, reducedMotion]);
+  }, [mode, reducedMotion]);
 
   const morph = {
     // Opacity ONLY — no scale. The shell's size glide is the mode swap's
@@ -1844,26 +1739,9 @@ function App() {
   };
 
   // The anchored cluster steps this ladder one rung per click; the end
-  // buttons disable instead of wrapping. Steps from the EFFECTIVE mode, so
-  // a press during an ambient override does exactly what its label says
-  // ("Collapse to card" lands on card — three review agents independently
-  // caught the earlier jump-to-persisted-mode version lying to AT/tooltips)
-  // and the result persists like any explicit choice. The press also
-  // dismisses the override and disarms re-fire until a fresh active period.
-  const stepMode = (d: -1 | 1) => {
-    // A press while an override is active is an overrule — disarm THAT
-    // behavior's latch (ambient re-arms on the next non-away tick; working
-    // waits for a LONG absence or the manual-pill re-arm below).
-    if (presenceOverride === "expanded") ambientArmed.current = false;
-    if (presenceOverride === "pill") setWorkingArmed(false);
-    const next =
-      MODE_ORDER[Math.min(Math.max(MODE_ORDER.indexOf(effectiveMode) + d, 0), MODE_ORDER.length - 1)];
-    // Explicitly choosing the pill re-invites the quiet: the pinned "I want
-    // this view while I work" intent ends the moment he shrinks it himself.
-    if (presenceOverride === null && next === "pill") setWorkingArmed(true);
-    setPresenceOverride(null);
-    setMode(() => next);
-  };
+  // buttons disable instead of wrapping.
+  const stepMode = (d: -1 | 1) =>
+    setMode((m) => MODE_ORDER[Math.min(Math.max(MODE_ORDER.indexOf(m) + d, 0), MODE_ORDER.length - 1)]);
 
   // Browser mock: there is no OS window to be the widget, so emulate one —
   // a desktop-ish backdrop under a mode-sized root (below). Without this the
@@ -1912,14 +1790,14 @@ function App() {
       <div
         className={`absolute overflow-hidden rounded-xl border border-border/10 bg-surface shadow-[0_1px_3px_rgb(0_0_0/0.18),0_3px_6px_rgb(0_0_0/0.12)] [transition:width_200ms_var(--ease-in-out-tk),height_200ms_var(--ease-in-out-tk)] ${SHELL_SEAT[dockCorner]}`}
         style={{
-          width: MODE_SIZES[effectiveMode][0] - SHELL_GUTTER_PX,
-          height: MODE_SIZES[effectiveMode][1] - SHELL_GUTTER_PX,
+          width: MODE_SIZES[mode][0] - SHELL_GUTTER_PX,
+          height: MODE_SIZES[mode][1] - SHELL_GUTTER_PX,
         }}
       >
       {/* Crossfading content layers, clipped by the gliding shell above. */}
       <AnimatePresence>
-        <motion.div key={effectiveMode} {...morph} className="absolute inset-0">
-        <ModeContent mode={effectiveMode} corner={dockCorner}>
+        <motion.div key={mode} {...morph} className="absolute inset-0">
+        <ModeContent mode={mode} corner={dockCorner}>
         {nothing ? (
           /* The resting state: the note glyph, the words, and the living
              separator's resting middot with nothing to separate — breathing
@@ -1934,7 +1812,7 @@ function App() {
               <span className="resting-pulse absolute left-1/2 top-1/2 h-[3px] w-[3px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-muted" />
             </span>
           </div>
-        ) : effectiveMode === "pill" ? (
+        ) : mode === "pill" ? (
           /* "5a — time at rest" (ANIMATIONS.md §3): at rest the pill is pure
              glance — art · title · artist · elapsed time, no buttons. On widget
              hover the time fades out (keeping its flex slot so the title/artist
@@ -1996,7 +1874,7 @@ function App() {
             {/* Non-interactive progress hairline — still announced to AT. */}
             <Hairline np={np} />
           </>
-        ) : effectiveMode === "card" ? (
+        ) : mode === "card" ? (
           /* Anchored-cluster handoff (2026-07-08, supersedes Figma 874:299):
              art+titles fill the top, then full-width progress, then the
              transport as the very-bottom row — centered, sharing its band
@@ -2046,7 +1924,6 @@ function App() {
             lyrics={lyrics}
             seekable={seekable}
             playing={playing}
-            plainArrival={presenceOverride !== null}
           />
         )}
         </ModeContent>
@@ -2056,7 +1933,7 @@ function App() {
           never fades, so the cluster never fades with content — and seated
           on the shell it tracks the visible box in every dock corner and
           every mode of the fixed-size window. See ModeCluster. */}
-      {!nothing && <ModeCluster mode={effectiveMode} onStep={stepMode} />}
+      {!nothing && <ModeCluster mode={mode} onStep={stepMode} />}
       </div>
       {/* Broken-art detector — OUTSIDE the mode-keyed subtree so the data URL
           isn't re-decoded on every mode switch, only per track. */}

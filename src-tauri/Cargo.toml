@@ -44,7 +44,6 @@ windows = { version = "0.61", features = [
     # presence.rs (P0): fullscreen/idle sensing
     "Win32_UI_Shell",
     "Win32_System_Threading",
-    "Win32_System_SystemInformation",
     "Win32_Graphics_Gdi",
 ] }
 

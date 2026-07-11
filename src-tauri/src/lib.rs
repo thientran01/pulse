@@ -494,9 +494,12 @@ pub fn run() {
                 autostart_on,
                 None::<&str>,
             )?;
-            // Presence-behavior master switch (sensing keeps running for the
-            // debug stream; ACTIONS stop). Loaded from settings.json so a
-            // turned-off companion stays off across launches.
+            // The fullscreen-conceal switch (sensing keeps running for the
+            // debug stream; the ACTION stops). Loaded from settings.json so
+            // turning it off sticks across launches. Label renamed from
+            // "Companion mode" when the idle-driven behaviors were removed
+            // (2026-07-11) — the id and settings key stay "companion" so the
+            // persisted choice survives the rename.
             let companion_on = load_companion(app.handle());
             app.state::<VisIntent>()
                 .companion
@@ -504,7 +507,7 @@ pub fn run() {
             let companion = CheckMenuItem::with_id(
                 app,
                 "companion",
-                "Companion mode",
+                "Hide on fullscreen",
                 true,
                 companion_on,
                 None::<&str>,

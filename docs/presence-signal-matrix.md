@@ -1,10 +1,15 @@
 # Presence signal matrix — P0 sensing spike
 
 What Windows actually reports about the user's context, per scenario — the source of truth
-for every presence-engine detection path (conceal, AFK, working). **No behavior ships on a
-signal until its row here is measured.** Instrument: `spikes/presence-spike` (1Hz table of
-foreground exe / window-rect-vs-monitor-vs-work-area / `SHQueryUserNotificationState` /
-`GetLastInputInfo`); `presence-spike changes` prints transitions only.
+for every presence-engine detection path. **No behavior ships on a signal until its row
+here is measured.** Instrument: `spikes/presence-spike` (1Hz table of foreground exe /
+window-rect-vs-monitor-vs-work-area / `SHQueryUserNotificationState` / `GetLastInputInfo`);
+`presence-spike changes` prints transitions only.
+
+> **2026-07-11:** the idle-driven behaviors (AFK grow, working quiet) were removed after
+> soak — the shipped engine consumes ONLY the fullscreen rows. The idle/controller rows
+> below are kept as measured history (the spike still prints idle), useful if idle-driven
+> ideas are ever revisited; read CLAUDE.md's Presence paragraph before doing that.
 
 Started 2026-07-09 on Windows 11 Pro (26200), single 2560×1440 monitor (48px taskbar),
 windows-rs 0.61. Behavior is OS-version-dependent — re-run the spike after major Windows
@@ -72,4 +77,4 @@ cd spikes/presence-spike && cargo run -- changes
 Leave it printing in a terminal, run each scenario for ~30s, note the verdict lines.
 In-app equivalents: `eprintln!` transitions in the `npm run tauri dev` console, or the
 dev overlay (localStorage `pulse.presenceOverlay = "1"`, reload; browser mock: `?presence`
-with `?fs` / `?away` to force states).
+with `?fs` to force the fullscreen/concealed state).
