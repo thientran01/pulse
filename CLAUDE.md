@@ -94,12 +94,18 @@ src-tauri/src/
                 ms_listened; feed HTTP on the blocking pool, never the media
                 loop thread). Fed marker persisted (no restart double-feed);
                 fed item popped when it starts playing (loose title/artist
-                match), unmarked when the user jumps elsewhere; fed-pop
-                bookkeeping suspends while a play_now jump flickers through
-                intermediates. Honest limits (matrix finding 11): chain
-                holds only while Pulse runs + Spotify connected; skips
-                inside the Spotify app bypass the list; removing a fed
-                front leaks that one track to Spotify's queue
+                match, with same-key restart detection so repeat-one and a
+                re-queued current track behave); a change that BYPASSES a
+                pending fed item keeps it armed and fires one reconcile
+                read (still queued at Spotify → keep waiting; consumed
+                where Pulse couldn't see → drop + unmark, feeder moves on)
+                — the fed marker never floats free of ground truth. Fed-pop
+                bookkeeping and HISTORY ingestion both suspend while a
+                play_now jump flickers through intermediates. Honest limits
+                (matrix finding 11): chain holds only while Pulse runs +
+                Spotify connected; skips inside the Spotify app bypass the
+                list; removing a fed front leaks that one track to
+                Spotify's queue
   presence.rs   fullscreen sensing + the courtesy conceal: own 1s watcher
                 thread sensing settled fullscreen foreground content
                 (rect-vs-monitor — widget-monitor scoped — OR'd with
@@ -133,7 +139,32 @@ src/            React widget: pill ↔ card ↔ expanded modes; lib/posClock.ts 
                 together. Browser mock: npm run dev → /?am replays Apple Music's
                 pathological emit profile (1s-floored positions, pause-era stamp on
                 resume, can_seek=false) for posClock repro without a live
-                player; /?nothing forces the no-session resting state
+                player; /?nothing forces the no-session resting state;
+                /?spotify=off forces the queue gate, ?jump=partial the jump
+                failure caption
+src/Queue.tsx   the 11a queue & history UI: Pulse's up-next list + the
+                "Earlier" history feed, TWO garments off ONE queueOpen bit —
+                a 312px popover floating above the pill/card (corner-aware:
+                opens away from the docked side; rides the mode resize on
+                the shell's 200ms EASE.inOut; max-height from the REAL
+                440px window: pill 330 / card 296) and an always-mounted
+                content surface inside expanded (200ms in with the .98
+                exhale, 140ms opacity out, visibility deferred — scroll and
+                feed survive closing; chrome + toggles never move). The
+                garment follows effectiveMode, so continuity across the
+                ladder is free. WHILE THE POPOVER IS OPEN THE HIT RECT
+                UNIONS ITS BOX (App's footprint effect) — a consumer that
+                forgets this puts clicks through to the desktop, the worst
+                failure class. Rows: 44px, hover-revealed actions
+                (history: play-now/+, uri-gated on enrichment; queue:
+                grip/×), pointer reorder with ±26px live swap, history→queue
+                ghost-chip drag (history itself never reorders), accent/16
+                flash + 1.6s aria-live toast, keyboard ↑/↓/Delete/Enter.
+                play_now suppresses the pill announcement for intermediates
+                (isAnnounceSuppressed) — the target announces once. The
+                cluster is [queue][collapse][expand]; the expanded note
+                seat stays the ONLY lyrics entry and exits the queue
+                surface to lyrics
 src/icons/      morphing icon system (benji.org/morphing-icons-with-claude, generalized):
                 every icon = 3 strokes × 2 cubics with identical command skeletons, so
                 any icon morphs into any other by tweening d strings — geometry.ts is

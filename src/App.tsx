@@ -19,6 +19,13 @@ import { extractAccent } from "./lib/palette";
 import * as posClock from "./lib/posClock";
 import { initReactive } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
+import {
+  isAnnounceSuppressed,
+  POPOVER_GAP,
+  POPOVER_W,
+  QueuePanel,
+  useSpotifyConnected,
+} from "./Queue";
 import { SeparatorDot, Waveform } from "./Waveform";
 import { IN_TAURI, type NowPlaying, type PresenceDebug, type PresenceState } from "./types";
 
@@ -807,10 +814,25 @@ const CORNER_SEAT: Record<DockCorner, string> = {
  * leaves on the clicked button, pinning the chrome open after the cursor
  * left (Thien, 2026-07-10). Mouse clicks don't set :focus-visible; Tab does.
  */
-function ModeCluster({ mode, onStep }: { mode: Mode; onStep: (d: -1 | 1) => void }) {
+function ModeCluster({
+  mode,
+  onStep,
+  queueOpen,
+  onToggleQueue,
+}: {
+  mode: Mode;
+  onStep: (d: -1 | 1) => void;
+  queueOpen: boolean;
+  onToggleQueue: () => void;
+}) {
   return (
     <div
-      className="pointer-events-none absolute bottom-[4px] right-[7px] z-20 flex items-center gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-data-[hot]/widget:pointer-events-auto group-data-[hot]/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100"
+      // 11a: the cluster stays revealed while the queue UI it opened is
+      // open — otherwise moving the cursor into the popover would fade the
+      // very control that closes it.
+      className={`pointer-events-none absolute bottom-[4px] right-[7px] z-20 flex items-center gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-data-[hot]/widget:pointer-events-auto group-data-[hot]/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100 ${
+        queueOpen ? "pointer-events-auto opacity-100" : ""
+      }`}
       // Swallow mousedown: pointer-events-none makes a DISABLED button
       // transparent to hit-testing, so without this a press on it (or the
       // 4px gap between the buttons) would fall through to the root drag
@@ -818,6 +840,22 @@ function ModeCluster({ mode, onStep }: { mode: Mode; onStep: (d: -1 | 1) => void
       // click target.
       onMouseDown={(e) => e.stopPropagation()}
     >
+      {/* The queue seat (11a: [queue][collapse][expand]): opens the popover
+          in pill/card, the queue surface in expanded — one open/closed bit,
+          the garment follows the mode. Active wash while open, like the
+          expanded view toggle's lyrics state. */}
+      <button
+        type="button"
+        aria-label={queueOpen ? "Close queue" : "Queue"}
+        title={queueOpen ? "Close queue" : "Queue"}
+        aria-pressed={queueOpen}
+        onClick={onToggleQueue}
+        className={`grid h-7 w-7 place-items-center rounded-md text-fg [transition:background-color_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 active:scale-95 ${
+          queueOpen ? "bg-fg/10" : ""
+        }`}
+      >
+        <MorphIcon name="queue" size={13} />
+      </button>
       <ModeButton
         to="contract"
         label={mode === "expanded" ? "Collapse to card" : "Collapse to pill"}
@@ -1277,12 +1315,21 @@ function ExpandedView({
   lyrics,
   seekable,
   playing,
+  queueOpen,
+  onCloseQueue,
+  spotifyConnected,
 }: {
   np: NowPlaying;
   artUrl: string | null;
   lyrics: LyricsState;
   seekable: boolean;
   playing: boolean;
+  /** The 11a queue surface, layered over whichever of art/lyrics shows.
+   * Chrome (progress/transport/toggles) lives outside the surface and
+   * never moves during the swap. */
+  queueOpen: boolean;
+  onCloseQueue: () => void;
+  spotifyConnected: boolean;
 }) {
   const reducedMotion = useReducedMotion();
   // Key-stamped gate: never render the new track's header over the old
@@ -1466,6 +1513,30 @@ function ExpandedView({
             </motion.div>
           )}
         </AnimatePresence>
+        {/* The 11a queue surface — ALWAYS mounted (scroll position and the
+            history feed survive toggling), cross-faded over art/lyrics: in
+            200ms EASE.out with the .98 scale exhale, out 140ms opacity-only,
+            visibility deferred past the fade so a hidden surface neither
+            eats clicks nor drops out of the DOM. Sits under the top-right
+            toggle (z-10) and above the base views. */}
+        <div
+          inert={!queueOpen}
+          onMouseDown={(e) => e.stopPropagation()}
+          className={`absolute inset-0 z-[5] flex flex-col bg-surface ${
+            queueOpen
+              ? "visible scale-100 opacity-100 [transition:opacity_200ms_var(--ease-out-tk),scale_200ms_var(--ease-out-tk)]"
+              : "invisible scale-[0.98] opacity-0 [transition:opacity_140ms_var(--ease-out-tk),scale_140ms_var(--ease-out-tk),visibility_0s_140ms]"
+          }`}
+        >
+          <div className="flex items-center gap-2.5 pb-2 pr-8">
+            <Art url={artUrl} size={44} radiusPx={6} />
+            <div className="min-w-0 flex-1">
+              <TruncateTip text={np.title} className="text-[15px] font-medium text-fg" />
+              <TruncateTip text={np.artist} className="text-[13px] text-muted" />
+            </div>
+          </div>
+          <QueuePanel np={np} connected={spotifyConnected} open={queueOpen} />
+        </div>
       </div>
       {/* Hoisted chrome, like progress/transport below: the toggle keeps its
           seat while the content it switches crossfades under it. Glyph and
@@ -1473,20 +1544,47 @@ function ExpandedView({
           miss states key on status === "none" (not !== "synced"): during a
           track change there's a one-render gap where the OLD track's synced
           state hasn't flipped to loading yet (see lyricsKeyOf), and mapping
-          it to micOff would kick a spurious slash morph on every skip. */}
+          it to micOff would kick a spurious slash morph on every skip.
+          11a: the note seat is the ONLY lyrics entry — from the queue
+          surface it EXITS to lyrics (or art when none are synced). */}
       <ViewToggle
-        glyph={lyricsLive ? (showLyrics ? "note" : "mic") : lyrics.status === "none" ? "micOff" : "mic"}
-        label={
-          lyricsLive
-            ? showLyrics
-              ? "Show album cover"
-              : "Show lyrics"
-            : lyrics.status === "none"
-              ? "No synced lyrics"
-              : "Finding lyrics…"
+        glyph={
+          queueOpen
+            ? lyricsLive
+              ? "mic"
+              : "note"
+            : lyricsLive
+              ? showLyrics
+                ? "note"
+                : "mic"
+              : lyrics.status === "none"
+                ? "micOff"
+                : "mic"
         }
-        disabled={!lyricsLive}
-        onToggle={toggleView}
+        label={
+          queueOpen
+            ? lyricsLive
+              ? "Show lyrics"
+              : "Show album cover"
+            : lyricsLive
+              ? showLyrics
+                ? "Show album cover"
+                : "Show lyrics"
+              : lyrics.status === "none"
+                ? "No synced lyrics"
+                : "Finding lyrics…"
+        }
+        disabled={!queueOpen && !lyricsLive}
+        onToggle={() => {
+          if (queueOpen) {
+            // Exit the queue surface toward lyrics (the note seat's promise);
+            // with none synced the art base is what's underneath anyway.
+            if (lyricsLive && view !== "lyrics") toggleView();
+            onCloseQueue();
+            return;
+          }
+          toggleView();
+        }}
       />
       {/* Hoisted chrome: one seat for both states. Progress sits ABOVE the
           transport (handoff order) so the transport is the very-bottom row —
@@ -1573,16 +1671,20 @@ let lastPillKey: string | null = null;
  * the pill re-creates the DOM with the same key — no beat). */
 function TrackFadeSpan({
   k,
+  suppress = false,
   className,
   children,
 }: {
   k: string | null;
+  /** A play_now jump's intermediate flicker — real remount, no announcement
+   * (the target's own mount animates normally; see isAnnounceSuppressed). */
+  suppress?: boolean;
   className?: string;
   children: React.ReactNode;
 }) {
   // Captured once at mount, BEFORE the commit effect below records the new
   // key — exactly "was this mount a change".
-  const [animate] = useState(() => k !== null && lastPillKey !== null && k !== lastPillKey);
+  const [animate] = useState(() => !suppress && k !== null && lastPillKey !== null && k !== lastPillKey);
   useEffect(() => {
     lastPillKey = k;
   }, [k]);
@@ -1618,6 +1720,19 @@ function App() {
   const playing = np?.status === "playing";
   // AM can't seek over SMTC (support matrix) — buttons gate on capability.
   const seekable = !!np?.can_seek;
+
+  // The queue UI (11a): ONE open/closed bit; the garment follows the mode
+  // (popover over pill/card, content surface inside expanded), so state is
+  // shared across the ladder and never reset by resizing — the continuity
+  // rule for free. Closed when no session (the cluster that opens it is
+  // hidden then too).
+  const [queueOpen, setQueueOpen] = useState(false);
+  useEffect(() => {
+    if (nothing) setQueueOpen(false);
+  }, [nothing]);
+  const spotifyConnected = useSpotifyConnected();
+  // Jump-intermediate suppression for the pill's announcement layer.
+  const announceSuppressed = isAnnounceSuppressed(np);
 
   // Which work-area corner the window docks to (dock.rs owns the derivation;
   // bottom-right until it reports). ModeContent pins the content plane there.
@@ -1684,8 +1799,16 @@ function App() {
   // dead zone would not be. hitCommanded keeps interrupted shrinks honest
   // (the winCommanded lesson from the snap era).
   const hitCommanded = useRef<[number, number] | null>(null);
+  // The popover extends the interactive footprint past the mode box — the
+  // hit rect must union it while open or its clicks fall through to the
+  // desktop (the worst failure class in this app). Height derived from the
+  // real 440px window: shell inset (6) + gap (12) + popover + inset (6).
+  const popoverVisible = queueOpen && mode !== "expanded" && !nothing;
   useEffect(() => {
-    const [w1, h1] = MODE_SIZES[mode];
+    const [mw, mh] = MODE_SIZES[mode];
+    const popH = Math.min(330, WINDOW_MAX[1] - mh - POPOVER_GAP);
+    const w1 = popoverVisible ? Math.max(mw, POPOVER_W + SHELL_GUTTER_PX) : mw;
+    const h1 = popoverVisible ? Math.min(WINDOW_MAX[1], mh + POPOVER_GAP + popH) : mh;
     const [cw, ch] = hitCommanded.current ?? [w1, h1];
     const uw = Math.max(w1, cw);
     const uh = Math.max(h1, ch);
@@ -1702,7 +1825,7 @@ function App() {
       );
     }
     return () => window.clearTimeout(timer);
-  }, [mode, reducedMotion]);
+  }, [mode, reducedMotion, popoverVisible]);
 
   const morph = {
     // Opacity ONLY — no scale. The shell's size glide is the mode swap's
@@ -1835,13 +1958,25 @@ function App() {
                   ladder — collapse, gray re-multiply, accent igniting last
                   in the NEW album's color. */}
               <p className="min-w-0 flex-1 truncate text-xs font-medium text-fg">
-                <TrackFadeSpan key={`t:${lyricsKeyOf(np)}`} k={lyricsKeyOf(np)}>
+                <TrackFadeSpan
+                  key={`t:${lyricsKeyOf(np)}`}
+                  k={lyricsKeyOf(np)}
+                  suppress={announceSuppressed}
+                >
                   {np.title}
                 </TrackFadeSpan>
-                <Waveform trailing={!np.artist} announceKey={lyricsKeyOf(np) ?? undefined} />
+                {/* A play_now jump's intermediates don't announce — the
+                    separator would run five drain/ignite ladders for tracks
+                    the user only skipped through; the TARGET's arrival
+                    announces once, normally (isAnnounceSuppressed). */}
+                <Waveform
+                  trailing={!np.artist}
+                  announceKey={announceSuppressed ? undefined : (lyricsKeyOf(np) ?? undefined)}
+                />
                 <TrackFadeSpan
                   key={`a:${lyricsKeyOf(np)}`}
                   k={lyricsKeyOf(np)}
+                  suppress={announceSuppressed}
                   className="font-normal text-muted"
                 >
                   {np.artist}
@@ -1924,6 +2059,9 @@ function App() {
             lyrics={lyrics}
             seekable={seekable}
             playing={playing}
+            queueOpen={queueOpen}
+            onCloseQueue={() => setQueueOpen(false)}
+            spotifyConnected={spotifyConnected}
           />
         )}
         </ModeContent>
@@ -1933,8 +2071,48 @@ function App() {
           never fades, so the cluster never fades with content — and seated
           on the shell it tracks the visible box in every dock corner and
           every mode of the fixed-size window. See ModeCluster. */}
-      {!nothing && <ModeCluster mode={mode} onStep={stepMode} />}
+      {!nothing && (
+        <ModeCluster
+          mode={mode}
+          onStep={stepMode}
+          queueOpen={queueOpen}
+          onToggleQueue={() => setQueueOpen((o) => !o)}
+        />
+      )}
       </div>
+      {/* The 11a queue popover — the pill/card garment, floating ABOVE the
+          shell inside the never-resizing window (never inside it: the shell
+          clips). Right-aligned to the docked corner's side; opens away from
+          the shell (above when docked bottom, below when docked top — the
+          prototype only modeled bottom-right). Its `bottom`/`top` ride the
+          mode resize on the shell's own 200ms EASE.inOut so it glides with
+          the garment change; reveal is 140ms opacity with visibility
+          deferred (always mounted — the scroll position and history feed
+          survive closing). Max height re-derived from the REAL 440px window
+          (prototype frame was 520): pill 330, card 296. While open, the hit
+          rect unions this box (see the footprint effect above). */}
+      {!nothing && (
+        <div
+          inert={!popoverVisible}
+          onMouseDown={(e) => e.stopPropagation()}
+          className={`absolute z-30 flex flex-col rounded-xl border border-border/10 bg-surface p-1.5 shadow-[0_10px_30px_rgb(0_0_0/0.45)] ${
+            dockCorner.endsWith("right") ? "right-1.5" : "left-1.5"
+          } ${
+            popoverVisible
+              ? "visible opacity-100 [transition:opacity_140ms_var(--ease-out-tk),top_200ms_var(--ease-in-out-tk),bottom_200ms_var(--ease-in-out-tk)]"
+              : "invisible opacity-0 [transition:opacity_140ms_var(--ease-out-tk),top_200ms_var(--ease-in-out-tk),bottom_200ms_var(--ease-in-out-tk),visibility_0s_140ms]"
+          }`}
+          style={{
+            width: POPOVER_W,
+            maxHeight: Math.min(330, WINDOW_MAX[1] - MODE_SIZES[mode][1] - POPOVER_GAP),
+            ...(dockCorner.startsWith("bottom")
+              ? { bottom: MODE_SIZES[mode][1] - SHELL_GUTTER_PX + 6 + POPOVER_GAP }
+              : { top: MODE_SIZES[mode][1] - SHELL_GUTTER_PX + 6 + POPOVER_GAP }),
+          }}
+        >
+          <QueuePanel np={np} connected={spotifyConnected} open={popoverVisible} />
+        </div>
+      )}
       {/* Broken-art detector — OUTSIDE the mode-keyed subtree so the data URL
           isn't re-decoded on every mode switch, only per track. */}
       {artUrl && artUrl !== brokenArtUrl && (
