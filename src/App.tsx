@@ -846,8 +846,8 @@ function ModeCluster({
           expanded view toggle's lyrics state. */}
       <button
         type="button"
-        aria-label={queueOpen ? "Close queue" : "Queue"}
-        title={queueOpen ? "Close queue" : "Queue"}
+        aria-label={queueOpen ? "Close queue" : "Open queue"}
+        title={queueOpen ? "Close queue" : "Open queue"}
         aria-pressed={queueOpen}
         onClick={onToggleQueue}
         className={`grid h-7 w-7 place-items-center rounded-md text-fg [transition:background-color_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 active:scale-95 ${
@@ -1807,8 +1807,13 @@ function App() {
   useEffect(() => {
     const [mw, mh] = MODE_SIZES[mode];
     const popH = Math.min(330, WINDOW_MAX[1] - mh - POPOVER_GAP);
-    const w1 = popoverVisible ? Math.max(mw, POPOVER_W + SHELL_GUTTER_PX) : mw;
-    const h1 = popoverVisible ? Math.min(WINDOW_MAX[1], mh + POPOVER_GAP + popH) : mh;
+    // Popover extent from the docked corner: the 6px near-side inset + its
+    // box (NOT the full 12px both-sides gutter — a fatter rect would let the
+    // widget capture a 6px band of desktop past the popover's far edge).
+    const w1 = popoverVisible ? Math.max(mw, POPOVER_W + SHELL_GUTTER_PX / 2) : mw;
+    const h1 = popoverVisible
+      ? Math.min(WINDOW_MAX[1], mh + SHELL_GUTTER_PX / 2 + popH)
+      : mh;
     const [cw, ch] = hitCommanded.current ?? [w1, h1];
     const uw = Math.max(w1, cw);
     const uh = Math.max(h1, ch);
@@ -2095,7 +2100,7 @@ function App() {
         <div
           inert={!popoverVisible}
           onMouseDown={(e) => e.stopPropagation()}
-          className={`absolute z-30 flex flex-col rounded-xl border border-border/10 bg-surface p-1.5 shadow-[0_10px_30px_rgb(0_0_0/0.45)] ${
+          className={`absolute z-30 flex flex-col rounded-xl border border-border/10 bg-surface p-1.5 shadow-xl shadow-black/40 ${
             dockCorner.endsWith("right") ? "right-1.5" : "left-1.5"
           } ${
             popoverVisible

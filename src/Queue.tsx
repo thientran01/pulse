@@ -115,6 +115,9 @@ export function useHistoryFeed(active: boolean): {
 // ---- history thumbs (module cache — rows remount across garments) ----
 
 const thumbCache = new Map<string, string | null>();
+/** Mirrors the disk cache's bound (history.rs THUMB_MAX_FILES) — the widget
+ * runs for days; an uncapped map of base64 JPEGs would only ever grow. */
+const THUMB_CACHE_MAX = 300;
 
 function useThumb(key: string): string | null {
   const [url, setUrl] = useState<string | null>(() => thumbCache.get(key) ?? null);
@@ -125,6 +128,10 @@ function useThumb(key: string): string | null {
     }
     let alive = true;
     void commands.historyThumbUrl(key).then((u) => {
+      if (thumbCache.size >= THUMB_CACHE_MAX) {
+        const oldest = thumbCache.keys().next().value;
+        if (oldest !== undefined) thumbCache.delete(oldest);
+      }
       thumbCache.set(key, u);
       if (alive) setUrl(u);
     });
@@ -137,19 +144,26 @@ function useThumb(key: string): string | null {
 
 // ---- announcement suppression (the jump's intermediate flickers) ----
 
-const suppression = { until: 0, targetTitle: "" };
+const suppression = { until: 0, title: "", artist: "" };
 
 /** True while a play_now jump is in flight and `np` is NOT the jump target —
  * the pill's track-change announcement holds for intermediates and fires
- * once, normally, when the target lands (or the window expires). */
-export function isAnnounceSuppressed(np: Pick<NowPlaying, "title"> | null): boolean {
+ * once, normally, when the target lands (or the window expires). Target
+ * matching is title + artist overlap (upnext.rs's matches_track rule) — a
+ * title-only match would end suppression early on a same-titled cover. */
+export function isAnnounceSuppressed(np: Pick<NowPlaying, "title" | "artist"> | null): boolean {
   if (!np || Date.now() >= suppression.until) return false;
-  return np.title.trim().toLowerCase() !== suppression.targetTitle;
+  if (np.title.trim().toLowerCase() !== suppression.title) return true;
+  const a = np.artist.trim().toLowerCase();
+  const b = suppression.artist;
+  if (!a || !b) return false; // artistless metadata — title match is our best signal
+  return !(a.includes(b) || b.includes(a));
 }
 
-async function playTrackNow(t: { uri: string; title: string }): Promise<string> {
+async function playTrackNow(t: { uri: string; title: string; artist: string }): Promise<string> {
   suppression.until = Date.now() + 6000;
-  suppression.targetTitle = t.title.trim().toLowerCase();
+  suppression.title = t.title.trim().toLowerCase();
+  suppression.artist = t.artist.trim().toLowerCase();
   const result = await commands.playNow(t.uri);
   if (result !== "ok" && result !== "partial") {
     suppression.until = 0; // nothing landed — nothing to suppress
@@ -185,6 +199,10 @@ function RowActionButton({
       type="button"
       aria-label={label}
       title={label}
+      // Out of the Tab order: the ROW is the keyboard stop (Enter/Delete/
+      // arrows cover these actions) — tabbable duplicates would cost 2-3
+      // stops per row across an infinite-scroll list.
+      tabIndex={-1}
       // Never start a row drag from its own action buttons.
       onPointerDown={(e) => e.stopPropagation()}
       onClick={(e) => {
@@ -249,6 +267,7 @@ const QueueRowBase = function QueueRow({
       role="listitem"
       tabIndex={0}
       aria-label={`${track.title} — ${track.artist}`}
+      aria-keyshortcuts="ArrowUp ArrowDown Delete"
       onPointerDown={(e) => onDragStart(e, index)}
       onKeyDown={(e) => onKeyDown(e, index)}
       className={`group/row relative flex h-[44px] cursor-grab touch-none select-none items-center gap-2.5 rounded-md px-2 ${
@@ -299,6 +318,7 @@ const HistoryRowBase = function HistoryRow({
       role="listitem"
       tabIndex={0}
       aria-label={`${entry.title} — ${entry.artist}`}
+      aria-keyshortcuts={actionable ? "Enter" : undefined}
       onPointerDown={actionable ? (ev) => onGhostStart(ev, entry) : undefined}
       onKeyDown={(ev) => onKeyDown(ev, entry)}
       className={`group/row flex h-[44px] select-none items-center gap-2.5 rounded-md px-2 [transition:background-color_140ms_var(--ease-out-tk)] hover:bg-fg/5 ${
@@ -385,23 +405,33 @@ export function QueuePanel({
     flash(t.uri);
     showToast(`Queued · ${t.title}`);
   };
-  const playNow = (t: { uri: string; title: string }) => {
+  const playNow = (t: { uri: string; title: string; artist: string }) => {
     showToast(`Playing · ${t.title}`);
     void playTrackNow(t).then((r) => {
       if (r === "diverged" || r === "gone") showToast("Queue moved on — try again");
       else if (r === "partial") showToast("Played — some items couldn't re-queue");
       else if (r === "no_playback") showToast("Start playing something first");
+      else if (r === "busy") showToast("Still landing the last jump");
       else if (r === "offline" || r === "disconnected") showToast("Spotify unreachable");
     });
   };
 
   // ---- queue reorder drag (translateY follow + live swap, the 11a spec) ----
   const [drag, setDrag] = useState<{ index: number; dy: number } | null>(null);
-  const dragFrom = useRef(0);
-  const dragY0 = useRef(0);
-  const dragOrder = useRef<QueueTrack[]>([]);
   const [order, setOrder] = useState<QueueTrack[] | null>(null); // drag overlay
   const rows = order ?? upnext;
+  const upnextRef = useRef(upnext);
+  upnextRef.current = upnext;
+  // Active drag teardown — runs on unmount (the panel can die mid-drag: AM
+  // session vanish flips `nothing`, conceal hides the window) so the window
+  // listeners never leak and never fire against a dead component.
+  const dragTeardown = useRef<(() => void) | null>(null);
+  useEffect(
+    () => () => {
+      dragTeardown.current?.();
+    },
+    [],
+  );
 
   const onQueueDragStart = (e: React.PointerEvent, index: number) => {
     if (e.button !== 0) return;
@@ -412,51 +442,58 @@ export function QueuePanel({
       // Pointer already gone — the window listeners below still track it
       // (the ProgressBar precedent).
     }
-    dragFrom.current = index;
-    dragY0.current = e.clientY;
-    dragOrder.current = [...upnext];
-    setOrder(dragOrder.current);
-    setDrag({ index, dy: 0 });
+    // Closure-local drag math (no state-updater side effects — StrictMode
+    // double-invokes updaters); state only mirrors it for rendering.
+    const startY = e.clientY;
+    let y0 = startY;
+    let i = index;
+    let dy = 0;
+    let armed = false; // 4px slop: a plain click must not flash drag chrome
+    let list: QueueTrack[] = [];
     const move = (ev: PointerEvent) => {
-      setDrag((d) => {
-        if (!d) return d;
-        let { index: i } = d;
-        let dy = ev.clientY - dragY0.current;
-        const list = dragOrder.current;
-        let moved = false;
-        while (dy > SWAP_AT && i < list.length - 1) {
-          [list[i], list[i + 1]] = [list[i + 1], list[i]];
-          i++;
-          dragY0.current += ROW_H;
-          dy -= ROW_H;
-          moved = true;
-        }
-        while (dy < -SWAP_AT && i > 0) {
-          [list[i], list[i - 1]] = [list[i - 1], list[i]];
-          i--;
-          dragY0.current -= ROW_H;
-          dy += ROW_H;
-          moved = true;
-        }
-        if (moved) setOrder([...list]);
-        return { index: i, dy };
-      });
+      if (!armed) {
+        if (Math.abs(ev.clientY - startY) < 4) return;
+        armed = true;
+        list = [...upnextRef.current];
+        setOrder(list);
+      }
+      dy = ev.clientY - y0;
+      let moved = false;
+      while (dy > SWAP_AT && i < list.length - 1) {
+        [list[i], list[i + 1]] = [list[i + 1], list[i]];
+        i++;
+        y0 += ROW_H;
+        dy -= ROW_H;
+        moved = true;
+      }
+      while (dy < -SWAP_AT && i > 0) {
+        [list[i], list[i - 1]] = [list[i - 1], list[i]];
+        i--;
+        y0 -= ROW_H;
+        dy += ROW_H;
+        moved = true;
+      }
+      if (moved) setOrder([...list]);
+      setDrag({ index: i, dy });
     };
-    const up = () => {
+    const finish = (commit: boolean) => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
-      setDrag((d) => {
-        if (d && d.index !== dragFrom.current) {
-          commands.upnextMove(dragFrom.current, d.index);
-        }
-        return null;
-      });
+      window.removeEventListener("pointercancel", cancel);
+      dragTeardown.current = null;
+      if (!armed) return;
+      if (commit && i !== index) commands.upnextMove(index, i);
+      setDrag(null);
       // Hold the overlay one tick so the committed order's event replaces it
       // without a flash of the pre-drag order.
       window.setTimeout(() => setOrder(null), 50);
     };
+    const up = () => finish(true);
+    const cancel = () => finish(false);
+    dragTeardown.current = cancel;
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
   };
 
   const onQueueKeyDown = (e: React.KeyboardEvent, index: number) => {
@@ -475,6 +512,13 @@ export function QueuePanel({
   // ---- history → queue ghost drag ----
   const zoneRef = useRef<HTMLDivElement>(null);
   const [ghost, setGhost] = useState<Ghost | null>(null);
+  const ghostTeardown = useRef<(() => void) | null>(null);
+  useEffect(
+    () => () => {
+      ghostTeardown.current?.();
+    },
+    [],
+  );
   const onGhostStart = (e: React.PointerEvent, entry: HistoryEntry) => {
     if (e.button !== 0 || !historyToTrack(entry)) return;
     e.preventDefault();
@@ -502,22 +546,28 @@ export function QueuePanel({
       started = true;
       setGhost({ x: ev.clientX, y: ev.clientY, entry, over: overZone(ev) });
     };
-    const up = (ev: PointerEvent) => {
+    const finish = (ev: PointerEvent | null) => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
+      ghostTeardown.current = null;
       setGhost(null);
-      if (!started || !overZone(ev)) return;
+      if (!ev || !started || !overZone(ev)) return;
       const t = historyToTrack(entry);
       if (!t) return;
       const r = zoneRef.current!.getBoundingClientRect();
       const at = Math.max(
         0,
-        Math.min(Math.round((ev.clientY - r.top - ROW_H / 2) / ROW_H), upnext.length),
+        Math.min(Math.round((ev.clientY - r.top - ROW_H / 2) / ROW_H), upnextRef.current.length),
       );
       addToQueue(t, at);
     };
+    const up = (ev: PointerEvent) => finish(ev);
+    const cancel = () => finish(null);
+    ghostTeardown.current = cancel;
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
   };
 
   const onHistoryKeyDown = (e: React.KeyboardEvent, entry: HistoryEntry) => {
@@ -561,37 +611,48 @@ export function QueuePanel({
           {toast}
         </span>
       </div>
-      {gateCaption ? (
-        <p className="m-0 px-2 py-2 text-xs text-muted">{gateCaption}</p>
-      ) : (
-        <div
-          ref={zoneRef}
-          role="list"
-          aria-label="Up next"
-          className={`flex flex-col rounded-lg border [transition:border-color_140ms_var(--ease-out-tk),background-color_140ms_var(--ease-out-tk)] ${
-            ghost?.over ? "border-accent/55 bg-accent/5" : "border-transparent"
-          }`}
-        >
-          {rows.length === 0 && (
-            <p className="m-0 px-2 py-2 text-xs text-muted">
-              Queue is empty — press + on a track below or drag one here.
-            </p>
-          )}
-          {rows.map((t, i) => (
-            <QueueRow
-              key={`${t.uri}:${i}`}
-              track={t}
-              index={i}
-              dragging={drag?.index === i}
-              dragDy={drag?.index === i ? drag.dy : 0}
-              flash={flashUri === t.uri}
-              onDragStart={onQueueDragStart}
-              onRemove={(uri) => commands.upnextRemove(uri)}
-              onKeyDown={onQueueKeyDown}
-            />
-          ))}
-        </div>
-      )}
+      {/* The gate NARRATES instead of hiding: Pulse's list persists across
+          players/connection, and queued rows vanishing on an Apple Music
+          switch would read as data loss. remove/reorder stay live (they're
+          local ops); only feed/play depend on Spotify. */}
+      {gateCaption && <p className="m-0 px-2 pb-1 text-xs text-muted">{gateCaption}</p>}
+      <div
+        ref={zoneRef}
+        role="list"
+        aria-label="Up next"
+        className={`flex flex-col rounded-lg border [transition:border-color_140ms_var(--ease-out-tk),background-color_140ms_var(--ease-out-tk)] ${
+          ghost?.over ? "border-accent/55 bg-accent/5" : "border-transparent"
+        }`}
+      >
+        {rows.length === 0 && !gateCaption && (
+          <p className="m-0 px-2 py-2 text-xs text-muted">
+            Queue is empty — press + on a track below or drag one here.
+          </p>
+        )}
+        {(() => {
+          // Keys must survive reorders (an index-keyed row remounts on every
+          // swap — killed the glide AND dropped keyboard focus mid-reorder);
+          // uri + per-render occurrence keeps duplicates legal.
+          const seen = new Map<string, number>();
+          return rows.map((t, i) => {
+            const n = seen.get(t.uri) ?? 0;
+            seen.set(t.uri, n + 1);
+            return (
+              <QueueRow
+                key={`${t.uri}#${n}`}
+                track={t}
+                index={i}
+                dragging={drag?.index === i}
+                dragDy={drag?.index === i ? drag.dy : 0}
+                flash={flashUri === t.uri}
+                onDragStart={onQueueDragStart}
+                onRemove={(uri) => commands.upnextRemove(uri)}
+                onKeyDown={onQueueKeyDown}
+              />
+            );
+          });
+        })()}
+      </div>
       <div className="px-2 pb-0.5 pt-2.5">
         <span className="text-[10px] uppercase tracking-widest text-muted">Earlier</span>
       </div>
