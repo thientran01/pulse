@@ -54,6 +54,21 @@ src-tauri/src/
                 Thumbs: bounded app-data/thumbs cache (96px JPEG) — the
                 FRONTEND downscales once per art revision (useHistoryThumb;
                 rev bumps overwrite, so a stale first capture heals)
+  spotify.rs    Spotify Web API adapter (the app's first OAuth): PKCE +
+                loopback redirect (127.0.0.1:43117/callback — the dashboard
+                app must register EXACTLY that URI; SPOTIFY_CLIENT_ID const,
+                public under PKCE, EMPTY until Thien's dashboard app exists —
+                tray narrates "setup needed"). Tokens in their own
+                app-data/spotify_tokens.json (NOT clobber-write settings.json);
+                refresh on demand <60s to expiry, rotation persisted,
+                invalid_grant/403-scope → disconnected + "spotify-status"
+                event (spotify_status seed). Scopes request read+modify up
+                front so PR 3's play-now/feeder needs no re-consent. Queue
+                read (spotify_queue) has a 5s response cache; ureq blocking
+                in spawn_blocking per the lyrics.rs discipline; art comes as
+                small remote URLs the webview loads directly. Tray item
+                "Connect Spotify" ⇄ "Disconnect Spotify" doubles as state +
+                flow narration; one consent flow at a time (in-flight guard)
   presence.rs   presence engine: own 1s watcher
                 thread sensing fullscreen foreground content (rect-vs-monitor —
                 widget-monitor scoped — OR'd with SHQueryUserNotificationState's
