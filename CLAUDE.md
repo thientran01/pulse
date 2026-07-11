@@ -83,7 +83,13 @@ src-tauri/src/
                 skip to it, VERIFY the landing by re-read — never trust
                 command results, matrix finding 3 — re-queue everything
                 skipped over; never `PUT play uris`, which kills the
-                playlist context)
+                playlist context). History enrichment: every settled track
+                change on a connected session fetches currently-playing
+                (enrich_now, one in-flight) and stamps the uri onto
+                history's candidate — THE path that makes history rows
+                actionable; un-enriched rows (older entries, AM listens)
+                resolve on demand via spotify_resolve_uri (search, cached
+                per key frontend-side)
   upnext.rs     Pulse-managed up-next: Spotify's API can't remove/reorder
                 queue items, so Pulse keeps its OWN ordered list
                 (app-data/upnext.json, "upnext-changed" + upnext_list seed;

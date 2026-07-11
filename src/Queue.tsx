@@ -361,6 +361,36 @@ function historyToTrack(e: HistoryEntry): QueueTrack | null {
 
 type Ghost = { x: number; y: number; entry: HistoryEntry; over: boolean };
 
+/** Search-resolved uris for entries logged before enrichment ran (v0.6.0
+ * history, Apple Music listens). One resolve per track key per session;
+ * null = Spotify had no match (cached too — no retry storm on hover-spam). */
+const uriCache = new Map<string, string | null>();
+
+/** The actionable form of a history entry: its enriched uri, a cached or
+ * fresh search resolution, or null when Spotify can't find it. */
+async function resolveTrack(entry: HistoryEntry): Promise<QueueTrack | null> {
+  const direct = historyToTrack(entry);
+  if (direct) return direct;
+  let uri: string | null;
+  const cached = uriCache.get(entry.key);
+  if (cached !== undefined) {
+    uri = cached;
+  } else {
+    uri = await commands.spotifyResolveUri(entry.title, entry.artist);
+    uriCache.set(entry.key, uri);
+  }
+  return uri
+    ? {
+        uri,
+        title: entry.title,
+        artist: entry.artist,
+        album: entry.album,
+        duration_ms: entry.duration_ms,
+        art_url: null,
+      }
+    : null;
+}
+
 export function QueuePanel({
   np,
   connected,
@@ -519,8 +549,23 @@ export function QueuePanel({
     },
     [],
   );
+  // Queue a history entry, resolving its uri first when it wasn't enriched
+  // (pre-v0.6.1 entries, Apple Music listens). Fire-and-forget; misses toast.
+  const addResolved = (entry: HistoryEntry, at?: number) => {
+    void resolveTrack(entry).then((t) => {
+      if (t) addToQueue(t, at);
+      else showToast("Couldn't find it on Spotify");
+    });
+  };
+  const playResolved = (entry: HistoryEntry) => {
+    void resolveTrack(entry).then((t) => {
+      if (t) playNow(t);
+      else showToast("Couldn't find it on Spotify");
+    });
+  };
+
   const onGhostStart = (e: React.PointerEvent, entry: HistoryEntry) => {
-    if (e.button !== 0 || !historyToTrack(entry)) return;
+    if (e.button !== 0) return;
     e.preventDefault();
     try {
       (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -553,14 +598,12 @@ export function QueuePanel({
       ghostTeardown.current = null;
       setGhost(null);
       if (!ev || !started || !overZone(ev)) return;
-      const t = historyToTrack(entry);
-      if (!t) return;
       const r = zoneRef.current!.getBoundingClientRect();
       const at = Math.max(
         0,
         Math.min(Math.round((ev.clientY - r.top - ROW_H / 2) / ROW_H), upnextRef.current.length),
       );
-      addToQueue(t, at);
+      addResolved(entry, at);
     };
     const up = (ev: PointerEvent) => finish(ev);
     const cancel = () => finish(null);
@@ -571,12 +614,9 @@ export function QueuePanel({
   };
 
   const onHistoryKeyDown = (e: React.KeyboardEvent, entry: HistoryEntry) => {
-    if (e.key === "Enter") {
-      const t = historyToTrack(entry);
-      if (t && queueLive) {
-        e.preventDefault();
-        addToQueue(t);
-      }
+    if (e.key === "Enter" && queueLive) {
+      e.preventDefault();
+      addResolved(entry);
     }
   };
 
@@ -662,19 +702,18 @@ export function QueuePanel({
             Tracks you play land here{exhausted ? "" : "…"}
           </p>
         )}
+        {/* Actionable whenever the queue is live: rows without an enriched
+            uri (pre-enrichment history, Apple Music listens) resolve by
+            search on demand — the uri gate here was what left EVERY row
+            actionless on first connect (nothing had been enriched yet), an
+            unbootstrappable queue (Thien's live find, 2026-07-11). */}
         {entries.map((e) => (
           <HistoryRow
             key={`${e.key}:${e.started_at_ms}`}
             entry={e}
-            actionable={queueLive && !!e.spotify_uri}
-            onPlayNow={(en) => {
-              const t = historyToTrack(en);
-              if (t) playNow(t);
-            }}
-            onAdd={(en) => {
-              const t = historyToTrack(en);
-              if (t) addToQueue(t);
-            }}
+            actionable={queueLive}
+            onPlayNow={playResolved}
+            onAdd={(en) => addResolved(en)}
             onGhostStart={onGhostStart}
             onKeyDown={onHistoryKeyDown}
           />

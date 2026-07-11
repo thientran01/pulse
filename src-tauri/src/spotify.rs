@@ -83,6 +83,9 @@ pub struct SpotifyAuth {
     /// One play_now jump at a time; also gates upnext's fed-pop bookkeeping
     /// against the intermediate track flicker a jump produces.
     jump_in_flight: AtomicBool,
+    /// One currently-playing enrichment read at a time (fired per track
+    /// change from the media loop — must never stack).
+    enrich_in_flight: AtomicBool,
 }
 
 #[derive(Default)]
@@ -854,7 +857,81 @@ fn requeue(app: &AppHandle, items: &[QueueTrack]) -> bool {
     ok
 }
 
+// ---- history enrichment + uri resolution ----
+
+/// Stamp the CURRENT track's uri onto history's in-flight candidate. Fired
+/// once per track change from the media loop (via upnext::tick) while
+/// connected and Spotify is active — this is the path that makes history
+/// rows actionable (play-now/+ anchor by uri). The v0.6.0 wiring only
+/// enriched from queue reads the shipped UI never performs, so no entry
+/// ever earned a uri and the up-next list was unbootstrappable (Thien's
+/// live find, 2026-07-11).
+pub fn enrich_now(app: &AppHandle) {
+    let auth = app.state::<SpotifyAuth>();
+    if !connected(app)
+        || auth
+            .enrich_in_flight
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+    {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Ok(Some(v)) = api_call(&app, "GET", "https://api.spotify.com/v1/me/player/currently-playing")
+        {
+            if let Some(t) = parse_track(&v["item"]) {
+                crate::history::enrich_uri(&app, &t.title, &t.artist, &t.uri);
+            }
+        }
+        app.state::<SpotifyAuth>().enrich_in_flight.store(false, Ordering::SeqCst);
+    });
+}
+
+/// Resolve a track uri by search — the path for history entries logged
+/// before enrichment existed (or from Apple Music sessions). Best match =
+/// same title (ci) + artist overlap, first 5 results.
+pub fn search_track(app: &AppHandle, title: &str, artist: &str) -> Option<String> {
+    let q = format!("track:{title} artist:{artist}");
+    let url = format!(
+        "https://api.spotify.com/v1/search?type=track&limit=5&q={}",
+        urlenc(&q)
+    );
+    let v = api_call(app, "GET", &url).ok()??;
+    let items = v["tracks"]["items"].as_array()?;
+    let title_lc = title.trim().to_lowercase();
+    let artist_lc = artist.trim().to_lowercase();
+    items
+        .iter()
+        .filter_map(parse_track)
+        .find(|t| {
+            let a = t.artist.trim().to_lowercase();
+            t.title.trim().to_lowercase() == title_lc
+                && (artist_lc.is_empty() || a.contains(&artist_lc) || artist_lc.contains(&a))
+        })
+        // Fall back to Spotify's own top hit — search relevance is usually
+        // right even when metadata strings differ (remaster suffixes etc).
+        .or_else(|| items.first().and_then(|i| parse_track(i)))
+        .map(|t| t.uri)
+}
+
 // ---- commands ----
+
+/// Search-resolve a uri for a history row that never got enriched. Returns
+/// null on no match / disconnected / offline — the UI toasts.
+#[tauri::command]
+pub async fn spotify_resolve_uri(
+    app: AppHandle,
+    title: String,
+    artist: String,
+) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || search_track(&app, &title, &artist))
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("spotify resolve task panicked: {e}");
+            None
+        })
+}
 
 #[tauri::command]
 pub async fn spotify_status(app: AppHandle) -> SpotifyStatus {

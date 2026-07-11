@@ -671,6 +671,19 @@ export const commands = {
     }
     return lyricsLatestWins(() => invoke("media_lyrics", { artist, title, album, durationMs }));
   },
+  /** Search-resolve a uri for a history row that was never enriched
+   * (pre-enrichment entries, Apple Music listens). Null = no match. */
+  async spotifyResolveUri(title: string, artist: string): Promise<string | null> {
+    if (!IN_TAURI) {
+      if (!mockSpotifyConnected) return null;
+      // Ring tracks resolve to the mock scheme; anything else is a miss so
+      // the "Couldn't find it on Spotify" toast is preview-exercisable.
+      void artist;
+      const hit = MOCK_TRACKS.some((t) => t.title === title);
+      return hit ? `spotify:track:mock-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}` : null;
+    }
+    return invoke<string | null>("spotify_resolve_uri", { title, artist });
+  },
 };
 
 type Lyrics = { synced: string | null; plain: string | null };

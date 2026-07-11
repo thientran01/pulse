@@ -459,6 +459,7 @@ pub fn run() {
             spotify::spotify_disconnect,
             spotify::spotify_queue,
             spotify::spotify_play_now,
+            spotify::spotify_resolve_uri,
             upnext::upnext_list,
             upnext::upnext_add,
             upnext::upnext_remove,

@@ -156,7 +156,7 @@ pub fn tick(app: &AppHandle, np: &NowPlaying) {
     // via the reconcile read on the next genuine change.
     if np.player != "none" && np.status != "none" {
         let key = media::ident_key(&np.app_id, &np.title, &np.artist);
-        let (popped, want_reconcile) = {
+        let (popped, want_reconcile, changed) = {
             let mut inner = lock(&upnext);
             let same = inner.last_track.as_deref() == Some(key.as_str());
             // Same-key replay (repeat-one, or a re-queued copy of the
@@ -171,10 +171,10 @@ pub fn tick(app: &AppHandle, np: &NowPlaying) {
                 inner.last_raw_pos_ms = if np.position_at_ms > 0 { np.position_ms } else { 0 };
             }
             if same && !restarted {
-                (None, false)
+                (None, false, false)
             } else if jump_active {
                 inner.last_track = Some(key);
-                (None, false)
+                (None, false, false)
             } else if restarted {
                 // Repeat-one restarting an UNRELATED track keeps the fed
                 // item armed (it's still waiting in Spotify's queue — a
@@ -188,9 +188,9 @@ pub fn tick(app: &AppHandle, np: &NowPlaying) {
                             .find(|t| t.uri == fed_uri)
                             .is_some_and(|t| matches_track(np, t)) =>
                     {
-                        (Some(pop_fed(&mut inner, &fed_uri)), false)
+                        (Some(pop_fed(&mut inner, &fed_uri)), false, true)
                     }
-                    _ => (None, false),
+                    _ => (None, false, true),
                 }
             } else {
                 inner.last_track = Some(key);
@@ -204,7 +204,7 @@ pub fn tick(app: &AppHandle, np: &NowPlaying) {
                             .find(|t| t.uri == fed_uri)
                             .is_some_and(|t| matches_track(np, t)) =>
                     {
-                        (Some(pop_fed(&mut inner, &fed_uri)), false)
+                        (Some(pop_fed(&mut inner, &fed_uri)), false, true)
                     }
                     // A change to some OTHER track while a fed item is
                     // pending: it usually just means the user jumped around
@@ -213,8 +213,8 @@ pub fn tick(app: &AppHandle, np: &NowPlaying) {
                     // it can also mean the fed item was CONSUMED where we
                     // couldn't see (in-app skip, app downtime) and will
                     // never pop by playing — ask Spotify which it is.
-                    Some(_) => (None, true),
-                    None => (None, false),
+                    Some(_) => (None, true, true),
+                    None => (None, false, true),
                 }
             }
         };
@@ -223,6 +223,13 @@ pub fn tick(app: &AppHandle, np: &NowPlaying) {
         }
         if want_reconcile {
             request_reconcile(app);
+        }
+        // Every settled track change on a connected Spotify session stamps
+        // the new track's uri onto history's fresh candidate (spotify.rs
+        // enrich_now — one in-flight, off-thread). This is what makes
+        // history rows actionable without a later search round-trip.
+        if changed && np.player == "spotify" {
+            spotify::enrich_now(app);
         }
     }
 
