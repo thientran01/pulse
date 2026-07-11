@@ -75,4 +75,30 @@ export interface HistoryEntry {
   spotify_uri: string | null;
 }
 
+/** Spotify Web API connection state (spotify.rs) — OAuth tokens present.
+ * Independent of which player is ACTIVE; the queue UI gates on both. */
+export interface SpotifyStatus {
+  connected: boolean;
+}
+
+/** One track from the Spotify queue read. */
+export interface QueueTrack {
+  /** Spotify track URI — play-now/re-queue anchor by uri, never by index. */
+  uri: string;
+  title: string;
+  /** Joined artist names. */
+  artist: string;
+  album: string;
+  duration_ms: number;
+  /** Small remote cover URL, loaded directly by the webview. */
+  art_url: string | null;
+}
+
+export interface SpotifyQueueResult {
+  status: "ok" | "disconnected" | "no_playback" | "offline";
+  currently_playing: QueueTrack | null;
+  /** ~20 items max; Spotify mixes user-queued and autoplay with no marker. */
+  queue: QueueTrack[];
+}
+
 export const IN_TAURI = "__TAURI_INTERNALS__" in window;

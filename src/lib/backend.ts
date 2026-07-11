@@ -10,6 +10,8 @@ import {
   type NowPlaying,
   type PresenceDebug,
   type PresenceState,
+  type SpotifyQueueResult,
+  type SpotifyStatus,
 } from "../types";
 import * as posClock from "./posClock";
 
@@ -116,6 +118,55 @@ if (!IN_TAURI) {
       mockHistoryEntry(MOCK_TRACKS[i % MOCK_TRACKS.length], now - i * 4.2 * 60_000, 190_000),
     );
   }
+}
+
+// ---- Spotify Web API (spotify.rs seam) ----
+
+/** `?spotify=off` forces the disconnected gate state in preview; the mock is
+ * otherwise connected so the queue surface is iterable at plain `/`.
+ * `?queue=empty` forces the no_playback answer. */
+const SPOTIFY_OFF =
+  !IN_TAURI && new URLSearchParams(window.location.search).get("spotify") === "off";
+const QUEUE_EMPTY =
+  !IN_TAURI && new URLSearchParams(window.location.search).get("queue") === "empty";
+
+let mockSpotifyConnected = !SPOTIFY_OFF;
+const mockSpotifyListeners = new Set<(s: SpotifyStatus) => void>();
+
+function pushMockSpotify(connected: boolean): void {
+  mockSpotifyConnected = connected;
+  mockSpotifyListeners.forEach((cb) => cb({ connected }));
+}
+
+function mockQueueTrack(t: { title: string; artist: string; album: string }) {
+  return {
+    uri: `spotify:track:mock-${t.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+    ...t,
+    duration_ms: MOCK_DURATION,
+    art_url: mockArt(),
+  };
+}
+
+/** Connection state (OAuth tokens present) — seed + event pairing. */
+export function onSpotifyStatus(cb: (s: SpotifyStatus) => void): () => void {
+  if (IN_TAURI) {
+    let gotEvent = false;
+    const un = listen<SpotifyStatus>("spotify-status", (e) => {
+      gotEvent = true;
+      cb(e.payload);
+    });
+    void invoke<SpotifyStatus>("spotify_status").then((s) => {
+      if (!gotEvent) cb(s);
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }
+  cb({ connected: mockSpotifyConnected });
+  mockSpotifyListeners.add(cb);
+  return () => {
+    mockSpotifyListeners.delete(cb);
+  };
 }
 
 /** Fires once per finalized listen (a track change past the listen floor). */
@@ -479,6 +530,39 @@ export const commands = {
   async art(artId: string): Promise<string | null> {
     if (!IN_TAURI) return artId === "mock-art" ? mockArt() : null;
     return invoke<string | null>("media_art", { artId });
+  },
+  /** Start the Spotify OAuth consent flow (PKCE, system browser). Progress
+   * narrates on the tray label; the "spotify-status" event lands on success. */
+  spotifyConnect(): void {
+    if (IN_TAURI) void invoke("spotify_connect");
+    else pushMockSpotify(true);
+  },
+  spotifyDisconnect(): void {
+    if (IN_TAURI) void invoke("spotify_disconnect");
+    else pushMockSpotify(false);
+  },
+  /** The user's Spotify queue (currently playing + up next). Backend caches
+   * 5s; call on queue-view visible + track change, never poll hidden. */
+  async spotifyQueue(): Promise<SpotifyQueueResult> {
+    if (!IN_TAURI) {
+      if (!mockSpotifyConnected) {
+        return { status: "disconnected", currently_playing: null, queue: [] };
+      }
+      if (QUEUE_EMPTY) {
+        return { status: "no_playback", currently_playing: null, queue: [] };
+      }
+      // The ring rotated past the current index — mockSkip visibly refreshes.
+      const upcoming = Array.from(
+        { length: MOCK_TRACKS.length - 1 },
+        (_, i) => MOCK_TRACKS[(mockTrack + 1 + i) % MOCK_TRACKS.length],
+      );
+      return {
+        status: "ok",
+        currently_playing: mockQueueTrack(MOCK_TRACKS[mockTrack]),
+        queue: upcoming.map(mockQueueTrack),
+      };
+    }
+    return invoke<SpotifyQueueResult>("spotify_queue");
   },
   /** Newest-first history page; `before` = the oldest loaded entry's
    * started_at_ms for infinite scroll, null seeds from the newest. */

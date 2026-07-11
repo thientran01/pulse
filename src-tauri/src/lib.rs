@@ -4,6 +4,7 @@ mod history;
 mod lyrics;
 mod media;
 mod presence;
+mod spotify;
 
 use media::ArtCache;
 use serde::Serialize;
@@ -280,6 +281,13 @@ fn save_companion(app: &AppHandle, on: bool) {
     }
 }
 
+/// Frontend-initiated connect (the queue UI's gate state, PR 4) — same flow
+/// and tray narration as the tray click (spotify.rs holds the narrator).
+#[tauri::command]
+async fn spotify_connect(app: AppHandle) {
+    spotify::start_connect(&app);
+}
+
 /// Push a label/enabled change to a tray menu item from any thread — menu
 /// items are UI objects, so writes hop to the main thread.
 fn set_menu_label(
@@ -426,6 +434,7 @@ pub fn run() {
         .manage(ArtCache(Mutex::new(None)))
         .manage(LastEmit(Mutex::new(None)))
         .manage(history::Tracker::default())
+        .manage(spotify::SpotifyAuth::default())
         .manage(UiReactive(Arc::new(AtomicBool::new(true))))
         .manage(dock::Dock::default())
         .manage(presence::Presence::default())
@@ -443,6 +452,10 @@ pub fn run() {
             history::history_page,
             history::history_thumb,
             history::history_thumb_url,
+            spotify_connect,
+            spotify::spotify_status,
+            spotify::spotify_disconnect,
+            spotify::spotify_queue,
             dock::set_window_size,
             dock::set_hit_size,
             dock::start_drag,
@@ -489,6 +502,28 @@ pub fn run() {
                 companion_on,
                 None::<&str>,
             )?;
+            // Spotify Web API connection (spotify.rs) — the label doubles as
+            // the state; loaded tokens flip it to Disconnect at launch. The
+            // narrator lives in spotify.rs so EVERY state change re-syncs
+            // the label (background invalid_grant included), not just clicks.
+            spotify::init(app.handle());
+            let spotify_label = if spotify::connected(app.handle()) {
+                "Disconnect Spotify"
+            } else {
+                "Connect Spotify"
+            };
+            let spotify_item =
+                MenuItem::with_id(app, "spotify", spotify_label, true, None::<&str>)?;
+            {
+                let item = spotify_item.clone();
+                spotify::set_narrator(app.handle(), move |app, text| {
+                    let item = item.clone();
+                    let text = text.to_string();
+                    let _ = app.run_on_main_thread(move || {
+                        let _ = item.set_text(text);
+                    });
+                });
+            }
             let update_check =
                 MenuItem::with_id(app, "update", "Check for updates", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Pulse", true, None::<&str>)?;
@@ -501,12 +536,21 @@ pub fn run() {
             #[cfg(debug_assertions)]
             let menu = Menu::with_items(
                 app,
-                &[&show_hide, &reset, &autostart, &companion, &sim_fs, &update_check, &quit],
+                &[
+                    &show_hide,
+                    &reset,
+                    &autostart,
+                    &companion,
+                    &spotify_item,
+                    &sim_fs,
+                    &update_check,
+                    &quit,
+                ],
             )?;
             #[cfg(not(debug_assertions))]
             let menu = Menu::with_items(
                 app,
-                &[&show_hide, &reset, &autostart, &companion, &update_check, &quit],
+                &[&show_hide, &reset, &autostart, &companion, &spotify_item, &update_check, &quit],
             )?;
             let autostart_item = autostart.clone();
             let companion_item = companion.clone();
@@ -548,6 +592,13 @@ pub fn run() {
                         if !on && vis.concealed.swap(false, Ordering::Relaxed) {
                             vis.conceal_snoozed.store(false, Ordering::Relaxed);
                             apply_visibility(app);
+                        }
+                    }
+                    "spotify" => {
+                        if spotify::connected(app) {
+                            spotify::disconnect(app);
+                        } else {
+                            spotify::start_connect(app);
                         }
                     }
                     #[cfg(debug_assertions)]
