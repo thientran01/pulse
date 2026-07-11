@@ -94,12 +94,18 @@ src-tauri/src/
                 ms_listened; feed HTTP on the blocking pool, never the media
                 loop thread). Fed marker persisted (no restart double-feed);
                 fed item popped when it starts playing (loose title/artist
-                match), unmarked when the user jumps elsewhere; fed-pop
-                bookkeeping suspends while a play_now jump flickers through
-                intermediates. Honest limits (matrix finding 11): chain
-                holds only while Pulse runs + Spotify connected; skips
-                inside the Spotify app bypass the list; removing a fed
-                front leaks that one track to Spotify's queue
+                match, with same-key restart detection so repeat-one and a
+                re-queued current track behave); a change that BYPASSES a
+                pending fed item keeps it armed and fires one reconcile
+                read (still queued at Spotify → keep waiting; consumed
+                where Pulse couldn't see → drop + unmark, feeder moves on)
+                — the fed marker never floats free of ground truth. Fed-pop
+                bookkeeping and HISTORY ingestion both suspend while a
+                play_now jump flickers through intermediates. Honest limits
+                (matrix finding 11): chain holds only while Pulse runs +
+                Spotify connected; skips inside the Spotify app bypass the
+                list; removing a fed front leaks that one track to
+                Spotify's queue
   presence.rs   fullscreen sensing + the courtesy conceal: own 1s watcher
                 thread sensing settled fullscreen foreground content
                 (rect-vs-monitor — widget-monitor scoped — OR'd with
@@ -133,7 +139,32 @@ src/            React widget: pill ↔ card ↔ expanded modes; lib/posClock.ts 
                 together. Browser mock: npm run dev → /?am replays Apple Music's
                 pathological emit profile (1s-floored positions, pause-era stamp on
                 resume, can_seek=false) for posClock repro without a live
-                player; /?nothing forces the no-session resting state
+                player; /?nothing forces the no-session resting state;
+                /?spotify=off forces the queue gate, ?jump=partial the jump
+                failure caption
+src/Queue.tsx   the 11a queue & history UI: Pulse's up-next list + the
+                "Earlier" history feed, TWO garments off ONE queueOpen bit —
+                a 312px popover floating above the pill/card (corner-aware:
+                opens away from the docked side; rides the mode resize on
+                the shell's 200ms EASE.inOut; max-height from the REAL
+                440px window: pill 330 / card 296) and an always-mounted
+                content surface inside expanded (200ms in with the .98
+                exhale, 140ms opacity out, visibility deferred — scroll and
+                feed survive closing; chrome + toggles never move). The
+                garment follows effectiveMode, so continuity across the
+                ladder is free. WHILE THE POPOVER IS OPEN THE HIT RECT
+                UNIONS ITS BOX (App's footprint effect) — a consumer that
+                forgets this puts clicks through to the desktop, the worst
+                failure class. Rows: 44px, hover-revealed actions
+                (history: play-now/+, uri-gated on enrichment; queue:
+                grip/×), pointer reorder with ±26px live swap, history→queue
+                ghost-chip drag (history itself never reorders), accent/16
+                flash + 1.6s aria-live toast, keyboard ↑/↓/Delete/Enter.
+                play_now suppresses the pill announcement for intermediates
+                (isAnnounceSuppressed) — the target announces once. The
+                cluster is [queue][collapse][expand]; the expanded note
+                seat stays the ONLY lyrics entry and exits the queue
+                surface to lyrics
 src/icons/      morphing icon system (benji.org/morphing-icons-with-claude, generalized):
                 every icon = 3 strokes × 2 cubics with identical command skeletons, so
                 any icon morphs into any other by tweening d strings — geometry.ts is
@@ -150,7 +181,7 @@ src/icons/      morphing icon system (benji.org/morphing-icons-with-claude, gene
                 never a direction chevron. Dev sequencer: npm run dev → /?lab
 ```
 
-Design rule: chrome stays neutral (house semantic tokens); the album-art palette is the **accent layer only** — progress fills, the **living separator** (src/Waveform.tsx — a colorless muted middot that blooms into Apple-style accent capsules while music plays and settles back on pause; the ONLY audio-reactive surface — one living instance per view, riding the TITLE line everywhere (the capsules are a now-playing pulse — they belong to the song), sized to its container (pill: `sm` inline between title·artist, where a track change while playing runs the **announcement** — the ladder collapses to the lone dot with the old song's color draining at the bottom, re-multiplies gray on the bloom cadence, and ignites LAST (in the incoming album's accent when the palette has resolved; AM art can lag ~10s, and the standard retint sweep recolors late arrivals); the keyed title/artist fade in up front (`.title-in`, mount-gated so a mode switch into the pill never replays it; `__mockNext()` drives it from console in preview) — separator vocabulary responding to a content event, not a new ambient license; card + expanded lyrics header: `md` trailing the title, bars-only while playing, 10px gap = ml-1 over the built-in mx-1.5, with the artist/album lines on a static `SeparatorDot` — an md separator overpowered the 12px line, 2026-07-10; expanded big-art: standalone `lg` hero, nine capsules, constant footprint so the art never moves, metadata line on a static `SeparatorDot`); supersedes the art-halo direction and the shell glow blessed 2026-07-06), and the current-lyric **marker** (the lyric line's text stays fg — extracted accents only guarantee 3:1, below the 4.5:1 text floor). No glow anywhere: the card shell shadow is neutral black and non-reactive (lift only), the art carries no shadow. The art never moves; nothing moves *ambiently* except the separator's bars and the resting pulse (the no-session breathing dot) — interactive icon glyphs may morph in response to input (press, mode change), per src/icons/. Accent never colors text or chrome surfaces. Motion uses EASE/DUR tokens — `/emil-pass` binds to them. Transitions earn continuity by content identity: arrival choreography (the expanded view's lyric cascade) is reserved for content the user actually waited on; on a track change the outgoing view exits fast and plain — stale art/lyrics never get choreographed continuity, and chrome (transport/progress/mode cluster) holds still by living outside the swap.
+Design rule: chrome stays neutral (house semantic tokens); the album-art palette is the **accent layer only** — progress fills, the **living separator** (src/Waveform.tsx — a colorless muted middot that blooms into Apple-style accent capsules while music plays and settles back on pause; the ONLY audio-reactive surface — one living instance per view, riding the TITLE line everywhere (the capsules are a now-playing pulse — they belong to the song), sized to its container (pill: `sm` inline between title·artist, where a track change while playing runs the **announcement** — the ladder collapses to the lone dot with the old song's color draining at the bottom, re-multiplies gray on the bloom cadence, and ignites LAST (in the incoming album's accent when the palette has resolved; AM art can lag ~10s, and the standard retint sweep recolors late arrivals); the keyed title/artist fade in up front (`.title-in`, mount-gated so a mode switch into the pill never replays it; `__mockNext()` drives it from console in preview) — separator vocabulary responding to a content event, not a new ambient license; card + expanded lyrics header: `md` trailing the title, bars-only while playing, 10px gap = ml-1 over the built-in mx-1.5, with the artist/album lines on a static `SeparatorDot` — an md separator overpowered the 12px line, 2026-07-10; expanded big-art: standalone `lg` hero, nine capsules, constant footprint so the art never moves, metadata line on a static `SeparatorDot`); supersedes the art-halo direction and the shell glow blessed 2026-07-06), and the current-lyric **marker** (the lyric line's text stays fg — extracted accents only guarantee 3:1, below the 4.5:1 text floor), plus the 11a queue feedback (the newly-queued row flash `accent/15` and the drop-zone glow `border-accent/55 bg-accent/5` — transient content feedback, handoff-licensed 2026-07-10, NOT a new ambient or chrome license). No glow anywhere: the card shell shadow is neutral black and non-reactive (lift only), the art carries no shadow. The art never moves; nothing moves *ambiently* except the separator's bars and the resting pulse (the no-session breathing dot) — interactive icon glyphs may morph in response to input (press, mode change), per src/icons/. Accent never colors text or chrome surfaces. Motion uses EASE/DUR tokens — `/emil-pass` binds to them. Transitions earn continuity by content identity: arrival choreography (the expanded view's lyric cascade) is reserved for content the user actually waited on; on a track change the outgoing view exits fast and plain — stale art/lyrics never get choreographed continuity, and chrome (transport/progress/mode cluster) holds still by living outside the swap.
 
 **Presence (the courtesy layer):** the widget senses ONE thing — settled fullscreen foreground content (src-tauri/src/presence.rs) — and takes ONE action: the courtesy conceal. Fullscreen content on the widget's monitor (rect-vs-monitor, OR'd with SHQueryUserNotificationState's GLOBAL D3D/presentation states; hysteresis 2s in / 1s out) hides the native window; the episode ending restores it exactly as it was. Visibility is intent-composed (`VisIntent` in lib.rs) — a manual hide is sticky across episodes, a manual show (hotkey/tray/reset/relaunch) snoozes the conceal for the current episode, and **every show/hide flows through `apply_visibility`, never raw hide()/show()** (grep rule). The tray "Hide on fullscreen" check item (id/settings key still `companion`) is the persisted switch for the action (sensing continues). The resting pulse (the no-session breathing dot, `.resting-pulse`) stays — it reacts to the MUSIC being absent, not to the user. **The idle-driven behaviors (P3 ambient AFK grow, P4 working quiet) were REMOVED 2026-07-11 after two weeks of soak:** behaviors that guess at attention from idle timers (away thresholds, input duty) fought manual intent hard enough to need latches on latches; the conceal acts on a fact and never misfired. Do not re-propose idle-driven mode changes — PRs #57–#59 hold the machinery and the lessons if this is ever revisited. Presence never resizes or moves the native window, never touches accent or color, and manual input always wins. docs/presence-signal-matrix.md is the source of truth for what Windows actually reports — check it before trusting a detection path.
 

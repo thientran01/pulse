@@ -110,7 +110,9 @@ function mockHistoryEntry(
     ended_at_ms: startedAtMs + listenedMs,
     ms_listened: listenedMs,
     duration_ms: MOCK_DURATION,
-    spotify_uri: null,
+    // Same scheme as mockQueueTrack — history rows' play-now/+/drag are
+    // uri-gated, and the mock's enrichment always "succeeded".
+    spotify_uri: `spotify:track:mock-${t.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
   };
 }
 
