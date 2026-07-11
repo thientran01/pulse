@@ -176,6 +176,16 @@ export function onSpotifyJump(cb: (t: { title: string; artist: string }) => void
   };
 }
 
+/** The backend jump fell back to a plain skip — the armed suppression must
+ * clear so that legitimate track change announces. */
+export function onSpotifyJumpCancel(cb: () => void): () => void {
+  if (!IN_TAURI) return () => {}; // mock next never takes the fallback path
+  const un = listen("spotify-jump-cancel", () => cb());
+  return () => {
+    un.then((f) => f());
+  };
+}
+
 /** Connection state (OAuth tokens present) — seed + event pairing. */
 export function onSpotifyStatus(cb: (s: SpotifyStatus) => void): () => void {
   if (IN_TAURI) {

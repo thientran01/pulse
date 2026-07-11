@@ -170,6 +170,12 @@ export function armSuppression(t: { title: string; artist: string }): void {
   suppression.artist = t.artist.trim().toLowerCase();
 }
 
+/** A backend jump armed suppression but fell back to a plain skip — that
+ * legitimate track change must announce ("spotify-jump-cancel"). */
+export function clearSuppression(): void {
+  suppression.until = 0;
+}
+
 async function playTrackNow(t: { uri: string; title: string; artist: string }): Promise<string> {
   armSuppression(t);
   const result = await commands.playNow(t.uri);
