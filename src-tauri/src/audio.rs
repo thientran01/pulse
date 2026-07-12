@@ -1,10 +1,11 @@
 //! Audio-reactive core: WASAPI loopback capture of the default output device
 //! → FFT → smoothed band energies emitted as "audio-bands" events (~30Hz).
 //!
-//! Lifecycle discipline (plan M4): capture runs ONLY while the widget is
-//! visible AND something is playing. The owner thread opens/drops the cpal
+//! Lifecycle discipline (plan M4): capture runs ONLY while a Pulse window
+//! is visible (the main widget OR the focus takeover — lib.rs widens the
+//! gate) AND something is playing. The owner thread opens/drops the cpal
 //! stream on demand — dropping releases the device entirely, so a hidden or
-//! paused widget costs zero audio work.
+//! paused app costs zero audio work.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rustfft::{num_complex::Complex, FftPlanner};

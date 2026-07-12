@@ -282,6 +282,23 @@ pub(crate) fn apply_visibility(app: &AppHandle) {
 fn toggle_widget(app: &AppHandle) {
     let Some(win) = app.get_webview_window("main") else { return };
     let vis = app.state::<VisIntent>();
+    // During the focus takeover the hotkey means "give me the widget back":
+    // LEAVE FOCUS (the Destroyed handler restores the exact prior intent).
+    // Reasoning from raw visibility here would see main hidden and silently
+    // wipe a sticky manual hide / snooze a live conceal with zero visible
+    // effect — corrupting the prior intent focus promises to restore
+    // (quick-review catch, 2026-07-11).
+    if vis.focus_open.load(Ordering::Relaxed) {
+        if let Some(focus_win) = app.get_webview_window(focus::LABEL) {
+            let _ = focus_win.destroy();
+        } else {
+            // Window gone but the flag stuck (a failed create/show) — the
+            // hotkey is the recovery path: clear and reconcile.
+            vis.focus_open.store(false, Ordering::Relaxed);
+            apply_visibility(app);
+        }
+        return;
+    }
     // Decide from what the user actually SEES, not the intent flags — this
     // self-heals any intent/OS desync. Hiding is always a user act; showing
     // during a conceal episode snoozes the conceal for that episode (the
@@ -429,6 +446,12 @@ pub fn run() {
             // block there (see the async-command note above), so the whole
             // reconcile defers to the async pool.
             let vis = app.state::<VisIntent>();
+            // During the focus takeover, Pulse IS surfaced — the summons is
+            // already satisfied, and the flag-clears below would silently
+            // corrupt the prior intent focus restores on close.
+            if vis.focus_open.load(Ordering::Relaxed) {
+                return;
+            }
             vis.user_hidden.store(false, Ordering::Relaxed);
             if vis.concealed.load(Ordering::Relaxed) {
                 vis.conceal_snoozed.store(true, Ordering::Relaxed);
@@ -458,7 +481,7 @@ pub fn run() {
                 // Only "main" persists position. The palette recenters per
                 // summon and focus mode is born fullscreen — a restored
                 // stale position would be wrong for both.
-                .with_denylist(&[palette::LABEL, "focus"])
+                .with_denylist(&[palette::LABEL, focus::LABEL])
                 .build(),
         )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())

@@ -157,9 +157,35 @@ src-tauri/src/
                 too — the rect method carries that case).
                 docs/presence-signal-matrix.md is the source of truth for
                 what Windows reports per scenario
+  focus.rs      focus mode (B1): the fullscreen now-playing takeover — a
+                user-invoked, TRANSIENT second window (the expanded view's
+                expand bracket = the ladder's fourth rung, "Expand to
+                focus"; Esc / its collapse control / Alt-F4 close it via
+                ONE path, the label-filtered Destroyed handler).
+                Create-on-open, destroy-on-close, born fullscreen on the
+                widget's monitor (position → set_fullscreen → show; a
+                DIFFERENT window born at size is never-resize-legal).
+                VisIntent gains focus_open (memory-only — a relaunch can
+                never boot into focus; pulse.mode never learns about it):
+                effective = !user_hidden && !(concealed && !snoozed) &&
+                !focus_open, so closing restores the EXACT prior intent.
+                Ctrl+Alt+M and the single-instance summons are focus-aware
+                (the hotkey leaves focus; the summons no-ops) — reasoning
+                from raw visibility there would silently corrupt that
+                intent. The media loop's `visible` and the audio capture
+                gate widen to main-OR-focus (main hides behind the
+                takeover; ungated, the player froze). Frontend:
+                src/Focus.tsx (skeleton — composition reserved for the
+                design panel), two views on the mic⇄note grammar (lyrics
+                at the LyricsPanel "focus" type scale / the
+                src/Visualizer.tsx room-scale instrument — NOT a fourth
+                Waveform size; one reactive surface per view holds).
+                This is the removed P3's want with the correct trigger:
+                invoked, never guessed
   audio.rs      WASAPI loopback (cpal input stream on the output device) → FFT →
                 smoothed auto-gained band energies at ~30Hz; capture runs ONLY
-                while visible AND playing (stream dropped otherwise)
+                while a Pulse window is visible (main OR focus) AND playing
+                (stream dropped otherwise)
 src/            React widget: pill ↔ card ↔ expanded modes; lib/posClock.ts is the ONE
                 owner of playback position (monotonic per track while playing — raw pairs
                 in, display clock out; all seek/pause/jitter filtering lives there);

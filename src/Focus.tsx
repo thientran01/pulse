@@ -151,8 +151,11 @@ export default function Focus() {
     <div className="group/focus relative flex h-screen w-screen flex-col overflow-hidden bg-surface text-fg">
       {/* Corner controls: view toggle + collapse, the widget's hover-reveal
           contract (plain CSS hover is safe here — this window never goes
-          click-through). Collapse = the contract-bracket verb, going home. */}
-      <div className="pointer-events-none absolute right-4 top-4 z-10 flex gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-hover/focus:pointer-events-auto group-hover/focus:opacity-100">
+          click-through) PLUS the has-[:focus-visible] reveal: the buttons
+          stay in the tab order, and a hover-only reveal strands keyboard
+          users on invisible controls (the widget's own 2026-07-08 catch).
+          Collapse = the contract-bracket verb, going home. */}
+      <div className="pointer-events-none absolute right-4 top-4 z-10 flex gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-hover/focus:pointer-events-auto group-hover/focus:opacity-100 has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:opacity-100">
         <button
           type="button"
           aria-label={view === "lyrics" ? "Show visualizer" : "Show lyrics"}

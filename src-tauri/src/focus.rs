@@ -40,8 +40,12 @@ pub const LABEL: &str = "focus";
 /// widget's monitor, flag the intent, yield the widget.
 #[tauri::command]
 pub async fn focus_open(app: AppHandle) {
-    if app.get_webview_window(LABEL).is_some() {
-        return; // already open (double-click on the bracket)
+    if let Some(win) = app.get_webview_window(LABEL) {
+        // Already open (double-click on the bracket) — front it. If it's a
+        // mid-teardown corpse (Esc→reopen race, the destroy hasn't drained),
+        // this no-ops and the click is lost; rare, self-heals, accepted.
+        let _ = win.set_focus();
+        return;
     }
     let result = WebviewWindowBuilder::new(
         &app,
@@ -69,7 +73,16 @@ pub async fn focus_open(app: AppHandle) {
                 let _ = win.set_position(pos);
             }
             let _ = win.set_fullscreen(true);
-            let _ = win.show();
+            // The widget yields only for a takeover that actually appeared:
+            // a failed show() with the flag set would leave NOTHING on
+            // screen, and only the focus window's Destroyed event clears
+            // the flag (quick-review catch; Ctrl+Alt+M carries a recovery
+            // path regardless).
+            if win.show().is_err() {
+                eprintln!("focus: show failed — aborting the takeover");
+                let _ = win.destroy();
+                return;
+            }
             let _ = win.set_focus();
             app.state::<VisIntent>().focus_open.store(true, Ordering::Relaxed);
             apply_visibility(&app);

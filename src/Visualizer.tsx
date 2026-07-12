@@ -16,7 +16,9 @@ import { useEffect, useRef } from "react";
 import { SPECTRUM_BINS } from "./lib/backend";
 import { Envelope, subscribeBands } from "./lib/reactive";
 
-/** Bars idle at this scale so the instrument reads as present, not dead. */
+/** Bars idle at this scale WHILE MUSIC IS LIVE so the instrument reads as
+ * present between hits; a zero payload (pause/stop/reduced-motion) drops
+ * the floor to 0 and the bars leave entirely. */
 const REST_SCALE = 0.04;
 
 export function Visualizer() {
@@ -33,11 +35,17 @@ export function Visualizer() {
       const dt = Math.min(now - last, 100);
       last = now;
       let alive = false;
+      // The rest floor holds only while the MUSIC is live — on a zero
+      // payload (pause, stop, reduced-motion's terminal push) the bars sink
+      // all the way out: a standing 16-bar accent field at rest would be an
+      // ambient accent surface the doctrine doesn't grant (quick-review
+      // catch).
+      const floor = latest.some((v) => v > 0) ? REST_SCALE : 0;
       for (let i = 0; i < SPECTRUM_BINS; i++) {
         const v = envs[i].step(latest[i], dt);
         if (v > 0.002 || latest[i] > 0) alive = true;
         const el = barsRef.current[i];
-        if (el) el.style.transform = `scaleY(${Math.max(v, REST_SCALE)})`;
+        if (el) el.style.transform = `scaleY(${Math.max(v, floor)})`;
       }
       if (alive) {
         raf = requestAnimationFrame(frame);
@@ -52,10 +60,11 @@ export function Visualizer() {
       raf = requestAnimationFrame(frame);
     };
 
+    // Every payload wakes the loop — a zero payload still needs frames so
+    // the decay-to-rest ANIMATES before the loop parks itself.
     const unsubscribe = subscribeBands((b) => {
       latest = b.spectrum;
-      if (b.spectrum.some((v) => v > 0)) wake();
-      else wake(); // one more pass so the decay-to-rest animates
+      wake();
     });
     return () => {
       unsubscribe();
