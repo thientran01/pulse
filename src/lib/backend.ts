@@ -818,6 +818,17 @@ export const commands = {
   paletteHide(): void {
     if (IN_TAURI) void invoke("palette_hide");
   },
+  /** Open the fullscreen focus takeover (focus.rs — creates the window,
+   * hides the widget via VisIntent). Mock: no window system — no-op; the
+   * focus UI itself is iterable at /?window=focus. */
+  focusOpen(): void {
+    if (IN_TAURI) void invoke("focus_open");
+  },
+  /** Close the takeover (Esc / collapse). Destroy-on-close; the Destroyed
+   * handler restores the widget to its exact prior intent. */
+  focusClose(): void {
+    if (IN_TAURI) void invoke("focus_close");
+  },
   /** Fill up-next with Last.fm-similar tracks for the current track
    * (similar.rs). Statuses: ok:<n> | no_matches | no_data | no_key | busy |
    * disconnected | offline. Rows land incrementally via "upnext-changed". */

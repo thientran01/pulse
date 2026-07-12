@@ -1,5 +1,6 @@
 mod audio;
 mod dock;
+mod focus;
 mod history;
 mod lastfm;
 mod lyrics;
@@ -216,7 +217,7 @@ pub(crate) fn emit_now(app: &AppHandle) -> media::NowPlaying {
 /// show()/hide() — grep rule; palette.rs is the one other, window-scoped
 /// visibility ledger, for its own label only),
 /// which reconciles the window to:
-///   effective = !user_hidden && !(concealed && !conceal_snoozed)
+///   effective = !user_hidden && !(concealed && !conceal_snoozed) && !focus_open
 pub struct VisIntent {
     /// Sticky manual hide (hotkey/tray while visible). Survives conceal
     /// episodes: a game ending must not resurrect a widget the user hid.
@@ -230,6 +231,11 @@ pub struct VisIntent {
     /// persisted in app-data settings.json): sensing continues, behaviors
     /// stop. Persisted because a setting that silently resets erodes trust.
     pub companion: AtomicBool,
+    /// The fullscreen focus window is open (focus.rs) — the widget yields
+    /// unconditionally and returns to its EXACT prior intent on close (a
+    /// sticky manual hide stays hidden; a live conceal episode still holds).
+    /// Memory-only, never persisted: a relaunch can never boot into focus.
+    pub focus_open: AtomicBool,
 }
 
 impl Default for VisIntent {
@@ -239,6 +245,7 @@ impl Default for VisIntent {
             concealed: AtomicBool::new(false),
             conceal_snoozed: AtomicBool::new(false),
             companion: AtomicBool::new(true),
+            focus_open: AtomicBool::new(false),
         }
     }
 }
@@ -248,6 +255,7 @@ impl VisIntent {
         !self.user_hidden.load(Ordering::Relaxed)
             && !(self.concealed.load(Ordering::Relaxed)
                 && !self.conceal_snoozed.load(Ordering::Relaxed))
+            && !self.focus_open.load(Ordering::Relaxed)
     }
 }
 
@@ -486,6 +494,8 @@ pub fn run() {
             spotify::spotify_resolve_uri,
             spotify::spotify_search,
             palette::palette_hide,
+            focus::focus_open,
+            focus::focus_close,
             upnext::upnext_list,
             upnext::upnext_add,
             upnext::upnext_remove,
@@ -515,11 +525,20 @@ pub fn run() {
                 }
                 // A dead window's reactive vote must not wedge the capture
                 // gate (the palette is create-once so this mostly serves
-                // focus mode's create/destroy lifecycle).
+                // focus mode's create/destroy lifecycle). Focus mode's
+                // destroy is ALSO its close path — Esc, the collapse
+                // control, and Alt-F4 all converge here, where the widget
+                // returns to its exact prior intent.
                 tauri::WindowEvent::Destroyed => {
                     let votes = window.app_handle().state::<UiReactive>();
-                    let mut m = votes.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    m.remove(window.label());
+                    {
+                        let mut m =
+                            votes.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        m.remove(window.label());
+                    }
+                    if window.label() == focus::LABEL {
+                        focus::on_destroyed(window.app_handle());
+                    }
                 }
                 _ => {}
             }
@@ -782,10 +801,19 @@ pub fn run() {
                     if let Some(w) = watch.as_mut() {
                         w.resubscribe(std::mem::take(&mut resubscribe));
                     }
+                    // Widened for focus mode: main hides behind the takeover
+                    // (VisIntent.focus_open), and a loop gated on main alone
+                    // would stop emitting — a frozen player in the focus
+                    // window (verified in planning). The audio capture
+                    // switch below inherits this for free.
                     let visible = handle
                         .get_webview_window("main")
                         .and_then(|w| w.is_visible().ok())
-                        .unwrap_or(true);
+                        .unwrap_or(true)
+                        || handle
+                            .get_webview_window(focus::LABEL)
+                            .and_then(|w| w.is_visible().ok())
+                            .unwrap_or(false);
                     let playing = if visible {
                         hidden_beats = 0;
                         let tick = media::tick_key();

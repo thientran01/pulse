@@ -45,6 +45,18 @@ if (import.meta.env.DEV && params.has("lab")) {
       // window would be worse than an honest empty pane.
       root.render(<p className="p-4 text-sm text-muted">Palette failed to load.</p>);
     });
+} else if (params.get("window") === "focus") {
+  import("./Focus")
+    .then(({ default: Focus }) => {
+      root.render(
+        <React.StrictMode>
+          <Focus />
+        </React.StrictMode>,
+      );
+    })
+    .catch(() => {
+      root.render(<p className="p-4 text-sm text-muted">Focus failed to load.</p>);
+    });
 } else {
   root.render(
     <React.StrictMode>
