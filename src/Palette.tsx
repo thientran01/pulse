@@ -40,6 +40,10 @@ interface PaletteRow {
   /** Full track when it came from search; resurfaced rows resolve on demand. */
   track: QueueTrack | null;
   uri: string | null;
+  /** Why a resurfaced row is here — rendered on the row. Unlabeled, the
+   * picks read as a bug ("why these two? why did one change?") — Thien's
+   * live feedback, 2026-07-12. */
+  reason?: string;
 }
 
 function searchRow(t: QueueTrack): PaletteRow {
@@ -62,8 +66,10 @@ async function resolveUri(row: PaletteRow): Promise<string | null> {
 
 /** The empty state's picks: (1) the most-lived-in track you haven't played
  * in the last day, (2) an "on this day" from a prior month when one exists,
- * (3) a wildcard from the top listens. All relative measures — the history
- * log is young, and absolute thresholds would answer nothing for months. */
+ * (3) a daily pick from the top listens. All relative measures — the history
+ * log is young, and absolute thresholds would answer nothing for months.
+ * DETERMINISTIC within a day: the old per-summon random wildcard made the
+ * list shuffle on every open, which read as flakiness, not curation. */
 async function computeResurfaced(): Promise<PaletteRow[]> {
   const entries: HistoryEntry[] = [];
   let before: number | null = null;
@@ -101,24 +107,38 @@ async function computeResurfaced(): Promise<PaletteRow[]> {
   const all = [...byKey.values()].filter((t) => t.ms >= RESURFACE_MIN_MS);
   const rested = all.filter((t) => now - t.last > day);
   const pool = (rested.length ? rested : all).slice().sort((a, b) => b.ms - a.ms);
-  const picks: Agg[] = [];
-  if (pool[0]) picks.push(pool[0]);
+  const picks: { agg: Agg; reason: string }[] = [];
+  if (pool[0]) {
+    picks.push({
+      agg: pool[0],
+      reason: rested.length ? "Haven't heard in a while" : "Most played",
+    });
+  }
   const today = new Date().getDate();
   const onThisDay = all.find(
-    (t) => new Date(t.last).getDate() === today && now - t.last > 25 * day && !picks.includes(t),
+    (t) =>
+      new Date(t.last).getDate() === today &&
+      now - t.last > 25 * day &&
+      !picks.some((p) => p.agg === t),
   );
-  if (onThisDay) picks.push(onThisDay);
-  const rest = pool.filter((t) => !picks.includes(t)).slice(0, 10);
-  if (rest.length) picks.push(rest[Math.floor(Math.random() * rest.length)]);
+  if (onThisDay) picks.push({ agg: onThisDay, reason: "On this day" });
+  const rest = pool.filter((t) => !picks.some((p) => p.agg === t)).slice(0, 10);
+  if (rest.length) {
+    // Rotates DAILY, stable within the day — a per-summon shuffle read as
+    // a bug; a dated pick reads as curation.
+    const daySeed = Math.floor(now / day);
+    picks.push({ agg: rest[daySeed % rest.length], reason: "Today's pick" });
+  }
   const rows: PaletteRow[] = [];
   for (const p of picks.slice(0, 3)) {
     rows.push({
-      key: p.key,
-      title: p.title,
-      artist: p.artist,
-      artUrl: await commands.historyThumbUrl(p.key),
+      key: p.agg.key,
+      title: p.agg.title,
+      artist: p.agg.artist,
+      artUrl: await commands.historyThumbUrl(p.agg.key),
       track: null,
-      uri: p.uri,
+      uri: p.agg.uri,
+      reason: p.reason,
     });
   }
   return rows;
@@ -137,6 +157,12 @@ const PlusGlyph = (
   <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" aria-hidden>
     <path d="M 8,3.4 L 8,12.6" />
     <path d="M 3.4,8 L 12.6,8" />
+  </svg>
+);
+const PlayGlyph = (
+  <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    <path d="M 5.4,3.4 L 5.4,12.6" />
+    <path d="M 5.4,3.4 L 13,8 L 5.4,12.6" />
   </svg>
 );
 
@@ -250,22 +276,23 @@ export default function Palette() {
   const playRow = async (row: PaletteRow) => {
     if (busy.current) return;
     busy.current = true;
-    showNote(`Playing · ${row.title}`, 10_000);
     try {
+      // Resolve BEFORE dismissing — it's one fast search for un-enriched
+      // history rows (instant for search results), and "couldn't find it"
+      // still has a surface to land on.
       const uri = await resolveUri(row);
       if (!uri) {
         showNote("Couldn't find it on Spotify");
         return;
       }
-      const r = await commands.playNow(uri);
-      if (r === "ok" || r === "partial") {
-        setQuery("");
-        setNote(null);
-        commands.paletteHide();
-      } else if (r === "no_device") showNote("Open Spotify somewhere first");
-      else if (r === "busy") showNote("Still landing the last jump");
-      else if (r === "gone" || r === "diverged") showNote("Queue moved on — try again");
-      else showNote("Spotify unreachable");
+      // Light exit (Thien's call, 2026-07-12): dismiss the INSTANT the
+      // intent is actionable — the music changing is the confirmation.
+      // The jump itself takes seconds and runs behind the dismissal; a
+      // rare post-dismiss failure is deliberately silent.
+      setQuery("");
+      setNote(null);
+      commands.paletteHide();
+      void commands.playNow(uri);
     } finally {
       busy.current = false;
     }
@@ -357,7 +384,12 @@ export default function Palette() {
             spellCheck={false}
             autoCorrect="off"
             autoComplete="off"
-            className="min-w-0 flex-1 bg-transparent text-[15px] text-fg outline-none placeholder:text-muted"
+            // focus-visible:outline-none out-specificities index.css's global
+            // accent focus ring — it's built for 28px buttons, and on a bare
+            // full-width input it rendered as a square orange bar (Thien's
+            // live feedback). The caret is this input's focus signal; it is
+            // the pane's only focusable element.
+            className="min-w-0 flex-1 bg-transparent text-[15px] text-fg outline-none placeholder:text-muted focus-visible:[outline:none]"
           />
           <span className="shrink-0 text-[10px] text-muted/60">
             ↵ play · ⇧↵ queue
@@ -412,6 +444,29 @@ export default function Palette() {
                       <span className="truncate text-xs font-medium text-fg">{row.title}</span>
                       <span className="truncate text-[11px] text-muted">{row.artist}</span>
                     </span>
+                    {/* The pick's why — without it the resurfacing reads as
+                        a bug. Yields to the action buttons on hover. */}
+                    {row.reason && (
+                      <span className="shrink-0 text-[10px] text-muted/60 [transition:opacity_140ms_var(--ease-out-tk)] group-hover/row:opacity-0">
+                        {row.reason}
+                      </span>
+                    )}
+                    {/* Explicit verbs on hover (the history-row grammar) —
+                        the bare row click also plays, but nothing SAID so. */}
+                    <button
+                      type="button"
+                      tabIndex={-1}
+                      aria-label={`Play ${row.title} now`}
+                      title="Play now (Enter)"
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void playRow(row);
+                      }}
+                      className="grid h-[26px] w-[26px] shrink-0 place-items-center rounded-md text-fg opacity-0 [transition:opacity_140ms_var(--ease-out-tk),background-color_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 active:scale-95 group-hover/row:opacity-100"
+                    >
+                      {PlayGlyph}
+                    </button>
                     <button
                       type="button"
                       tabIndex={-1}

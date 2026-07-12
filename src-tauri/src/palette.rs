@@ -50,8 +50,31 @@ pub fn init(app: &AppHandle) {
     .minimizable(false)
     .visible(false)
     .build();
-    if let Err(e) = result {
-        eprintln!("palette: window create failed ({e}) — summon disabled this run");
+    match result {
+        Ok(win) => {
+            // DWM cross-fades layered (transparent) windows on hide() —
+            // show is instant, hide isn't, and the asymmetric fade-out read
+            // as a heavy exit (Thien's live feedback, 2026-07-12). This
+            // per-window attribute kills DWM transitions both ways.
+            #[cfg(windows)]
+            if let Ok(hwnd) = win.hwnd() {
+                use windows::Win32::Graphics::Dwm::{
+                    DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED,
+                };
+                let disable: windows::core::BOOL = true.into();
+                let _ = unsafe {
+                    DwmSetWindowAttribute(
+                        windows::Win32::Foundation::HWND(hwnd.0),
+                        DWMWA_TRANSITIONS_FORCEDISABLED,
+                        std::ptr::from_ref(&disable).cast(),
+                        std::mem::size_of::<windows::core::BOOL>() as u32,
+                    )
+                };
+            }
+        }
+        Err(e) => {
+            eprintln!("palette: window create failed ({e}) — summon disabled this run");
+        }
     }
 }
 

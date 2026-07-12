@@ -6,11 +6,11 @@
  * visual composition (scale relationships, background treatment, the
  * visualizer's final form) belongs to the 3-design/3-judge panel.
  *
- * Two views on the expanded view's mic ⇄ note grammar:
- *   lyrics — hero header (art + title/artist) over the karaoke panel at
- *            the "focus" type scale; big-art fallback when nothing synced
- *   visualizer — the room-scale instrument (src/Visualizer.tsx), the one
- *            reactive surface of that view
+ * One composition: the karaoke panel at the "focus" type scale under a
+ * hero header, with the big-art room as the no-lyrics fallback. (A separate
+ * visualizer view existed briefly and was CUT on Thien's live feedback,
+ * 2026-07-12 — "didn't know it was there, looks bad"; the design panel owns
+ * whatever reactive presence replaces it.)
  *
  * Realm notes: own onNowPlaying → posClock.ingest loop (posClock is
  * per-realm), own lyric fetch (disk cache makes the second fetch ~free),
@@ -29,7 +29,6 @@ import { initReactive } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
 import { LyricsPanel, lyricsKeyOf, useLyrics } from "./LyricsPanel";
 import { SeparatorDot, Waveform } from "./Waveform";
-import { Visualizer } from "./Visualizer";
 import type { NowPlaying } from "./types";
 
 /** Identity fields — the same re-render gate App.tsx uses (position lives
@@ -96,14 +95,6 @@ function useArtAccent(artUrl: string | null): void {
   }, [artUrl]);
 }
 
-function readViewPref(): "lyrics" | "visualizer" {
-  try {
-    return localStorage.getItem("pulse.focusView") === "visualizer" ? "visualizer" : "lyrics";
-  } catch {
-    return "lyrics";
-  }
-}
-
 export default function Focus() {
   const [np, setNp] = useState<NowPlaying | null>(null);
   useEffect(
@@ -118,19 +109,6 @@ export default function Focus() {
   useArtAccent(artUrl);
   const lyrics = useLyrics(np);
   useEffect(() => initReactive(), []);
-
-  const [view, setView] = useState<"lyrics" | "visualizer">(readViewPref);
-  const toggleView = () => {
-    setView((v) => {
-      const next = v === "lyrics" ? "visualizer" : "lyrics";
-      try {
-        localStorage.setItem("pulse.focusView", next);
-      } catch {
-        // non-fatal: the preference resets next open
-      }
-      return next;
-    });
-  };
 
   // Esc closes — window-level so it works from anywhere in the view.
   useEffect(() => {
@@ -158,21 +136,6 @@ export default function Focus() {
       <div className="pointer-events-none absolute right-4 top-4 z-10 flex gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-hover/focus:pointer-events-auto group-hover/focus:opacity-100 has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:opacity-100">
         <button
           type="button"
-          aria-label={view === "lyrics" ? "Show visualizer" : "Show lyrics"}
-          title={view === "lyrics" ? "Show visualizer" : "Show lyrics"}
-          onClick={toggleView}
-          className="grid h-8 w-8 place-items-center rounded-md text-fg [transition:background-color_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 active:scale-95"
-        >
-          <MorphIcon
-            name={view === "lyrics" ? "note" : "mic"}
-            size={15}
-            slot="focus-view"
-            dur={DUR[3]}
-            ease={EASE.inOut}
-          />
-        </button>
-        <button
-          type="button"
           aria-label="Leave focus (Esc)"
           title="Leave focus (Esc)"
           onClick={() => commands.focusClose()}
@@ -185,19 +148,6 @@ export default function Focus() {
       {nothing ? (
         <div className="grid h-full w-full place-items-center">
           <span className="resting-pulse block h-2 w-2 rounded-full bg-muted" aria-hidden />
-        </div>
-      ) : view === "visualizer" ? (
-        <div className="relative h-full w-full">
-          <Visualizer />
-          {/* Quiet identity anchor — bottom-left, out of the instrument's way. */}
-          <div className="absolute bottom-8 left-10 max-w-[40%]">
-            <p className="truncate text-xl font-medium text-fg">{np.title}</p>
-            <p className="truncate text-base text-muted">
-              {np.artist}
-              {np.album && <SeparatorDot />}
-              {np.album}
-            </p>
-          </div>
         </div>
       ) : lyricsLive ? (
         <div className="mx-auto flex h-full w-full max-w-4xl flex-col px-10 py-12">
