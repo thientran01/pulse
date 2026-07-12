@@ -30,3 +30,6 @@ dist-ssr
 
 # Spike build artifacts
 spikes/*/target/
+
+# review-agent scratch dumps (mangled scratchpad paths land in the repo root)
+*.diff
