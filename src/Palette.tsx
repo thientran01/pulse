@@ -47,13 +47,16 @@ function searchRow(t: QueueTrack): PaletteRow {
 }
 
 /** Resolve-on-demand cache for resurfaced rows (the Queue.tsx uriCache
- * pattern; misses cached too so a dead row can't retry-storm). */
-const uriCache = new Map<string, string | null>();
+ * pattern) — successes only: the palette window lives for the whole app
+ * session, and caching a transient miss would permanently dead-row a pick.
+ * Actions are user-paced, so an occasional re-miss can't storm. */
+const uriCache = new Map<string, string>();
 async function resolveUri(row: PaletteRow): Promise<string | null> {
   if (row.uri) return row.uri;
-  if (uriCache.has(row.key)) return uriCache.get(row.key) ?? null;
+  const hit = uriCache.get(row.key);
+  if (hit) return hit;
   const uri = await commands.spotifyResolveUri(row.title, row.artist);
-  uriCache.set(row.key, uri);
+  if (uri) uriCache.set(row.key, uri);
   return uri;
 }
 
@@ -152,6 +155,11 @@ export default function Palette() {
   const noteTimer = useRef<number | null>(null);
   const flashTimers = useRef(new Map<string, number>());
   const busy = useRef(false);
+  // Hover only steals the selection on a REAL pointer move (>3px): the
+  // palette spawns near the cursor, and a hand resting on the mouse must
+  // not snap keyboard navigation back to whatever row it happens to cover
+  // (quick-review catch).
+  const lastMouse = useRef<{ x: number; y: number } | null>(null);
 
   // The per-window reactive vote (lib.rs vote map) — the palette renders no
   // reactive surface, but a realm that never votes would leave the previous
@@ -218,6 +226,7 @@ export default function Palette() {
         inputRef.current?.focus();
         inputRef.current?.select();
         setNote(null);
+        setSelected(0);
         void computeResurfaced().then(setResurfaced);
       }),
     [],
@@ -228,6 +237,13 @@ export default function Palette() {
   }, []);
 
   const hasQuery = query.trim().length > 0;
+  // Row-source flips (typing the first char, clearing) restart selection at
+  // the top — without this the RAW selected can sit past the new list and
+  // ArrowUp reads as dead until it walks back into range.
+  useEffect(() => {
+    setSelected(0);
+  }, [hasQuery]);
+
   const rows: PaletteRow[] = hasQuery ? (results ?? []).map(searchRow) : resurfaced;
   const sel = Math.min(selected, Math.max(rows.length - 1, 0));
 
@@ -256,39 +272,30 @@ export default function Palette() {
   };
 
   const queueRow = async (row: PaletteRow) => {
-    const uri = await resolveUri(row);
-    if (!uri) {
-      showNote("Couldn't find it on Spotify");
-      return;
-    }
-    commands.upnextAdd(
-      row.track ?? {
-        uri,
-        title: row.title,
-        artist: row.artist,
-        album: "",
-        duration_ms: 0,
-        art_url: row.artUrl,
-      },
-    );
-    flash(row.key);
-    showNote(`Queued · ${row.title}`);
-  };
-
-  const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      commands.paletteHide();
-    } else if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setSelected((i) => Math.min(i + 1, Math.max(rows.length - 1, 0)));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setSelected((i) => Math.max(i - 1, 0));
-    } else if (e.key === "Enter" && rows[sel]) {
-      e.preventDefault();
-      if (e.shiftKey) void queueRow(rows[sel]);
-      else void playRow(rows[sel]);
+    // Same one-write-at-a-time gate as playRow: a held Shift+Enter
+    // key-repeats, and upnext_add has no dedupe (quick-review catch).
+    if (busy.current) return;
+    busy.current = true;
+    try {
+      const uri = await resolveUri(row);
+      if (!uri) {
+        showNote("Couldn't find it on Spotify");
+        return;
+      }
+      commands.upnextAdd(
+        row.track ?? {
+          uri,
+          title: row.title,
+          artist: row.artist,
+          album: "",
+          duration_ms: 0,
+          art_url: row.artUrl,
+        },
+      );
+      flash(row.key);
+      showNote(`Queued · ${row.title}`);
+    } finally {
+      busy.current = false;
     }
   };
 
@@ -297,6 +304,25 @@ export default function Palette() {
     : searchStatus === "offline"
       ? "Spotify unreachable"
       : null;
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      commands.paletteHide();
+    } else if (e.key === "ArrowDown") {
+      // Step from the CLAMPED position — the raw state can sit past a
+      // shrunken list, where stepping it would strand the highlight.
+      e.preventDefault();
+      setSelected(Math.min(sel + 1, Math.max(rows.length - 1, 0)));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setSelected(Math.max(sel - 1, 0));
+    } else if (e.key === "Enter" && rows[sel] && !gateCaption) {
+      e.preventDefault();
+      if (e.shiftKey) void queueRow(rows[sel]);
+      else void playRow(rows[sel]);
+    }
+  };
 
   return (
     // The window is transparent and fixed-size; the p-3 gutter gives the
@@ -309,7 +335,10 @@ export default function Palette() {
       }}
       onKeyDown={onKeyDown}
     >
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border/10 bg-surface shadow-[0_1px_3px_rgba(0,0,0,0.3),0_8px_24px_rgba(0,0,0,0.35)]">
+      {/* The queue popover's shadow recipe (App.tsx) — not a third invented
+          elevation; it also stays inside the 12px gutter, the transparent-
+          window clip budget the card shadow once overflowed. */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border/10 bg-surface shadow-xl shadow-black/40">
         {/* Search row — the palette's one verb. */}
         <div className="flex items-center gap-2.5 border-b border-border/10 px-4 py-3">
           <span className={searching ? "text-fg" : "text-muted"}>
@@ -321,6 +350,10 @@ export default function Palette() {
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Play something…"
             aria-label="Search Spotify"
+            role="combobox"
+            aria-expanded={rows.length > 0}
+            aria-controls="palette-list"
+            aria-activedescendant={rows[sel] ? `palette-opt-${sel}` : undefined}
             spellCheck={false}
             autoCorrect="off"
             autoComplete="off"
@@ -333,26 +366,44 @@ export default function Palette() {
 
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-1.5 [scrollbar-width:none]">
           {gateCaption ? (
-            <p className="m-0 px-2.5 py-2 text-xs text-muted">{gateCaption}</p>
+            <p className="m-0 px-2 py-2 text-xs text-muted">{gateCaption}</p>
           ) : (
             <>
               {!hasQuery && rows.length > 0 && (
-                <p className="m-0 px-2.5 pb-1 pt-1.5 text-[10px] uppercase tracking-widest text-muted">
+                <p className="m-0 px-2 pb-1 pt-1.5 text-[10px] uppercase tracking-widest text-muted">
                   From your history
                 </p>
               )}
-              {hasQuery && !searching && rows.length === 0 && (
-                <p className="m-0 px-2.5 py-2 text-xs text-muted">No matches on Spotify</p>
+              {!hasQuery && rows.length === 0 && (
+                <p className="m-0 px-2 py-2 text-xs text-muted">
+                  Type to search Spotify — tracks you play will gather here.
+                </p>
               )}
-              <div role="listbox" aria-label={hasQuery ? "Search results" : "From your history"}>
+              {hasQuery && searching && rows.length === 0 && (
+                <p className="m-0 px-2 py-2 text-xs text-muted">Searching…</p>
+              )}
+              {hasQuery && !searching && rows.length === 0 && (
+                <p className="m-0 px-2 py-2 text-xs text-muted">No matches on Spotify</p>
+              )}
+              <div
+                id="palette-list"
+                role="listbox"
+                aria-label={hasQuery ? "Search results" : "From your history"}
+              >
                 {rows.map((row, i) => (
                   <div
                     key={row.key}
+                    id={`palette-opt-${i}`}
                     role="option"
                     aria-selected={i === sel}
-                    onMouseMove={() => setSelected(i)}
+                    onMouseMove={(e) => {
+                      const prev = lastMouse.current;
+                      lastMouse.current = { x: e.clientX, y: e.clientY };
+                      if (prev && Math.abs(prev.x - e.clientX) + Math.abs(prev.y - e.clientY) < 3) return;
+                      if (prev) setSelected(i);
+                    }}
                     onClick={() => void playRow(row)}
-                    className={`group/row flex h-[44px] cursor-pointer select-none items-center gap-2.5 rounded-md px-2.5 [transition:background-color_140ms_var(--ease-out-tk)] ${
+                    className={`group/row flex h-[44px] cursor-pointer select-none items-center gap-2.5 rounded-md px-2 [transition:background-color_140ms_var(--ease-out-tk)] ${
                       flashKeys.has(row.key) ? "bg-accent/15" : i === sel ? "bg-fg/10" : ""
                     }`}
                   >

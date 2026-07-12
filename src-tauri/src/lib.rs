@@ -210,9 +210,11 @@ pub(crate) fn emit_now(app: &AppHandle) -> media::NowPlaying {
     np
 }
 
-/// Visibility INTENT — the single owner of WHY the window is shown or
+/// Visibility INTENT — the single owner of WHY the MAIN window is shown or
 /// hidden. `is_visible()` stays the OS truth, but every mutation flows
-/// through apply_visibility (the ONLY caller of show()/hide() — grep rule),
+/// through apply_visibility (the ONLY caller of the main window's
+/// show()/hide() — grep rule; palette.rs is the one other, window-scoped
+/// visibility ledger, for its own label only),
 /// which reconciles the window to:
 ///   effective = !user_hidden && !(concealed && !conceal_snoozed)
 pub struct VisIntent {

@@ -736,9 +736,11 @@ export const commands = {
       mockUpNextChanged();
     }
   },
-  /** Context-preserving jump (spotify.rs play_now). Statuses: ok | busy |
-   * no_playback | gone | diverged | partial | disconnected | offline. The
-   * caller owns announcement suppression around this. */
+  /** Context-preserving jump (spotify.rs play_now); from silence it starts
+   * playback outright. Statuses: ok | busy | no_device | gone | diverged |
+   * partial | disconnected | offline. The caller owns announcement
+   * suppression around this (backend also arms every realm via
+   * "spotify-jump"). */
   async playNow(uri: string): Promise<string> {
     if (!IN_TAURI) {
       if (!mockSpotifyConnected) return "disconnected";

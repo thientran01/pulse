@@ -82,8 +82,13 @@ src-tauri/src/
                 context-preserving jump (position target in the real queue,
                 skip to it, VERIFY the landing by re-read — never trust
                 command results, matrix finding 3 — re-queue everything
-                skipped over; never `PUT play uris`, which kills the
-                playlist context). History enrichment: every settled track
+                skipped over; never `PUT play uris` INTO a live context,
+                which kills it — the ONE carve-out is start_playback: from
+                no_playback there is no context to kill, so the bare-uris
+                PUT on the best non-restricted device is how the palette
+                plays from silence, landing verified the same way;
+                play_now's no_playback status is therefore no_device
+                now). History enrichment: every settled track
                 change on a connected session fetches currently-playing
                 (enrich_now, one in-flight) and stamps the uri onto
                 history's candidate — THE path that makes history rows
@@ -118,6 +123,24 @@ src-tauri/src/
                 Spotify connected; skips inside the Spotify app bypass the
                 list; removing a fed front leaks that one track to
                 Spotify's queue
+  palette.rs    the summon palette's window — Pulse's FIRST second webview
+                (multi-window pioneer; focus mode reuses the seams). Created
+                ONCE hidden at setup (WebView2 cold-create costs ~100s of
+                ms; a laggy summon is dead), 560×420 born-at-size, shown by
+                Ctrl+Alt+S centered high on the CURSOR's monitor, hidden on
+                blur (lib.rs Focused(false) handler) / Esc / background
+                click. Its show/hide ledger is deliberately OUTSIDE
+                VisIntent/apply_visibility (that owns the MAIN window's
+                intent composition; palette.rs is the one other,
+                label-scoped owner). Multi-window invariants added with it:
+                capabilities/default.json must list every window label (a
+                missing label = ZERO IPC, silently); window-state denylists
+                palette+focus; dock's Moved forwarding is label-guarded to
+                "main" (unguarded, corner-snap armed on palette moves);
+                UiReactive is a per-window-label vote map OR'd (votes drop
+                on Destroyed); window identity rides the builder URL's
+                ?window= param, routed in src/main.tsx — the same param
+                mock-iterates each window in a plain browser
   presence.rs   fullscreen sensing + the courtesy conceal: own 1s watcher
                 thread sensing settled fullscreen foreground content
                 (rect-vs-monitor — widget-monitor scoped — OR'd with
@@ -211,6 +234,9 @@ Design rule: chrome stays neutral (house semantic tokens); the album-art palette
 - `Ctrl+Alt+←/→` seek ∓10s (current session; the hotkey always fires the SMTC call — Apple Music silently ignores it, only the UI buttons are capability-gated)
 - `Ctrl+Alt+N/P` next/previous track (next is queue-aware: lands on the up-next front when one exists)
 - `Ctrl+Alt+M` show/hide the widget
+- `Ctrl+Alt+S` summon the search palette (src/Palette.tsx — Enter plays now,
+  from silence it starts playback outright; Shift+Enter queues to up-next and
+  stays open; Esc/blur dismiss; empty state = resurfacing rows from history)
 
 Commands route to the OS "current" media session, which Windows re-points to
 whichever app played most recently (pause AM while Spotify plays → next command

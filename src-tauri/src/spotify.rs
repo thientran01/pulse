@@ -864,12 +864,11 @@ pub fn play_now(app: &AppHandle, uri: &str) -> &'static str {
     }
     let outcome = jump(app, uri);
     app.state::<SpotifyAuth>().jump_in_flight.store(false, Ordering::SeqCst);
-    if outcome == "diverged" {
-        // Suppression was armed (the jump got past target-location) but the
-        // target's arrival is unconfirmed — whatever change lands next is a
-        // legitimate one and must announce.
-        let _ = app.emit("spotify-jump-cancel", ());
-    }
+    // NO jump-cancel on "diverged" — upnext::try_queue_skip deliberately
+    // lets suppression ride out its window there (the outcome is genuinely
+    // uncertain; skips DID happen), and a blanket cancel here would undo
+    // that call (quick-review catch). Pre-arm failures (gone/no_device/...)
+    // never emitted the arm, and the 6s expiry covers the rest.
     outcome
 }
 
@@ -885,23 +884,43 @@ fn start_playback(app: &AppHandle, uri: &str) -> &'static str {
         Err(e) => return e,
     };
     let list = devices["devices"].as_array().cloned().unwrap_or_default();
-    // Prefer the active device; else the first that can accept commands.
+    // Prefer the active device — but never a restricted one (Connect
+    // hardware that rejects Web API commands with a 403); fall back to the
+    // first commandable device.
+    let commandable = |d: &&serde_json::Value| d["is_restricted"].as_bool() != Some(true);
     let dev = list
         .iter()
+        .filter(commandable)
         .find(|d| d["is_active"].as_bool() == Some(true))
-        .or_else(|| list.iter().find(|d| d["is_restricted"].as_bool() != Some(true)));
+        .or_else(|| list.iter().find(commandable));
     let Some(id) = dev.and_then(|d| d["id"].as_str()) else {
         return "no_device"; // Spotify isn't open anywhere it can play
     };
-    match api_call_body(
+    if let Err(e) = api_call_body(
         app,
         "PUT",
         &format!("https://api.spotify.com/v1/me/player/play?device_id={}", urlenc(id)),
         &serde_json::json!({ "uris": [uri] }),
     ) {
-        Ok(_) => "ok",
-        Err(e) => e,
+        return e;
     }
+    // Verify the landing — never trust command answers (matrix finding 3;
+    // jump() re-reads the same way). A device that accepted the PUT and
+    // then went dead reports "diverged": honest uncertainty, retryable.
+    for _ in 0..3 {
+        std::thread::sleep(Duration::from_millis(400));
+        if let Ok(Some(v)) =
+            api_call(app, "GET", "https://api.spotify.com/v1/me/player/currently-playing")
+        {
+            if v["item"]["uri"].as_str() == Some(uri) {
+                if let Some(t) = parse_track(&v["item"]) {
+                    update_now(app, &t);
+                }
+                return "ok";
+            }
+        }
+    }
+    "diverged"
 }
 
 fn jump(app: &AppHandle, target: &str) -> &'static str {
