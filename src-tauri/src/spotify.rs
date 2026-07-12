@@ -102,6 +102,12 @@ struct Inner {
     /// the like toggle; cleared with the tokens. The frontend matches it
     /// against its own now-playing identity before trusting `liked`.
     now: Option<NowTrack>,
+    /// Last KNOWN liked answer per uri (one slot — the current track).
+    /// Written only on a successful contains read or a successful like
+    /// write, so a transient fetch failure stays "unknown" and the next
+    /// update_now retries instead of pinning liked:false for the whole
+    /// track (quick-review catch, 2026-07-11).
+    liked_cache: Option<(String, bool)>,
 }
 
 #[derive(Serialize, Clone)]
@@ -251,6 +257,7 @@ fn clear_tokens(app: &AppHandle) {
         inner.tokens = None;
         inner.queue_cache = None;
         inner.now = None;
+        inner.liked_cache = None;
     }
     // The heart must not keep showing a liked state for a dead session.
     let _ = app.emit("spotify-now", Option::<NowTrack>::None);
@@ -504,26 +511,36 @@ fn token_request(form: &[(&str, &str)]) -> Result<Tokens, String> {
     let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
     let access = v["access_token"].as_str().ok_or("no access_token")?.to_string();
     let expires_in = v["expires_in"].as_i64().unwrap_or(3600);
-    // Rotation: a refresh response may omit refresh_token (keep the old one —
-    // the caller merges); an authorization response always carries it.
+    // Rotation: a refresh response may omit refresh_token AND scope (keep the
+    // old ones — the caller merges); an authorization response carries both.
+    // The scope fallback must NOT be the SCOPES const: has_library_scope
+    // gates the heart on this string, and stamping today's requested scopes
+    // onto a pre-library-consent token would re-open the click-time-403 path
+    // the gate exists to avoid (quick-review catch, 2026-07-11).
     let refresh = v["refresh_token"].as_str().unwrap_or_default().to_string();
     Ok(Tokens {
         v: 1,
         access_token: access,
         refresh_token: refresh,
         expires_at_ms: unix_ms() + expires_in * 1000 - 5_000,
-        scope: v["scope"].as_str().unwrap_or(SCOPES).to_string(),
+        scope: v["scope"].as_str().unwrap_or_default().to_string(),
     })
 }
 
 fn exchange_code(code: &str, redirect: &str, verifier: &str) -> Result<Tokens, String> {
-    token_request(&[
+    let mut tokens = token_request(&[
         ("grant_type", "authorization_code"),
         ("code", code),
         ("redirect_uri", redirect),
         ("client_id", SPOTIFY_CLIENT_ID),
         ("code_verifier", verifier),
-    ])
+    ])?;
+    if tokens.scope.is_empty() {
+        // A fresh authorization grants exactly what was asked (Spotify
+        // consent is all-or-nothing) — only here is the const the truth.
+        tokens.scope = SCOPES.to_string();
+    }
+    Ok(tokens)
 }
 
 /// A valid bearer token, refreshing on demand. Refreshes are single-flighted
@@ -545,13 +562,13 @@ fn ensure_access(app: &AppHandle) -> Result<String, &'static str> {
     // Slow path: serialize refreshes; a waiter re-checks and usually finds
     // the winner's fresh token.
     let _gate = auth.refresh_gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (old_access, refresh_token) = {
+    let (old_access, refresh_token, old_scope) = {
         let inner = lock(&auth);
         let Some(t) = &inner.tokens else { return Err("disconnected") };
         if t.expires_at_ms - unix_ms() > REFRESH_MARGIN_MS {
             return Ok(t.access_token.clone());
         }
-        (t.access_token.clone(), t.refresh_token.clone())
+        (t.access_token.clone(), t.refresh_token.clone(), t.scope.clone())
     };
     if refresh_token.is_empty() {
         // Shouldn't happen (authorization always grants one) — a dead
@@ -568,6 +585,10 @@ fn ensure_access(app: &AppHandle) -> Result<String, &'static str> {
         Ok(mut fresh) => {
             if fresh.refresh_token.is_empty() {
                 fresh.refresh_token = refresh_token;
+            }
+            if fresh.scope.is_empty() {
+                // A refresh can't widen a grant — carry the old truth.
+                fresh.scope = old_scope;
             }
             let access = fresh.access_token.clone();
             let mut inner = lock(&auth);
@@ -941,13 +962,30 @@ fn update_now(app: &AppHandle, t: &QueueTrack) {
     let (prev_liked, library) = {
         let inner = lock(&auth);
         (
-            inner.now.as_ref().filter(|n| n.uri == t.uri).map(|n| n.liked),
+            // Only a KNOWN answer short-circuits (a repeat enrich must not
+            // re-hit the API) — a failed fetch left no entry, so it retries.
+            inner
+                .liked_cache
+                .as_ref()
+                .filter(|(u, _)| u == &t.uri)
+                .map(|(_, l)| *l),
             has_library_scope(&inner),
         )
     };
     let liked = match prev_liked {
-        Some(l) => l, // same track — a repeat enrich must not re-hit the API
-        None => library && fetch_liked(app, &t.uri).unwrap_or(false),
+        Some(l) => l,
+        None => {
+            let fetched = if library { fetch_liked(app, &t.uri) } else { None };
+            if let Some(l) = fetched {
+                let mut inner = lock(&auth);
+                if inner.tokens.is_some() {
+                    inner.liked_cache = Some((t.uri.clone(), l));
+                }
+                l
+            } else {
+                false
+            }
+        }
     };
     let now = NowTrack {
         uri: t.uri.clone(),
@@ -1087,6 +1125,10 @@ fn set_liked(app: &AppHandle, uri: &str, liked: bool) -> &'static str {
             let updated = {
                 let auth = app.state::<SpotifyAuth>();
                 let mut inner = lock(&auth);
+                if inner.tokens.is_some() {
+                    // The write is a KNOWN answer whichever track is current.
+                    inner.liked_cache = Some((uri.to_string(), liked));
+                }
                 match inner.now.as_mut() {
                     Some(n) if n.uri == uri => {
                         n.liked = liked;

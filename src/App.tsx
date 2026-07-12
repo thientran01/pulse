@@ -1033,23 +1033,40 @@ function HeartButton({
   library: boolean;
   className?: string;
 }) {
-  const match = now !== null && matchesNowTrack(np, now) ? now : null;
+  // Episodes parse with spotify:episode: uris — /me/tracks can't hold them,
+  // so the heart never arms for one (quick-review catch, 2026-07-11).
+  const match =
+    now !== null && now.uri.startsWith("spotify:track:") && matchesNowTrack(np, now)
+      ? now
+      : null;
   // Local guess until the backend's re-emit confirms; keyed to the uri it
   // was made for so a track change can't inherit it.
   const [optimistic, setOptimistic] = useState<{ uri: string; liked: boolean } | null>(null);
   const [flash, setFlash] = useState(false);
   const [srMsg, setSrMsg] = useState("");
   const flashTimer = useRef<number | null>(null);
+  // One write at a time — overlapping PUT/DELETEs would let the last HTTP
+  // response win over the user's last click (quick-review catch).
+  const writing = useRef(false);
   useEffect(
     () => () => {
       if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
     },
     [],
   );
+  // Track change: drop the guess AND the flash — a like-beat from the
+  // previous track must not paint the next one's already-liked heart.
   useEffect(() => {
     setOptimistic(null);
     setSrMsg("");
-  }, [now?.uri, now?.liked]);
+    setFlash(false);
+    if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
+  }, [now?.uri]);
+  // Backend confirmation (the re-emit): truth arrived, drop the guess — but
+  // NOT the flash, which is a timed beat, not a pending-state indicator.
+  useEffect(() => {
+    setOptimistic(null);
+  }, [now?.liked]);
   const liked = match
     ? optimistic?.uri === match.uri
       ? optimistic.liked
@@ -1076,7 +1093,8 @@ function HeartButton({
         // rides focus-within (the ViewToggle contract); click guard below.
         aria-disabled={disabled || undefined}
         onClick={() => {
-          if (disabled || !match) return;
+          if (disabled || !match || writing.current) return;
+          writing.current = true;
           const next = !liked;
           setOptimistic({ uri: match.uri, liked: next });
           setSrMsg("");
@@ -1087,15 +1105,22 @@ function HeartButton({
             if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
             flashTimer.current = window.setTimeout(() => setFlash(false), 900);
           }
-          void commands.spotifySetLiked(match.uri, next).then((status) => {
-            if (status !== "ok") {
-              setOptimistic({ uri: match.uri, liked: !next });
-              setFlash(false);
-              setSrMsg("Couldn't save to Liked Songs");
-            }
-          });
+          const fail = () => {
+            setOptimistic({ uri: match.uri, liked: !next });
+            setFlash(false);
+            setSrMsg("Couldn't save to Liked Songs");
+          };
+          commands
+            .spotifySetLiked(match.uri, next)
+            .then((status) => {
+              if (status !== "ok") fail();
+            })
+            .catch(fail)
+            .finally(() => {
+              writing.current = false;
+            });
         }}
-        className={`grid h-6 w-6 place-items-center rounded-md [transition:color_140ms_var(--ease-out-tk),background-color_140ms_var(--ease-out-tk),opacity_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] ${
+        className={`grid h-[26px] w-[26px] place-items-center rounded-md [transition:color_140ms_var(--ease-out-tk),background-color_140ms_var(--ease-out-tk),opacity_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] ${
           disabled
             ? "pointer-events-none text-muted opacity-30"
             : `${flash && liked ? "text-accent" : "text-fg"} hover:bg-fg/10 active:scale-95`
@@ -1659,8 +1684,13 @@ function ExpandedView({
               <Art url={artUrl} size={190} radiusPx={12} />
               <div className="min-w-0 self-stretch text-center">
                 {/* The heart is always in layout (opacity reveal) so its
-                    arrival never re-centers the title. */}
+                    arrival never re-centers the title; the invisible spacer
+                    mirrors its box so the title's optical center stays on
+                    the artist line's (quick-review catch). */}
                 <div className="flex min-w-0 items-center justify-center">
+                  {np.player === "spotify" && spotifyConnected && (
+                    <span aria-hidden className="mr-0.5 w-[26px] shrink-0" />
+                  )}
                   <p className="min-w-0 truncate text-sm font-medium text-fg">{np.title}</p>
                   {np.player === "spotify" && spotifyConnected && (
                     <HeartButton

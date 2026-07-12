@@ -1,0 +1,704 @@
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 2b18fbc..95312c5 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -463,6 +463,8 @@ pub fn run() {
+             history::history_thumb_url,
+             spotify_connect,
+             spotify::spotify_status,
++            spotify::spotify_now,
++            spotify::spotify_set_liked,
+             spotify::spotify_disconnect,
+             spotify::spotify_queue,
+             spotify::spotify_play_now,
+diff --git a/src-tauri/src/spotify.rs b/src-tauri/src/spotify.rs
+index 95d2c1d..57cab67 100644
+--- a/src-tauri/src/spotify.rs
++++ b/src-tauri/src/spotify.rs
+@@ -40,8 +40,10 @@ const SPOTIFY_CLIENT_ID: &str = "3f82e7a35eea45ddab8625819a79d1de";
+ const REDIRECT_PORT: u16 = 43117;
+ /// read = queue/currently-playing; modify = add-to-queue/skip (play-now and
+ /// the up-next feeder, PR 3+) — requested up front so PR 3 needs no
+-/// re-consent.
+-const SCOPES: &str = "user-read-playback-state user-modify-playback-state";
++/// re-consent. library = the like/unlike heart (added 2026-07-11): tokens
++/// granted before then lack it — the heart gates on the PERSISTED scope
++/// string (has_library_scope), never on discovering a 403 at click time.
++const SCOPES: &str = "user-read-playback-state user-modify-playback-state user-library-read user-library-modify";
+ const UA: &str = "Pulse/0.1 (https://github.com/thientran01/pulse)";
+ const TIMEOUT: Duration = Duration::from_secs(15);
+ /// How long the loopback listener waits for the browser consent round-trip.
+@@ -95,11 +97,30 @@ struct Inner {
+     tokens: Option<Tokens>,
+     /// (fetched_at unix ms, result) — the QUEUE_CACHE_MS response cache.
+     queue_cache: Option<(i64, QueueResult)>,
++    /// The current-track cache behind the "spotify-now" event — written only
++    /// by update_now (settled enrichment reads, verified jump landings) and
++    /// the like toggle; cleared with the tokens. The frontend matches it
++    /// against its own now-playing identity before trusting `liked`.
++    now: Option<NowTrack>,
+ }
+ 
+ #[derive(Serialize, Clone)]
+ pub struct SpotifyStatus {
+     pub connected: bool,
++    /// The persisted token grant includes the library (like/unlike) scopes —
++    /// false for pre-2026-07-11 tokens until a re-consent.
++    pub library: bool,
++}
++
++/// The Spotify-side identity of what's playing now — "spotify-now" event +
++/// spotify_now seed. Fed by the same settled enrichment path that stamps
++/// history (update_now); never polled for.
++#[derive(Serialize, Clone)]
++pub struct NowTrack {
++    pub uri: String,
++    pub title: String,
++    pub artist: String,
++    pub liked: bool,
+ }
+ 
+ #[derive(Serialize, Deserialize, Clone)]
+@@ -180,6 +201,16 @@ pub fn connected(app: &AppHandle) -> bool {
+     inner.tokens.is_some()
+ }
+ 
++/// The persisted grant carries the library scopes. Checking `-modify` alone
++/// is deliberate: both were added together, and modify is the one the heart's
++/// writes need.
++fn has_library_scope(inner: &Inner) -> bool {
++    inner
++        .tokens
++        .as_ref()
++        .is_some_and(|t| t.scope.contains("user-library-modify"))
++}
++
+ /// True while a play_now jump is skipping through the queue — upnext::tick
+ /// suspends its fed-pop bookkeeping for the duration.
+ pub fn jump_active(app: &AppHandle) -> bool {
+@@ -190,8 +221,12 @@ pub fn jump_active(app: &AppHandle) -> bool {
+ /// derived state and every transition flows through here (tray, frontend
+ /// command, background invalid_grant), so it can never go stale.
+ fn emit_status(app: &AppHandle) {
+-    let connected = connected(app);
+-    let _ = app.emit("spotify-status", SpotifyStatus { connected });
++    let (connected, library) = {
++        let auth = app.state::<SpotifyAuth>();
++        let inner = lock(&auth);
++        (inner.tokens.is_some(), has_library_scope(&inner))
++    };
++    let _ = app.emit("spotify-status", SpotifyStatus { connected, library });
+     narrate(app, if connected { "Disconnect Spotify" } else { "Connect Spotify" });
+ }
+ 
+@@ -208,12 +243,17 @@ fn save_tokens(inner: &Inner) {
+ /// Drop tokens + file; callers follow with emit_status.
+ fn clear_tokens(app: &AppHandle) {
+     let auth = app.state::<SpotifyAuth>();
+-    let mut inner = lock(&auth);
+-    if let Some(dir) = &inner.dir {
+-        let _ = std::fs::remove_file(tokens_path(dir));
++    {
++        let mut inner = lock(&auth);
++        if let Some(dir) = &inner.dir {
++            let _ = std::fs::remove_file(tokens_path(dir));
++        }
++        inner.tokens = None;
++        inner.queue_cache = None;
++        inner.now = None;
+     }
+-    inner.tokens = None;
+-    inner.queue_cache = None;
++    // The heart must not keep showing a liked state for a dead session.
++    let _ = app.emit("spotify-now", Option::<NowTrack>::None);
+ }
+ 
+ /// Shared by the command and the tray click.
+@@ -850,9 +890,10 @@ fn jump(app: &AppHandle, target: &str) -> &'static str {
+     let Some(t) = landing else {
+         return "diverged"; // concurrent user action — stopped, not forced
+     };
+-    // The verified landing is trustworthy — enrich here (mid-jump reads
+-    // deliberately don't).
+-    crate::history::enrich_uri(app, &t.title, &t.artist, &t.uri);
++    // The verified landing is trustworthy — enrich + publish here (mid-jump
++    // reads deliberately don't), so the heart follows a jump without waiting
++    // for the next settled enrich.
++    update_now(app, &t);
+     if !requeued_ok {
+         return "partial";
+     }
+@@ -870,6 +911,61 @@ fn requeue(app: &AppHandle, items: &[QueueTrack]) -> bool {
+     ok
+ }
+ 
++// ---- the current-track cache (history enrichment + the like heart) ----
++
++fn track_id(uri: &str) -> Option<&str> {
++    uri.strip_prefix("spotify:track:")
++}
++
++/// GET /me/tracks/contains for one track. None = couldn't ask (offline,
++/// non-track uri) — callers keep the previous answer or default false.
++fn fetch_liked(app: &AppHandle, uri: &str) -> Option<bool> {
++    let id = track_id(uri)?;
++    let v = api_call(
++        app,
++        "GET",
++        &format!("https://api.spotify.com/v1/me/tracks/contains?ids={}", urlenc(id)),
++    )
++    .ok()??;
++    v.as_array()?.first()?.as_bool()
++}
++
++/// The single writer of the current-track cache: stamp history's candidate,
++/// fetch liked (one contains GET — only when the track actually changed and
++/// the library scope exists), publish "spotify-now". Callers hand it a track
++/// they TRUST: a settled currently-playing read (enrich_now) or a verified
++/// jump landing — never a mid-jump snapshot. Blocking; call on the pool.
++fn update_now(app: &AppHandle, t: &QueueTrack) {
++    crate::history::enrich_uri(app, &t.title, &t.artist, &t.uri);
++    let auth = app.state::<SpotifyAuth>();
++    let (prev_liked, library) = {
++        let inner = lock(&auth);
++        (
++            inner.now.as_ref().filter(|n| n.uri == t.uri).map(|n| n.liked),
++            has_library_scope(&inner),
++        )
++    };
++    let liked = match prev_liked {
++        Some(l) => l, // same track — a repeat enrich must not re-hit the API
++        None => library && fetch_liked(app, &t.uri).unwrap_or(false),
++    };
++    let now = NowTrack {
++        uri: t.uri.clone(),
++        title: t.title.clone(),
++        artist: t.artist.clone(),
++        liked,
++    };
++    {
++        let mut inner = lock(&auth);
++        // A disconnect can race this in-flight read — its clear must win.
++        if inner.tokens.is_none() {
++            return;
++        }
++        inner.now = Some(now.clone());
++    }
++    let _ = app.emit("spotify-now", Some(now));
++}
++
+ // ---- history enrichment + uri resolution ----
+ 
+ /// Stamp the CURRENT track's uri onto history's in-flight candidate. Fired
+@@ -894,7 +990,7 @@ pub fn enrich_now(app: &AppHandle) {
+         if let Ok(Some(v)) = api_call(&app, "GET", "https://api.spotify.com/v1/me/player/currently-playing")
+         {
+             if let Some(t) = parse_track(&v["item"]) {
+-                crate::history::enrich_uri(&app, &t.title, &t.artist, &t.uri);
++                update_now(&app, &t);
+             }
+         }
+         app.state::<SpotifyAuth>().enrich_in_flight.store(false, Ordering::SeqCst);
+@@ -948,7 +1044,64 @@ pub async fn spotify_resolve_uri(
+ 
+ #[tauri::command]
+ pub async fn spotify_status(app: AppHandle) -> SpotifyStatus {
+-    SpotifyStatus { connected: connected(&app) }
++    let auth = app.state::<SpotifyAuth>();
++    let inner = lock(&auth);
++    SpotifyStatus {
++        connected: inner.tokens.is_some(),
++        library: has_library_scope(&inner),
++    }
++}
++
++/// Seed for the "spotify-now" event — the cached current track, if any.
++#[tauri::command]
++pub async fn spotify_now(app: AppHandle) -> Option<NowTrack> {
++    let auth = app.state::<SpotifyAuth>();
++    let inner = lock(&auth);
++    inner.now.clone()
++}
++
++/// PUT/DELETE /me/tracks — the like heart. "ok" | "disconnected" | "offline".
++/// Callers gate on SpotifyStatus.library, so the ambiguous-403 path
++/// (api_call maps it to "disconnected") is never the discovery mechanism.
++#[tauri::command]
++pub async fn spotify_set_liked(app: AppHandle, uri: String, liked: bool) -> String {
++    tauri::async_runtime::spawn_blocking(move || set_liked(&app, &uri, liked).to_string())
++        .await
++        .unwrap_or_else(|e| {
++            eprintln!("spotify set_liked task panicked: {e}");
++            "offline".into()
++        })
++}
++
++fn set_liked(app: &AppHandle, uri: &str, liked: bool) -> &'static str {
++    let Some(id) = track_id(uri) else {
++        return "offline"; // non-track uri (episode) — nothing to like
++    };
++    let method = if liked { "PUT" } else { "DELETE" };
++    let url = format!("https://api.spotify.com/v1/me/tracks?ids={}", urlenc(id));
++    match api_call(app, method, &url) {
++        Ok(_) => {
++            // Reflect into the cache + re-emit so every consumer converges —
++            // but only when the cached now is still this track (a track
++            // change can race the write).
++            let updated = {
++                let auth = app.state::<SpotifyAuth>();
++                let mut inner = lock(&auth);
++                match inner.now.as_mut() {
++                    Some(n) if n.uri == uri => {
++                        n.liked = liked;
++                        Some(n.clone())
++                    }
++                    _ => None,
++                }
++            };
++            if let Some(n) = updated {
++                let _ = app.emit("spotify-now", Some(n));
++            }
++            "ok"
++        }
++        Err(e) => e,
++    }
+ }
+ 
+ #[tauri::command]
+diff --git a/src/App.tsx b/src/App.tsx
+index 3ebeaf7..cf3b04c 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -14,6 +14,7 @@ import {
+   onPresenceDebug,
+   onSpotifyJump,
+   onSpotifyJumpCancel,
++  onSpotifyNow,
+   type DockCorner,
+ } from "./lib/backend";
+ import { currentLineIndex, msUntilNextLine, parseLrc, VOCAL_LEAD_MS, type LyricLine } from "./lib/lrc";
+@@ -28,10 +29,16 @@ import {
+   POPOVER_GAP,
+   POPOVER_W,
+   QueuePanel,
+-  useSpotifyConnected,
++  useSpotifyStatus,
+ } from "./Queue";
+ import { SeparatorDot, Waveform } from "./Waveform";
+-import { IN_TAURI, type NowPlaying, type PresenceDebug, type PresenceState } from "./types";
++import {
++  IN_TAURI,
++  type NowPlaying,
++  type NowTrack,
++  type PresenceDebug,
++  type PresenceState,
++} from "./types";
+ 
+ // Keep in sync with SEEK_STEP_MS in src-tauri/src/lib.rs (global hotkeys).
+ const SEEK_STEP_MS = 10_000;
+@@ -971,6 +978,138 @@ function ViewToggle({
+   );
+ }
+ 
++/** The Spotify-side current track — "spotify-now" seed + event. */
++function useSpotifyNow(): NowTrack | null {
++  const [now, setNow] = useState<NowTrack | null>(null);
++  useEffect(() => onSpotifyNow(setNow), []);
++  return now;
++}
++
++/** GSMTC and the Web API are separate streams — the heart only trusts a
++ * cached uri whose identity matches what the widget is showing. Title must
++ * match exactly (ci); artists match on containment because Spotify joins
++ * every credit ("IU, Wonstein") where GSMTC often carries the primary. */
++function matchesNowTrack(np: NowPlaying, now: NowTrack): boolean {
++  if (np.title.trim().toLowerCase() !== now.title.trim().toLowerCase()) return false;
++  const a = np.artist.trim().toLowerCase();
++  const b = now.artist.trim().toLowerCase();
++  return a === "" || b === "" || a.includes(b) || b.includes(a);
++}
++
++/** One-off glyph, the Queue.tsx PlusGlyph class — it never morphs, so the
++ * 3-stroke morph system is the wrong tool. Fill swaps with the state; the
++ * press scale is the feedback. */
++function HeartGlyph({ filled }: { filled: boolean }) {
++  return (
++    <svg width={13} height={13} viewBox="0 0 16 16" fill="none" aria-hidden>
++      <path
++        d="M8 13.4C5.1 11.3 2.2 9 2.2 6.3 2.2 4.4 3.7 3 5.4 3c1 0 2 .6 2.6 1.5C8.6 3.6 9.6 3 10.6 3c1.7 0 3.2 1.4 3.2 3.3 0 2.7-2.9 5-5.8 7.1Z"
++        fill={filled ? "currentColor" : "none"}
++        stroke="currentColor"
++        strokeWidth={1.5}
++        strokeLinejoin="round"
++      />
++    </svg>
++  );
++}
++
++/** The like heart (A5): hover-revealed beside the title, rendered only for a
++ * connected Spotify session. Actionable once the backend's "spotify-now"
++ * identity matches the widget's track (the settled enrichment usually lands
++ * within a second of a change); a pre-library-scope token disables it in
++ * place with the reconnect answer. Rest state is fg — accent stays flourish,
++ * so only the MOMENT of liking flashes accent and settles back. Failure
++ * reverts the fill (the visible signal) and announces via the local live
++ * region — the card has no toast surface, and inventing one for this would
++ * be new chrome. */
++function HeartButton({
++  np,
++  now,
++  library,
++  className = "",
++}: {
++  np: NowPlaying;
++  now: NowTrack | null;
++  library: boolean;
++  className?: string;
++}) {
++  const match = now !== null && matchesNowTrack(np, now) ? now : null;
++  // Local guess until the backend's re-emit confirms; keyed to the uri it
++  // was made for so a track change can't inherit it.
++  const [optimistic, setOptimistic] = useState<{ uri: string; liked: boolean } | null>(null);
++  const [flash, setFlash] = useState(false);
++  const [srMsg, setSrMsg] = useState("");
++  const flashTimer = useRef<number | null>(null);
++  useEffect(
++    () => () => {
++      if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
++    },
++    [],
++  );
++  useEffect(() => {
++    setOptimistic(null);
++    setSrMsg("");
++  }, [now?.uri, now?.liked]);
++  const liked = match
++    ? optimistic?.uri === match.uri
++      ? optimistic.liked
++      : match.liked
++    : false;
++  const disabled = !library || !match;
++  const label = !library
++    ? "Reconnect Spotify to like tracks"
++    : !match
++      ? "Finding this track on Spotify…"
++      : liked
++        ? "Remove from Liked Songs"
++        : "Add to Liked Songs";
++  return (
++    <span
++      className={`pointer-events-none flex shrink-0 items-center opacity-0 transition-opacity duration-2 ease-out-tk group-data-[hot]/widget:pointer-events-auto group-data-[hot]/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100 ${className}`}
++    >
++      <button
++        type="button"
++        aria-label={label}
++        title={label}
++        aria-pressed={match ? liked : undefined}
++        // aria-disabled (not disabled) keeps the seat focusable — the reveal
++        // rides focus-within (the ViewToggle contract); click guard below.
++        aria-disabled={disabled || undefined}
++        onClick={() => {
++          if (disabled || !match) return;
++          const next = !liked;
++          setOptimistic({ uri: match.uri, liked: next });
++          setSrMsg("");
++          if (next) {
++            // The transient accent beat — liking only; settles via the
++            // color transition when the timer clears it.
++            setFlash(true);
++            if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
++            flashTimer.current = window.setTimeout(() => setFlash(false), 900);
++          }
++          void commands.spotifySetLiked(match.uri, next).then((status) => {
++            if (status !== "ok") {
++              setOptimistic({ uri: match.uri, liked: !next });
++              setFlash(false);
++              setSrMsg("Couldn't save to Liked Songs");
++            }
++          });
++        }}
++        className={`grid h-6 w-6 place-items-center rounded-md [transition:color_140ms_var(--ease-out-tk),background-color_140ms_var(--ease-out-tk),opacity_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] ${
++          disabled
++            ? "pointer-events-none text-muted opacity-30"
++            : `${flash && liked ? "text-accent" : "text-fg"} hover:bg-fg/10 active:scale-95`
++        }`}
++      >
++        <HeartGlyph filled={liked} />
++      </button>
++      <span aria-live="polite" className="sr-only">
++        {srMsg}
++      </span>
++    </span>
++  );
++}
++
+ /** The marquee morph, fired optimistically on pointerdown — the morph IS the
+  * press response (SMTC command bools lie; the next emit is the
+  * reconciliation). Diff-suppressed emits mean a silently failed command never
+@@ -1357,6 +1496,8 @@ function ExpandedView({
+   queueOpen,
+   onCloseQueue,
+   spotifyConnected,
++  spotifyNow,
++  spotifyLibrary,
+ }: {
+   np: NowPlaying;
+   artUrl: string | null;
+@@ -1369,6 +1510,8 @@ function ExpandedView({
+   queueOpen: boolean;
+   onCloseQueue: () => void;
+   spotifyConnected: boolean;
++  spotifyNow: NowTrack | null;
++  spotifyLibrary: boolean;
+ }) {
+   const reducedMotion = useReducedMotion();
+   // Key-stamped gate: never render the new track's header over the old
+@@ -1481,6 +1624,14 @@ function ExpandedView({
+                     <span className="ml-1 flex shrink-0 items-center">
+                       <Waveform size="md" trailing />
+                     </span>
++                    {np.player === "spotify" && spotifyConnected && (
++                      <HeartButton
++                        np={np}
++                        now={spotifyNow}
++                        library={spotifyLibrary}
++                        className="ml-auto pl-1"
++                      />
++                    )}
+                   </div>
+                   <TruncateTip text={np.artist} className="text-[13px] text-muted" />
+                 </div>
+@@ -1507,7 +1658,19 @@ function ExpandedView({
+             >
+               <Art url={artUrl} size={190} radiusPx={12} />
+               <div className="min-w-0 self-stretch text-center">
+-                <p className="truncate text-sm font-medium text-fg">{np.title}</p>
++                {/* The heart is always in layout (opacity reveal) so its
++                    arrival never re-centers the title. */}
++                <div className="flex min-w-0 items-center justify-center">
++                  <p className="min-w-0 truncate text-sm font-medium text-fg">{np.title}</p>
++                  {np.player === "spotify" && spotifyConnected && (
++                    <HeartButton
++                      np={np}
++                      now={spotifyNow}
++                      library={spotifyLibrary}
++                      className="ml-0.5"
++                    />
++                  )}
++                </div>
+                 <p className="truncate text-xs text-muted">
+                   {np.artist}
+                   {np.album && <SeparatorDot />}
+@@ -1769,7 +1932,13 @@ function App() {
+   useEffect(() => {
+     if (nothing) setQueueOpen(false);
+   }, [nothing]);
+-  const spotifyConnected = useSpotifyConnected();
++  const spotify = useSpotifyStatus();
++  const spotifyConnected = spotify.connected;
++  const spotifyNow = useSpotifyNow();
++  // The heart exists only for a connected Spotify session — the exact gate
++  // class every other Spotify action uses (AM listens can't be liked; a
++  // resolve-based like on another service would be dishonest).
++  const heartLive = np?.player === "spotify" && spotifyConnected;
+   // Jump-intermediate suppression for the pill's announcement layer.
+   const announceSuppressed = isAnnounceSuppressed(np);
+   // Backend-initiated jumps (the queue-aware skip: transport next /
+@@ -2108,6 +2277,14 @@ function App() {
+                   <span className="ml-1 flex shrink-0 items-center">
+                     <Waveform size="md" trailing />
+                   </span>
++                  {heartLive && (
++                    <HeartButton
++                      np={np}
++                      now={spotifyNow}
++                      library={spotify.library}
++                      className="ml-auto pl-1"
++                    />
++                  )}
+                 </div>
+                 <p className="truncate text-xs leading-4 text-muted">
+                   {np.artist}
+@@ -2131,6 +2308,8 @@ function App() {
+             queueOpen={queueOpen}
+             onCloseQueue={() => setQueueOpen(false)}
+             spotifyConnected={spotifyConnected}
++            spotifyNow={spotifyNow}
++            spotifyLibrary={spotify.library}
+           />
+         )}
+         </ModeContent>
+diff --git a/src/Queue.tsx b/src/Queue.tsx
+index 0824c7e..74ea947 100644
+--- a/src/Queue.tsx
++++ b/src/Queue.tsx
+@@ -22,7 +22,7 @@ import {
+   onSpotifyStatus,
+   onUpNextChanged,
+ } from "./lib/backend";
+-import type { HistoryEntry, NowPlaying, QueueTrack } from "./types";
++import type { HistoryEntry, NowPlaying, QueueTrack, SpotifyStatus } from "./types";
+ 
+ const HISTORY_PAGE = 30;
+ /** Row height — the drag math's grid (swap threshold ±26 = just past half). */
+@@ -35,10 +35,10 @@ export const POPOVER_GAP = 12;
+ 
+ // ---- data hooks ----
+ 
+-export function useSpotifyConnected(): boolean {
+-  const [connected, setConnected] = useState(false);
+-  useEffect(() => onSpotifyStatus((s) => setConnected(s.connected)), []);
+-  return connected;
++export function useSpotifyStatus(): SpotifyStatus {
++  const [status, setStatus] = useState<SpotifyStatus>({ connected: false, library: false });
++  useEffect(() => onSpotifyStatus(setStatus), []);
++  return status;
+ }
+ 
+ export function useUpNext(): QueueTrack[] {
+diff --git a/src/lib/backend.ts b/src/lib/backend.ts
+index e5a4d0c..ab8b69f 100644
+--- a/src/lib/backend.ts
++++ b/src/lib/backend.ts
+@@ -8,6 +8,7 @@ import {
+   IN_TAURI,
+   type HistoryEntry,
+   type NowPlaying,
++  type NowTrack,
+   type PresenceDebug,
+   type PresenceState,
+   type QueueTrack,
+@@ -86,6 +87,8 @@ function mockJumpTo(i: number): void {
+     mockUpNext.shift();
+     mockUpNextListeners.forEach((cb) => cb([...mockUpNext]));
+   }
++  // The heart follows the track like the real settled enrichment does.
++  mockNowChanged();
+ }
+ 
+ // ---- play history (history.rs seam) ----
+@@ -136,18 +139,68 @@ if (!IN_TAURI) {
+ 
+ /** `?spotify=off` forces the disconnected gate state in preview; the mock is
+  * otherwise connected so the queue surface is iterable at plain `/`.
+- * `?queue=empty` forces the no_playback answer. */
++ * `?queue=empty` forces the no_playback answer. `?library=off` mimics a
++ * pre-library-scope token (the heart's reconnect tooltip); `?like=fail`
++ * makes every like write fail (the optimistic-revert path). */
+ const SPOTIFY_OFF =
+   !IN_TAURI && new URLSearchParams(window.location.search).get("spotify") === "off";
+ const QUEUE_EMPTY =
+   !IN_TAURI && new URLSearchParams(window.location.search).get("queue") === "empty";
++const LIBRARY_OFF =
++  !IN_TAURI && new URLSearchParams(window.location.search).get("library") === "off";
++const LIKE_FAIL =
++  !IN_TAURI && new URLSearchParams(window.location.search).get("like") === "fail";
+ 
+ let mockSpotifyConnected = !SPOTIFY_OFF;
+ const mockSpotifyListeners = new Set<(s: SpotifyStatus) => void>();
+ 
++function mockStatus(): SpotifyStatus {
++  return { connected: mockSpotifyConnected, library: mockSpotifyConnected && !LIBRARY_OFF };
++}
++
+ function pushMockSpotify(connected: boolean): void {
+   mockSpotifyConnected = connected;
+-  mockSpotifyListeners.forEach((cb) => cb({ connected }));
++  mockSpotifyListeners.forEach((cb) => cb(mockStatus()));
++  mockNowChanged();
++}
++
++// ---- current-track cache ("spotify-now" seam) ----
++
++/** Liked-state store behind the mock heart — per-uri, session-scoped. */
++const mockLiked = new Set<string>();
++const mockNowListeners = new Set<(t: NowTrack | null) => void>();
++
++function mockNowTrack(): NowTrack | null {
++  if (!mockSpotifyConnected) return null;
++  const q = mockQueueTrack(MOCK_TRACKS[mockTrack]);
++  return { uri: q.uri, title: q.title, artist: q.artist, liked: mockLiked.has(q.uri) };
++}
++
++function mockNowChanged(): void {
++  mockNowListeners.forEach((cb) => cb(mockNowTrack()));
++}
++
++/** The Spotify-side current track (uri + liked) — seed + event pairing.
++ * Null until the first settled enrichment (or while disconnected). */
++export function onSpotifyNow(cb: (t: NowTrack | null) => void): () => void {
++  if (IN_TAURI) {
++    let gotEvent = false;
++    const un = listen<NowTrack | null>("spotify-now", (e) => {
++      gotEvent = true;
++      cb(e.payload);
++    });
++    void invoke<NowTrack | null>("spotify_now").then((t) => {
++      if (!gotEvent) cb(t);
++    });
++    return () => {
++      un.then((f) => f());
++    };
++  }
++  cb(mockNowTrack());
++  mockNowListeners.add(cb);
++  return () => {
++    mockNowListeners.delete(cb);
++  };
+ }
+ 
+ function mockQueueTrack(t: { title: string; artist: string; album: string }) {
+@@ -201,7 +254,7 @@ export function onSpotifyStatus(cb: (s: SpotifyStatus) => void): () => void {
+       un.then((f) => f());
+     };
+   }
+-  cb({ connected: mockSpotifyConnected });
++  cb(mockStatus());
+   mockSpotifyListeners.add(cb);
+   return () => {
+     mockSpotifyListeners.delete(cb);
+@@ -714,6 +767,19 @@ export const commands = {
+     }
+     return lyricsLatestWins(() => invoke("media_lyrics", { artist, title, album, durationMs }));
+   },
++  /** Like/unlike a track (PUT/DELETE /me/tracks). "ok" | "disconnected" |
++   * "offline" — callers flip optimistically and revert on non-ok. */
++  async spotifySetLiked(uri: string, liked: boolean): Promise<string> {
++    if (!IN_TAURI) {
++      if (!mockSpotifyConnected) return "disconnected";
++      if (LIKE_FAIL) return "offline";
++      if (liked) mockLiked.add(uri);
++      else mockLiked.delete(uri);
++      mockNowChanged();
++      return "ok";
++    }
++    return invoke<string>("spotify_set_liked", { uri, liked });
++  },
+   /** Search-resolve a uri for a history row that was never enriched
+    * (pre-enrichment entries, Apple Music listens). Null = no match. */
+   async spotifyResolveUri(title: string, artist: string): Promise<string | null> {
+diff --git a/src/types.ts b/src/types.ts
+index 0765489..6306901 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -73,6 +73,20 @@ export interface HistoryEntry {
+  * Independent of which player is ACTIVE; the queue UI gates on both. */
+ export interface SpotifyStatus {
+   connected: boolean;
++  /** The persisted grant includes the library (like/unlike) scopes — false
++   * for tokens issued before the scopes were added, until a re-consent. */
++  library: boolean;
++}
++
++/** The Spotify-side identity of what's playing now ("spotify-now" event +
++ * spotify_now seed) — fed by the settled enrichment path, never polled.
++ * Match it against the widget's own now-playing identity before trusting
++ * `liked`: GSMTC and the Web API are separate streams. */
++export interface NowTrack {
++  uri: string;
++  title: string;
++  artist: string;
++  liked: boolean;
+ }
+ 
+ /** One track from the Spotify queue read. */
