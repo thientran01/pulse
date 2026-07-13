@@ -1,7 +1,19 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import ErrorBoundary from "./ErrorBoundary";
 import "./index.css";
+
+// Make silent failures observable. Fire-and-forget backend calls (void
+// invoke(...)) and other async work surface only as unhandled rejections, and
+// a chromeless always-on-top widget has no console to see them in during a soak
+// — log them so they leave a trace.
+window.addEventListener("error", (event) => {
+  console.error("Uncaught error:", event.error ?? event.message, event);
+});
+window.addEventListener("unhandledrejection", (event) => {
+  console.error("Unhandled promise rejection:", event.reason, event);
+});
 
 const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
 
@@ -19,7 +31,9 @@ if (import.meta.env.DEV && params.has("lab")) {
     .then(({ IconLab }) => {
       root.render(
         <React.StrictMode>
-          <IconLab />
+          <ErrorBoundary>
+            <IconLab />
+          </ErrorBoundary>
         </React.StrictMode>,
       );
     })
@@ -27,7 +41,9 @@ if (import.meta.env.DEV && params.has("lab")) {
       // Failed lab chunk load must not strand a blank page.
       root.render(
         <React.StrictMode>
-          <App />
+          <ErrorBoundary>
+            <App />
+          </ErrorBoundary>
         </React.StrictMode>,
       );
     });
@@ -36,7 +52,9 @@ if (import.meta.env.DEV && params.has("lab")) {
     .then(({ default: Palette }) => {
       root.render(
         <React.StrictMode>
-          <Palette />
+          <ErrorBoundary>
+            <Palette />
+          </ErrorBoundary>
         </React.StrictMode>,
       );
     })
@@ -50,7 +68,9 @@ if (import.meta.env.DEV && params.has("lab")) {
     .then(({ default: Focus }) => {
       root.render(
         <React.StrictMode>
-          <Focus />
+          <ErrorBoundary>
+            <Focus />
+          </ErrorBoundary>
         </React.StrictMode>,
       );
     })
@@ -60,7 +80,9 @@ if (import.meta.env.DEV && params.has("lab")) {
 } else {
   root.render(
     <React.StrictMode>
-      <App />
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
     </React.StrictMode>,
   );
 }
