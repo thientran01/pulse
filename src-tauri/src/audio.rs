@@ -1,12 +1,20 @@
-//! Audio-reactive core: WASAPI loopback capture of the default output device
-//! → FFT → smoothed band energies emitted as "audio-bands" events (~30Hz).
+//! Audio-reactive core: WASAPI loopback capture → FFT → smoothed band
+//! energies emitted as "audio-bands" events (~30Hz).
+//!
+//! Capture is PROCESS-SCOPED when it can be (loopback.rs: the playing app's
+//! process tree via the process-loopback virtual device) so the bars ride
+//! the SONG — device-wide loopback heard Discord voice and game SFX too,
+//! and the auto-gain danced to whoever was loudest. The device-wide cpal
+//! stream survives as the fallback when the AUMID→PID join misses (unknown
+//! player, pre-2004 Windows), with a periodic upgrade retry.
 //!
 //! Lifecycle discipline (plan M4): capture runs ONLY while a Pulse window
 //! is visible (the main widget OR the focus takeover — lib.rs widens the
-//! gate) AND something is playing. The owner thread opens/drops the cpal
-//! stream on demand — dropping releases the device entirely, so a hidden or
+//! gate) AND something is playing. The owner thread opens/drops the capture
+//! on demand — dropping releases the device/stream entirely, so a hidden or
 //! paused app costs zero audio work.
 
+use crate::loopback;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rustfft::{num_complex::Complex, FftPlanner};
 use serde::Serialize;
@@ -66,27 +74,45 @@ fn spectrum_edges() -> [f32; SPECTRUM_BINS + 1] {
     edges
 }
 
-/// Latest samples ring (mono-mixed), written by the cpal callback.
-struct Ring {
+/// Latest samples ring (mono-mixed), written by whichever capture path is
+/// live (the cpal callback or loopback.rs's process capture thread).
+pub(crate) struct Ring {
     buf: Vec<f32>,
     pos: usize,
 }
 
 impl Ring {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Ring { buf: vec![0.0; FFT_SIZE], pos: 0 }
     }
-    fn push_frame(&mut self, frame_mean: f32) {
+    pub(crate) fn push_frame(&mut self, frame_mean: f32) {
         self.buf[self.pos] = frame_mean;
         self.pos = (self.pos + 1) % self.buf.len();
     }
     /// Snapshot in chronological order.
-    fn snapshot(&self) -> Vec<f32> {
+    pub(crate) fn snapshot(&self) -> Vec<f32> {
         let mut out = Vec::with_capacity(self.buf.len());
         out.extend_from_slice(&self.buf[self.pos..]);
         out.extend_from_slice(&self.buf[..self.pos]);
         out
     }
+}
+
+/// The AUMID of the GSMTC session the media loop is currently riding — the
+/// process-scoped capture's target. Written by the media loop every beat
+/// (same cadence as the capture switch); read by the owner thread when it
+/// opens capture and each health check, so a player change re-scopes.
+static TARGET_AUMID: Mutex<String> = Mutex::new(String::new());
+
+pub fn set_target(aumid: &str) {
+    let mut t = TARGET_AUMID.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if *t != aumid {
+        aumid.clone_into(&mut t);
+    }
+}
+
+fn target_aumid() -> String {
+    TARGET_AUMID.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 }
 
 fn open_loopback(
@@ -150,7 +176,36 @@ fn band_energies(spectrum: &[Complex<f32>], sample_rate: f32) -> [f32; 3] {
     out
 }
 
-/// Owner thread: opens/drops the loopback stream as the switch flips, runs the
+/// A live capture, either scope. Process is the wanted path (only the
+/// player's audio); Device is the whole-mix fallback (the pre-scoping
+/// behavior) when the AUMID→PID join can't land.
+enum Capture {
+    /// The capture plus the AUMID it was scoped to — a player change
+    /// (Spotify → Apple Music) must re-resolve, not keep riding the old app.
+    Process(loopback::ProcessCapture, String),
+    /// The stream is never read — held for its Drop (drop = stop capture).
+    Device(#[allow(dead_code)] cpal::Stream),
+}
+
+/// Process-path staleness horizon: no packets for this long renders as
+/// silence (a process-loopback stream legitimately delivers nothing while
+/// the target is quiet — FFT'ing the stale ring would freeze the bars at
+/// their last heights instead of letting them fall).
+const SILENCE_AFTER_MS: u64 = 250;
+/// While on the Device fallback, retry the process-scoped upgrade this
+/// often — the player's audio session often appears a beat after playback
+/// starts, and a missed join at open time shouldn't stick for the session.
+const UPGRADE_RETRY: Duration = Duration::from_secs(5);
+/// A process capture that has NEVER delivered a packet this long into
+/// playback joined the wrong process (multi-profile browsers can alias an
+/// AUMID) — the right join delivers within the first beat of a playing
+/// track. Demote that AUMID to the Device fallback, stickily (re-resolving
+/// would pick the same wrong PID and strand the bars at zero again), until
+/// the playing app changes. A capture that HAS delivered is never demoted:
+/// its later silence is the target really rendering nothing.
+const DEMOTE_AFTER_MS: u64 = 10_000;
+
+/// Owner thread: opens/drops the capture as the switch flips, runs the
 /// FFT + smoothing + emit loop while on.
 pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
     std::thread::spawn(move || {
@@ -164,7 +219,21 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
             })
             .collect();
 
-        let mut active: Option<(cpal::Stream, f32, Arc<Mutex<Ring>>)> = None;
+        // COM for loopback.rs's session enumeration on this thread (cpal
+        // inits its own MTA per stream thread; S_FALSE double-init is fine).
+        let com = unsafe {
+            windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_MULTITHREADED,
+            )
+        };
+        let _ = com; // held for the thread's lifetime (it never exits)
+
+        let mut active: Option<(Capture, f32, Arc<Mutex<Ring>>)> = None;
+        let mut last_upgrade = std::time::Instant::now();
+        // The one AUMID currently demoted to Device capture (see
+        // DEMOTE_AFTER_MS). Cleared when the target moves off it.
+        let mut demoted: Option<String> = None;
         let mut smoothed = [0.0f32; 3];
         let mut gain_ref = [1e-4f32; 3];
         let spec_edges = spectrum_edges();
@@ -182,45 +251,151 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
 
         loop {
             let want = switch.load(Ordering::Relaxed);
-            match (&active, want) {
-                (None, true) => {
-                    let ring = Arc::new(Mutex::new(Ring::new()));
-                    if let Some((stream, rate)) = open_loopback(ring.clone(), frames.clone()) {
-                        active = Some((stream, rate, ring));
-                        last_frames = frames.load(Ordering::Relaxed);
-                        last_progress = std::time::Instant::now();
-                    } else {
-                        // Device unavailable — retry lazily, don't spin.
-                        std::thread::sleep(Duration::from_secs(5));
-                    }
-                }
-                (Some(_), false) => {
-                    active = None; // drops the stream, releases the device
+            if !want {
+                if active.is_some() {
+                    active = None; // drops the capture, releases the device
                     smoothed = [0.0; 3];
                     smoothed_spec = [0.0; SPECTRUM_BINS];
                     smoothed_dyn = 0.0;
                     let _ = app.emit("audio-bands", Bands::default());
                 }
-                (Some(_), true) => {
-                    let now_frames = frames.load(Ordering::Relaxed);
-                    if now_frames != last_frames {
-                        last_frames = now_frames;
-                        last_progress = std::time::Instant::now();
-                    } else if last_progress.elapsed() > Duration::from_secs(2) {
-                        eprintln!("audio loopback stalled — reopening against current default device");
-                        active = None; // next iteration reopens
+            } else if active.is_none() {
+                // Open: process-scoped first (the playing app's tree only),
+                // whole-mix device loopback as the fallback.
+                let ring = Arc::new(Mutex::new(Ring::new()));
+                let aumid = target_aumid();
+                if demoted.as_deref().is_some_and(|d| d != aumid) {
+                    demoted = None;
+                }
+                let process = if aumid.is_empty() || demoted.is_some() {
+                    None
+                } else {
+                    loopback::resolve_target(&aumid).and_then(|t| {
+                        loopback::ProcessCapture::open(t, ring.clone(), frames.clone())
+                    })
+                };
+                if let Some(cap) = process {
+                    let rate = cap.sample_rate;
+                    active = Some((Capture::Process(cap, aumid), rate, ring));
+                } else if let Some((stream, rate)) = open_loopback(ring.clone(), frames.clone()) {
+                    if !aumid.is_empty() {
+                        eprintln!("audio: no process-loopback join for {aumid:?} — device-mix fallback");
+                    }
+                    last_upgrade = std::time::Instant::now();
+                    active = Some((Capture::Device(stream), rate, ring));
+                } else {
+                    // Device unavailable — retry lazily, don't spin.
+                    std::thread::sleep(Duration::from_secs(5));
+                }
+                if active.is_some() {
+                    last_frames = frames.load(Ordering::Relaxed);
+                    last_progress = std::time::Instant::now();
+                }
+            } else {
+                // Health check on the live capture. Decide with a short
+                // borrow, act after it drops.
+                enum Act {
+                    Keep,
+                    Reopen,
+                    Demote(String),
+                    TryUpgrade(String),
+                }
+                let act = match &active.as_ref().expect("checked some").0 {
+                    // NO stall watchdog here: a quiet target legitimately
+                    // delivers nothing (module docs). Reopen only on real
+                    // endings — capture thread died, target process exited,
+                    // or the playing app changed out from under the scope —
+                    // plus the wrong-join demote (a real player is never
+                    // THIS silent mid-playback).
+                    Capture::Process(p, aumid) => {
+                        // A capture that died having NEVER delivered is a
+                        // broken join — demote, don't reopen: a plain reopen
+                        // would re-run the full resolution+activation at
+                        // loop cadence against the same broken target.
+                        if p.done() && !p.has_data() {
+                            Act::Demote(aumid.clone())
+                        } else if p.done() || !p.target_alive() || *aumid != target_aumid() {
+                            Act::Reopen
+                        } else if !p.has_data() && p.ms_since_data() > DEMOTE_AFTER_MS {
+                            Act::Demote(aumid.clone())
+                        } else {
+                            Act::Keep
+                        }
+                    }
+                    Capture::Device(_) => {
+                        let now_frames = frames.load(Ordering::Relaxed);
+                        if now_frames != last_frames {
+                            last_frames = now_frames;
+                            last_progress = std::time::Instant::now();
+                        }
+                        if last_progress.elapsed() > Duration::from_secs(2) {
+                            eprintln!("audio loopback stalled — reopening against current default device");
+                            Act::Reopen
+                        } else if last_upgrade.elapsed() > UPGRADE_RETRY {
+                            last_upgrade = std::time::Instant::now();
+                            let aumid = target_aumid();
+                            if aumid.is_empty() || demoted.as_deref() == Some(&aumid) {
+                                Act::Keep
+                            } else {
+                                Act::TryUpgrade(aumid)
+                            }
+                        } else {
+                            Act::Keep
+                        }
+                    }
+                };
+                match act {
+                    Act::Keep => {}
+                    Act::Reopen => {
+                        active = None; // next iteration reopens with fresh resolution
                         continue;
                     }
+                    Act::Demote(aumid) => {
+                        eprintln!("audio: process capture for {aumid:?} never delivered — device-mix fallback");
+                        demoted = Some(aumid);
+                        active = None; // reopens demoted (Device) next iteration
+                        continue;
+                    }
+                    Act::TryUpgrade(aumid) => {
+                        // The player's session may have appeared since we fell
+                        // back — swap up to the scoped capture when it has.
+                        // A no-session miss keeps retrying (resolution is a
+                        // cheap enumeration); a join that resolved but FAILED
+                        // to activate demotes stickily — retrying it would
+                        // stutter the working Device stream with a blocking
+                        // multi-second activation attempt every 5s.
+                        match loopback::resolve_target(&aumid) {
+                            None => {}
+                            Some(t) => {
+                                let ring = Arc::new(Mutex::new(Ring::new()));
+                                if let Some(cap) =
+                                    loopback::ProcessCapture::open(t, ring.clone(), frames.clone())
+                                {
+                                    let rate = cap.sample_rate;
+                                    active = Some((Capture::Process(cap, aumid), rate, ring));
+                                    last_frames = frames.load(Ordering::Relaxed);
+                                    last_progress = std::time::Instant::now();
+                                } else {
+                                    eprintln!("audio: process activation failed for {aumid:?} — staying on device mix");
+                                    demoted = Some(aumid);
+                                }
+                            }
+                        }
+                    }
                 }
-                _ => {}
             }
 
-            let Some((_, rate, ring)) = &active else {
+            let Some((cap, rate, ring)) = &active else {
                 std::thread::sleep(Duration::from_millis(250));
                 continue;
             };
 
-            let samples = {
+            // Process-path staleness reads as SILENCE (zero samples), so the
+            // bars fall instead of freezing on the last-heard spectrum.
+            let stale = matches!(cap, Capture::Process(p, _) if p.ms_since_data() > SILENCE_AFTER_MS);
+            let samples = if stale {
+                vec![0.0; FFT_SIZE]
+            } else {
                 let ring = ring.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 ring.snapshot()
             };

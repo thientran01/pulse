@@ -182,10 +182,24 @@ src-tauri/src/
                 Waveform size; one reactive surface per view holds).
                 This is the removed P3's want with the correct trigger:
                 invoked, never guessed
-  audio.rs      WASAPI loopback (cpal input stream on the output device) → FFT →
-                smoothed auto-gained band energies at ~30Hz; capture runs ONLY
-                while a Pulse window is visible (main OR focus) AND playing
-                (stream dropped otherwise)
+  audio.rs      audio capture → FFT → smoothed auto-gained band energies at
+                ~30Hz. Capture is PROCESS-SCOPED (loopback.rs) so the bars
+                ride the SONG, not the device mix — whole-mix loopback heard
+                Discord voice + game SFX and the auto-gain danced to whoever
+                was loudest (reported live 2026-07-12). Device-wide cpal
+                loopback survives as the fallback when the AUMID→PID join
+                misses (unknown player, pre-2004 Win10), with a 5s upgrade
+                retry. Capture runs ONLY while a Pulse window is visible
+                (main OR focus) AND playing (dropped otherwise)
+  loopback.rs   process-scoped WASAPI loopback: joins the GSMTC AUMID to a
+                PID via the render-session list (packaged apps by
+                GetApplicationUserModelId equality, unpackaged by exe-stem
+                heuristics), then captures that process TREE via
+                ActivateAudioInterfaceAsync + the process-loopback virtual
+                device (Win10 2004+). Quirk the API encodes: a quiet target
+                delivers NO packets (staleness = silence, never a stall) —
+                audio.rs skips its device-path stall watchdog here and zeros
+                the ring after 250ms so bars fall instead of freezing
 src/            React widget: pill ↔ card ↔ expanded modes; lib/posClock.ts is the ONE
                 owner of playback position (monotonic per track while playing — raw pairs
                 in, display clock out; all seek/pause/jitter filtering lives there);

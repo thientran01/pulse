@@ -3,6 +3,7 @@ mod dock;
 mod focus;
 mod history;
 mod lastfm;
+mod loopback;
 mod lyrics;
 mod media;
 mod palette;
@@ -872,6 +873,11 @@ pub fn run() {
                     // session produces no ticks to ride).
                     history::tick(&handle);
                     let reactive = reactive_effective(&ui_reactive);
+                    // The capture's process-scoping target rides the same
+                    // beat as the switch: whichever app GSMTC says is
+                    // playing is the app whose audio the waveform should
+                    // hear (loopback.rs — never the whole device mix).
+                    audio::set_target(last_tick.as_ref().map(|k| k.0.as_str()).unwrap_or(""));
                     audio_switch.store(visible && playing && reactive, Ordering::Relaxed);
                     use std::sync::mpsc::RecvTimeoutError;
                     match wake_rx.recv_timeout(Duration::from_millis(POLL_INTERVAL_MS)) {

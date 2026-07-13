@@ -48,7 +48,18 @@ windows = { version = "0.61", features = [
     # palette.rs: DWMWA_TRANSITIONS_FORCEDISABLED (DWM fades layered windows
     # on hide() — the palette must vanish instantly)
     "Win32_Graphics_Dwm",
+    # loopback.rs: process-scoped WASAPI loopback (session enumeration +
+    # ActivateAudioInterfaceAsync; Appx for the packaged-app AUMID↔PID join)
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_Security",
 ] }
+# loopback.rs's #[implement] completion handler expands to ::windows_core
+# paths — the macro requires the crate present under this exact name.
+windows-core = "0.61"
 
 # Full debuginfo is most of what makes `tauri dev` builds crawl (codegen +
 # MSVC link time). We never attach a debugger to this app; line tables keep
