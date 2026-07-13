@@ -58,7 +58,12 @@ src-tauri/src/
                 kept from eating clicks by spawn_hit_watcher: cursor-polled
                 whole-window click-through (set_ignore_cursor_events)
                 gated on the frontend-reported hit rect (set_hit_size, the mode's
-                footprint at the docked corner). Docked corner is pushed to the
+                footprint at the docked corner). A corner CHANGE glides the shell
+                to its new seat (App.tsx FLIP translate, EASE.out, riding the
+                native glide; a bare seat flip teleports the widget across the
+                fixed window), and the whole window stays interactive for that
+                glide (HIT_GRACE_MS) since no corner-anchored hit rect is honest
+                mid-travel. Docked corner is pushed to the
                 webview ("dock-corner" event + dock_corner seed command); corner
                 derived from the window-state-restored position, never stored
   lyrics.rs     LRCLIB get→search fallback, disk cache (bounded, app-data) + session

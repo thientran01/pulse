@@ -81,6 +81,13 @@ const HIT_NEAR_MS: u64 = 8;
 const HIT_FAR_MS: u64 = 40;
 /// "Near" halo around the window rect that switches the fast cadence on.
 const HIT_NEAR_PAD: i32 = 64;
+/// Post-corner-change grace: the webview shell glides to its new seat for
+/// SNAP_MS (App.tsx FLIP), so until it lands the corner-anchored hit rect
+/// is wrong on both ends — the traveling shell sits outside it while the
+/// still-empty destination reads as interactive. The whole window stays
+/// interactive for the glide instead — the same never-smaller-than-what's-
+/// on-screen rule as the frontend's deferred hit shrinks (hitCommanded).
+const HIT_GRACE_MS: u64 = SNAP_MS + 80;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Corner {
@@ -170,6 +177,10 @@ pub struct Dock {
     /// corner) the frontend reports per mode — everything outside it is
     /// click-through. None (pre-report) = the whole window is interactive.
     hit_size: Mutex<Option<(f64, f64)>>,
+    /// When the docked corner last CHANGED (not launch-derived) — hit_rect
+    /// widens to the whole window for HIT_GRACE_MS after it while the shell
+    /// glides to its new seat.
+    corner_changed: Mutex<Option<Instant>>,
     /// Presence's monitor-scoped verdict: fullscreen content owns the
     /// widget's monitor. What sync_seat reconciles toward.
     want_fs: AtomicBool,
@@ -203,6 +214,7 @@ impl Default for Dock {
             last_moved: Mutex::new(Instant::now()),
             watcher_armed: AtomicBool::new(false),
             hit_size: Mutex::new(None),
+            corner_changed: Mutex::new(None),
             want_fs: AtomicBool::new(false),
             seated_fs: AtomicBool::new(false),
             desktop_return: Mutex::new(None),
@@ -306,39 +318,6 @@ fn jump_to(window: &WebviewWindow, x: i32, y: i32) {
     dock.animating.store(true, Ordering::SeqCst);
     apply_pos(window, x, y, None);
     dock.animating.store(false, Ordering::SeqCst);
-}
-
-/// Center of the VISIBLE footprint (the current mode's hit rect, anchored at
-/// the docked corner of the window rect) in physical px. The oversized
-/// WINDOW_MAX window's center misleads the nearest-corner call by up to half
-/// the gutter — a pill dropped just past the work-area midline could snap
-/// the wrong way when judged by the window center. Falls back to the window
-/// center before the first hit-size report (launch).
-fn footprint_center(window: &WebviewWindow, pos: (i32, i32), size: (i32, i32)) -> (i32, i32) {
-    let dock = window.state::<Dock>();
-    let (wx, wy) = pos;
-    let (ww, wh) = size;
-    let hit = *dock.hit_size.lock().unwrap_or_else(PoisonError::into_inner);
-    match hit {
-        None => (wx + ww / 2, wy + wh / 2),
-        Some((hw, hh)) => {
-            let scale = window.scale_factor().unwrap_or(1.0);
-            let hw = ((hw * scale).round() as i32).min(ww);
-            let hh = ((hh * scale).round() as i32).min(wh);
-            let corner = dock
-                .corner
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .unwrap_or(Corner::BottomRight);
-            let (l, t) = match corner {
-                Corner::TopLeft => (wx, wy),
-                Corner::TopRight => (wx + ww - hw, wy),
-                Corner::BottomLeft => (wx, wy + wh - hh),
-                Corner::BottomRight => (wx + ww - hw, wy + wh - hh),
-            };
-            (l + hw / 2, t + hh / 2)
-        }
-    }
 }
 
 /// Clamp an origin so the w×h window sits inside `rect`, keeping the
@@ -523,10 +502,70 @@ fn spawn_animation(
     });
 }
 
-/// Settle a released drag: derive the corner, run the magnet/rails/clamp
-/// decision, glide there. During a fullscreen episode the settle runs
-/// against the monitor rect and the landing becomes the remembered
-/// fullscreen seat (the desktop position waits in desktop_return).
+/// The mode footprint anchored at the docked corner (physical px, screen
+/// coords), or the whole window before the first hit-size report. The raw
+/// geometry — NO corner-glide grace. The snap decision keys on THIS: it
+/// wants the footprint at the committed corner (where the shell is headed),
+/// not the whole-window fallback, so a settle within the grace window can't
+/// derive — and, during a fullscreen episode, PERSIST — a window-center
+/// corner (quick-review catch, 2026-07-13).
+fn footprint_rect(window: &WebviewWindow, wx: i32, wy: i32, ww: i32, wh: i32) -> (i32, i32, i32, i32) {
+    let dock = window.state::<Dock>();
+    let hit = *dock.hit_size.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some((hw, hh)) = hit else {
+        return (wx, wy, ww, wh);
+    };
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let hw = ((hw * scale).round() as i32).min(ww);
+    let hh = ((hh * scale).round() as i32).min(wh);
+    let corner = dock
+        .corner
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .unwrap_or(Corner::BottomRight);
+    let (l, t) = match corner {
+        Corner::TopLeft => (wx, wy),
+        Corner::TopRight => (wx + ww - hw, wy),
+        Corner::BottomLeft => (wx, wy + wh - hh),
+        Corner::BottomRight => (wx + ww - hw, wy + wh - hh),
+    };
+    (l, t, hw, hh)
+}
+
+/// The interactive rect for the click-through gate: footprint_rect, but the
+/// whole window during the corner-glide grace — while the shell travels
+/// between seats, no corner-anchored rect is honest, so the whole window
+/// stays interactive until it lands (see corner_changed / HIT_GRACE_MS).
+fn hit_rect(window: &WebviewWindow, wx: i32, wy: i32, ww: i32, wh: i32) -> (i32, i32, i32, i32) {
+    let dock = window.state::<Dock>();
+    let changed = *dock.corner_changed.lock().unwrap_or_else(PoisonError::into_inner);
+    if changed.is_some_and(|t| t.elapsed() < Duration::from_millis(HIT_GRACE_MS)) {
+        return (wx, wy, ww, wh);
+    }
+    footprint_rect(window, wx, wy, ww, wh)
+}
+
+/// Store the docked corner. If it CHANGED from an existing corner AND the
+/// shell will visibly glide to the new seat (`gliding`), open the hit-rect
+/// grace window so the click-through gate stays whole-window until the
+/// shell lands (see corner_changed / HIT_GRACE_MS). Launch derivation (no
+/// prior corner) and hidden jumps pass false — neither animates a visible
+/// shell across the fixed window.
+fn set_corner(dock: &Dock, corner: Corner, gliding: bool) {
+    let mut c = dock.corner.lock().unwrap_or_else(PoisonError::into_inner);
+    if gliding && c.is_some() && *c != Some(corner) {
+        *dock.corner_changed.lock().unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+    }
+    *c = Some(corner);
+}
+
+/// Settle a released drag: derive the corner from the VISIBLE widget's
+/// center (the shell sits corner-anchored inside the WINDOW_MAX window, so
+/// the window center can be a couple hundred px off what the user actually
+/// dragged), run the magnet/rails/clamp decision, glide there. During a
+/// fullscreen episode the settle runs against the monitor rect and the
+/// landing becomes the remembered fullscreen seat (the desktop position
+/// waits in desktop_return).
 fn settle_release(window: &WebviewWindow) {
     let dock = window.state::<Dock>();
     let space = if dock.seated_fs.load(Ordering::SeqCst) {
@@ -539,10 +578,16 @@ fn settle_release(window: &WebviewWindow) {
         return;
     };
     let (w, h) = (size.width as i32, size.height as i32);
-    let center = footprint_center(window, (pos.x, pos.y), (w, h));
+    // The snap corner keys on the VISIBLE widget's center (footprint_rect) —
+    // the shell sits corner-anchored inside WINDOW_MAX, so a pill dropped
+    // just below the midline would snap UP if judged by the window center.
+    let (hx, hy, hw, hh) = footprint_rect(window, pos.x, pos.y, w, h);
     let scale = window.scale_factor().unwrap_or(1.0);
-    let (corner, target) = settle_target(center, (pos.x, pos.y), (w, h), &rect, scale);
-    *dock.corner.lock().unwrap_or_else(PoisonError::into_inner) = Some(corner);
+    let (corner, target) =
+        settle_target((hx + hw / 2, hy + hh / 2), (pos.x, pos.y), (w, h), &rect, scale);
+    // A real corner CHANGE glides the shell to its new seat (App.tsx FLIP) —
+    // open the hit-rect grace window for that visible glide.
+    set_corner(&dock, corner, true);
     emit_corner(window, corner);
     if space == Space::Fullscreen {
         // The landing is the new fullscreen seat: remember it corner-relative
@@ -676,7 +721,10 @@ pub fn sync_seat(app: &AppHandle) {
     };
 
     dock.seated_fs.store(want, Ordering::SeqCst);
-    *dock.corner.lock().unwrap_or_else(PoisonError::into_inner) = Some(corner);
+    // A visible episode swap glides the shell to the new seat (App.tsx FLIP),
+    // same as a drag-release corner change — open the grace window for it; a
+    // hidden jump has no visible shell (and the hit watcher skips hidden).
+    set_corner(&dock, corner, visible);
     emit_corner(&window, corner);
     if visible {
         animate_to(&window, (pos.x, pos.y), target);
@@ -720,15 +768,19 @@ pub fn set_window_size(window: WebviewWindow, dock: State<Dock>, width: f64, hei
     });
     let (corner, (x, y)) = match restored {
         Ok(pos) => {
-            let center = footprint_center(&window, pos, (w, h));
-            settle_target(center, pos, (w, h), &wa, scale)
+            // hit_size isn't reported yet at launch, so footprint_rect
+            // returns the whole window and the center is the window center —
+            // right for a pure-position launch settle.
+            let (hx, hy, hw, hh) = footprint_rect(&window, pos.0, pos.1, w, h);
+            settle_target((hx + hw / 2, hy + hh / 2), pos, (w, h), &wa, scale)
         }
         Err(_) => (
             Corner::BottomRight,
             corner_origin(Corner::BottomRight, &wa, w, h, margin),
         ),
     };
-    *dock.corner.lock().unwrap_or_else(PoisonError::into_inner) = Some(corner);
+    // Launch derivation glides nothing (a single sized apply_pos) — no grace.
+    set_corner(&dock, corner, false);
     emit_corner(&window, corner);
     dock.animating.store(true, Ordering::SeqCst);
     apply_pos(&window, x, y, Some((w, h)));
@@ -737,7 +789,8 @@ pub fn set_window_size(window: WebviewWindow, dock: State<Dock>, width: f64, hei
 
 /// The frontend reports the current mode's interactive footprint (logical
 /// px, anchored at the docked corner) on every mode change — the hit
-/// watcher makes everything outside it click-through. The full MODE_SIZES
+/// watcher makes everything outside it click-through, and the drag-release
+/// snap picks its corner from this rect's center. The full MODE_SIZES
 /// footprint (shell + gutter), not just the shell, so the visible edge ring
 /// stays grabbable for drags.
 #[tauri::command]
@@ -769,28 +822,8 @@ pub fn spawn_hit_watcher(window: WebviewWindow) {
                             && p.x < wx + ww + HIT_NEAR_PAD
                             && p.y >= wy - HIT_NEAR_PAD
                             && p.y < wy + wh + HIT_NEAR_PAD;
-                        let dock = window.state::<Dock>();
-                        let hit = *dock.hit_size.lock().unwrap_or_else(PoisonError::into_inner);
-                        let inside = match hit {
-                            None => p.x >= wx && p.x < wx + ww && p.y >= wy && p.y < wy + wh,
-                            Some((hw, hh)) => {
-                                let scale = window.scale_factor().unwrap_or(1.0);
-                                let hw = ((hw * scale).round() as i32).min(ww);
-                                let hh = ((hh * scale).round() as i32).min(wh);
-                                let corner = dock
-                                    .corner
-                                    .lock()
-                                    .unwrap_or_else(PoisonError::into_inner)
-                                    .unwrap_or(Corner::BottomRight);
-                                let (l, t) = match corner {
-                                    Corner::TopLeft => (wx, wy),
-                                    Corner::TopRight => (wx + ww - hw, wy),
-                                    Corner::BottomLeft => (wx, wy + wh - hh),
-                                    Corner::BottomRight => (wx + ww - hw, wy + wh - hh),
-                                };
-                                p.x >= l && p.x < l + hw && p.y >= t && p.y < t + hh
-                            }
-                        };
+                        let (l, t, hw, hh) = hit_rect(&window, wx, wy, ww, wh);
+                        let inside = p.x >= l && p.x < l + hw && p.y >= t && p.y < t + hh;
                         // inside == ignoring means the state is wrong-way —
                         // flip it, unless a press is in flight. The mirror
                         // only advances when the OS call lands, so a failed
@@ -900,7 +933,9 @@ pub fn reset_position(app: &AppHandle) {
     } else {
         Space::Desktop
     };
-    *dock.corner.lock().unwrap_or_else(PoisonError::into_inner) = Some(Corner::BottomRight);
+    // A visible re-dock glides to bottom-right (animate_to below) — if that
+    // flips the corner, the shell FLIPs with it, so open the grace window.
+    set_corner(&dock, Corner::BottomRight, true);
     emit_corner(&window, Corner::BottomRight);
     let Some(wa) = space_rect(&window, space) else { return };
     let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {

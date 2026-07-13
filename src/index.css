@@ -127,6 +127,20 @@ body {
   animation: resting-breathe 8s var(--ease-in-out-tk) infinite;
 }
 
+/* The persistent widget shell (App.tsx): mode changes tween the box out of
+ * the docked corner (a morph of an on-screen element → EASE.inOut); a
+ * dock-corner change FLIPs `translate` back to 0 (a drag-release response →
+ * EASE.out) so the re-seat glides in step with the native window snap
+ * (duration-3 = 200ms = dock.rs SNAP_MS, keep in sync) instead of
+ * teleporting across the fixed-size window. The reduced-motion guard above
+ * zeroes all three. */
+.shell-glide {
+  transition:
+    width var(--transition-duration-3) var(--ease-in-out-tk),
+    height var(--transition-duration-3) var(--ease-in-out-tk),
+    translate var(--transition-duration-3) var(--ease-out-tk);
+}
+
 /* Lyrics arrival cascade: rows radiate outward from the current line — each
  * row's --cascade-delay is its distance from the mount anchor (see
  * CASCADE_* in App.tsx). Inert without .lyrics-entering on the list, which
