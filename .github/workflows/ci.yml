@@ -1,0 +1,62 @@
+name: CI
+
+# Push/PR gate for main. Windows-only because Pulse is a Windows-only app
+# (GSMTC / WASAPI / Win32) — its Rust tests won't even compile elsewhere.
+# Mirrors release.yml's setup (checkout → node 22 + npm cache → rust stable →
+# rust-cache on src-tauri) but runs the actual build + tests instead of the
+# tauri-action release bundle.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a PR branch).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Frontend must build before the Rust side: tauri-build embeds the Vite
+      # output (frontendDist = ../dist), so dist/ has to exist before cargo.
+      - run: npm ci
+
+      - run: npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: cargo test
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      # Informational for now: the existing tree is NOT rustfmt-clean
+      # (`cargo fmt --check` exits 1 on main, measured 2026-07-13), so this
+      # would red the whole run. Kept visible via continue-on-error; flip to a
+      # hard gate (drop the continue-on-error line) once the tree is formatted.
+      - name: cargo fmt --check (informational)
+        continue-on-error: true
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      # Informational for now: the existing tree emits clippy warnings on main
+      # (measured 2026-07-13). Kept visible via continue-on-error; flip to a
+      # hard gate (add `-- -D warnings` and drop continue-on-error) once the
+      # warnings are cleared.
+      - name: cargo clippy (informational)
+        continue-on-error: true
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
