@@ -17,6 +17,7 @@ use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSessionManager as Manager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus,
 };
+use windows::Media::MediaPlaybackType;
 use windows::Storage::Streams::{Buffer, DataReader, InputStreamOptions};
 
 const TICKS_PER_MS: i64 = 10_000; // WinRT TimeSpan tick = 100ns
@@ -43,6 +44,10 @@ pub struct NowPlaying {
     pub position_at_ms: i64,
     pub can_seek: bool,
     pub art_id: Option<String>,
+    /// GSMTC MediaPlaybackType bucket: "music" | "video" | "image" |
+    /// "unknown". History uses it to keep read surfaces music-only; "" only
+    /// ever appears on pre-feature history.jsonl rows (see history::is_music).
+    pub media_kind: String,
 }
 
 /// Cached album art for the currently playing media. Failed reads are cached
@@ -330,15 +335,28 @@ fn base_snapshot(session: &Session) -> (NowPlaying, bool) {
         .unwrap_or_default();
     let player = player_kind(&app_id).to_string();
 
-    let (mut title, mut artist, mut album, has_thumb) =
+    let (mut title, mut artist, mut album, media_kind, has_thumb) =
         match session.TryGetMediaPropertiesAsync().and_then(|op| op.get()) {
             Ok(p) => (
                 p.Title().map(|h| h.to_string()).unwrap_or_default(),
                 p.Artist().map(|h| h.to_string()).unwrap_or_default(),
                 p.AlbumTitle().map(|h| h.to_string()).unwrap_or_default(),
+                // MediaPlaybackType — the signal history uses to drop video
+                // (Netflix/anime/browser) from music-only surfaces. Nullable:
+                // a null IReference, read error, or Unknown(0) all fall to
+                // "unknown" (kept — never lose a real listen). Match the
+                // numeric tuple like playback_info's PlaybackStatus(4).
+                match p.PlaybackType().ok().and_then(|r| r.Value().ok()) {
+                    Some(MediaPlaybackType(1)) => "music",
+                    Some(MediaPlaybackType(2)) => "video",
+                    Some(MediaPlaybackType(3)) => "image",
+                    _ => "unknown",
+                }
+                .to_string(),
                 p.Thumbnail().is_ok(),
             ),
-            Err(_) => (String::new(), String::new(), String::new(), false),
+            // Non-empty here too, so "" stays the pre-feature legacy sentinel.
+            Err(_) => (String::new(), String::new(), String::new(), "unknown".into(), false),
         };
     // Apple Music packs "artist — album" into the artist field (matrix quirk #5).
     if player == "apple_music" && album.is_empty() {
@@ -370,6 +388,7 @@ fn base_snapshot(session: &Session) -> (NowPlaying, bool) {
             position_at_ms,
             can_seek,
             art_id: None,
+            media_kind,
         },
         has_thumb,
     )
