@@ -2,6 +2,29 @@
   "name": "pulse",
   "private": true,
   "version": "0.7.1",
+  "description": "An always-on-top mini music player for Windows — reads and controls whatever's playing via GSMTC, with synced lyrics, album-art accents, and audio-reactive visuals.",
+  "author": "Thien Tran <captainthien@gmail.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/thientran01/pulse#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thientran01/pulse.git"
+  },
+  "bugs": {
+    "url": "https://github.com/thientran01/pulse/issues"
+  },
+  "keywords": [
+    "music",
+    "music-player",
+    "tauri",
+    "windows",
+    "widget",
+    "gsmtc",
+    "now-playing",
+    "spotify",
+    "apple-music",
+    "lyrics"
+  ],
   "type": "module",
   "scripts": {
     "dev": "vite",
