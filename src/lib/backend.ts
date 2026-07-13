@@ -511,6 +511,105 @@ export function onAudioBands(cb: (b: AudioBands) => void): () => void {
   return () => window.clearInterval(id);
 }
 
+// ---- Preferences window (prefs.rs seam) ----
+
+/** One resolved global-hotkey row (lib.rs HotkeyInfo). `registered` is the OS
+ * truth — false means the chord was rejected (usually system-reserved), which
+ * the Hotkeys UI surfaces as a persistent note. `chord` is a Tauri accelerator
+ * string ("ctrl+alt+k", "ctrl+alt+left"). */
+export interface HotkeyInfo {
+  id: string;
+  label: string;
+  chord: string;
+  registered: boolean;
+}
+
+/** The prefs window's mount snapshot (prefs.rs PrefsSeed). */
+export interface PrefsSeed {
+  version: string;
+  reactive_separator: boolean;
+  seek_amount: number;
+  launch_mode: string;
+  start_at_login: boolean;
+  hide_on_fullscreen: boolean;
+  spotify_connected: boolean;
+  lastfm_api_key: string;
+  seen_intro: boolean;
+  hotkeys: HotkeyInfo[];
+}
+
+/** Real hotkey defaults (mirrors lib.rs HK_* + hotkey_defs order). The mock
+ * marks the two seek chords unregistered so the OS-fail note is preview-
+ * reachable at /?window=prefs (Ctrl+Alt+←/→ is the real-world motivator). */
+const MOCK_HOTKEYS: HotkeyInfo[] = [
+  { id: "playpause", label: "Play / pause", chord: "ctrl+alt+k", registered: true },
+  { id: "seekback", label: "Seek backward", chord: "ctrl+alt+left", registered: false },
+  { id: "seekfwd", label: "Seek forward", chord: "ctrl+alt+right", registered: false },
+  { id: "next", label: "Next track", chord: "ctrl+alt+n", registered: true },
+  { id: "prev", label: "Previous track", chord: "ctrl+alt+p", registered: true },
+  { id: "showhide", label: "Show / hide Pulse", chord: "ctrl+alt+m", registered: true },
+  { id: "palette", label: "Summon palette", chord: "ctrl+alt+s", registered: true },
+];
+
+/** Mutable browser-mock settings state so the prefs UI's toggles/segments and
+ * rebinds reflect back at /?window=prefs (no Tauri backend). */
+const mockSettings = {
+  version: "0.7.1",
+  reactive_separator: true,
+  seek_amount: 10,
+  launch_mode: "card",
+  start_at_login: false,
+  hide_on_fullscreen: true,
+  lastfm_api_key: "",
+  seen_intro: false,
+  hotkeys: MOCK_HOTKEYS.map((h) => ({ ...h })),
+};
+
+const mockHotkeysListeners = new Set<(h: HotkeyInfo[]) => void>();
+
+/** Live hotkey-table updates after a rebind/reset (lib.rs "hotkeys-changed"). */
+export function onHotkeysChanged(cb: (h: HotkeyInfo[]) => void): () => void {
+  if (IN_TAURI) {
+    const un = listen<HotkeyInfo[]>("hotkeys-changed", (e) => cb(e.payload));
+    return () => {
+      un.then((f) => f());
+    };
+  }
+  mockHotkeysListeners.add(cb);
+  return () => {
+    mockHotkeysListeners.delete(cb);
+  };
+}
+
+/** A setting changed from another surface (tray ⇄ prefs mirror). */
+export function onSettingsChanged(
+  cb: (change: { key: string; value: unknown }) => void,
+): () => void {
+  if (!IN_TAURI) return () => {}; // mock: single surface, nothing to mirror
+  const un = listen<{ key: string; value: unknown }>("settings-changed", (e) => cb(e.payload));
+  return () => {
+    un.then((f) => f());
+  };
+}
+
+/** In-app OAuth failure (spotify.rs) — shown in Connectors / at a gate point. */
+export function onSpotifyAuthError(cb: (message: string) => void): () => void {
+  if (!IN_TAURI) return () => {};
+  const un = listen<{ message: string }>("spotify-auth-error", (e) => cb(e.payload.message));
+  return () => {
+    un.then((f) => f());
+  };
+}
+
+/** Nudge to a section when prefs is already open (tray "Shortcuts / Help"). */
+export function onPrefsSection(cb: (section: string) => void): () => void {
+  if (!IN_TAURI) return () => {};
+  const un = listen<string>("prefs-section", (e) => cb(e.payload));
+  return () => {
+    un.then((f) => f());
+  };
+}
+
 export const commands = {
   /** Tell the backend whether reactive visuals are wanted (false under
    * reduced motion) — it stops audio capture entirely when not. */
@@ -835,9 +934,137 @@ export const commands = {
     }
     return invoke<string | null>("spotify_resolve_uri", { title, artist });
   },
+
+  // ---- preferences window (prefs.rs) ----
+
+  /** Open the prefs window (create-on-open) at an optional section. */
+  openPrefs(section?: string): void {
+    if (IN_TAURI) void invoke("open_prefs", { section: section ?? null });
+  },
+  /** Close (destroy) the prefs window — its own floating ×. */
+  closePrefs(): void {
+    if (IN_TAURI) void invoke("close_prefs");
+  },
+  /** The prefs mount snapshot. */
+  async prefsSeed(): Promise<PrefsSeed> {
+    if (!IN_TAURI) {
+      return {
+        version: mockSettings.version,
+        reactive_separator: mockSettings.reactive_separator,
+        seek_amount: mockSettings.seek_amount,
+        launch_mode: mockSettings.launch_mode,
+        start_at_login: mockSettings.start_at_login,
+        hide_on_fullscreen: mockSettings.hide_on_fullscreen,
+        spotify_connected: mockSpotifyConnected,
+        lastfm_api_key: mockSettings.lastfm_api_key,
+        seen_intro: mockSettings.seen_intro,
+        hotkeys: mockSettings.hotkeys.map((h) => ({ ...h })),
+      };
+    }
+    return invoke<PrefsSeed>("prefs_seed");
+  },
+  /** Persist an inert setting (reactive separator, seek amount, launch mode,
+   * Last.fm key, seenIntro). Side-effect settings use their own commands. */
+  setSetting(key: string, value: unknown): void {
+    if (IN_TAURI) {
+      void invoke("set_setting", { key, value });
+    } else {
+      (mockSettings as Record<string, unknown>)[key] = value;
+    }
+  },
+  /** Persist one hotkey override + re-register live. Returns the fresh table
+   * (with per-row `registered` truth). */
+  async rebindHotkey(id: string, chord: string): Promise<HotkeyInfo[]> {
+    if (!IN_TAURI) {
+      mockSettings.hotkeys = mockSettings.hotkeys.map((h) =>
+        h.id === id ? { ...h, chord, registered: true } : h,
+      );
+      const snap = mockSettings.hotkeys.map((h) => ({ ...h }));
+      mockHotkeysListeners.forEach((cb) => cb(snap));
+      return snap;
+    }
+    return invoke<HotkeyInfo[]>("rebind_hotkey", { id, chord });
+  },
+  /** Clear all overrides + re-register defaults. Returns the fresh table. */
+  async resetHotkeys(): Promise<HotkeyInfo[]> {
+    if (!IN_TAURI) {
+      mockSettings.hotkeys = MOCK_HOTKEYS.map((h) => ({ ...h }));
+      const snap = mockSettings.hotkeys.map((h) => ({ ...h }));
+      mockHotkeysListeners.forEach((cb) => cb(snap));
+      return snap;
+    }
+    return invoke<HotkeyInfo[]>("reset_hotkeys");
+  },
+  /** Start at login — mirrors the tray. Returns the registry's actual state. */
+  async setStartAtLogin(enabled: boolean): Promise<boolean> {
+    if (!IN_TAURI) {
+      mockSettings.start_at_login = enabled;
+      return enabled;
+    }
+    return invoke<boolean>("set_start_at_login", { enabled });
+  },
+  /** Hide on fullscreen — mirrors the tray. */
+  setHideOnFullscreen(enabled: boolean): void {
+    if (IN_TAURI) {
+      void invoke("set_hide_on_fullscreen", { enabled });
+    } else {
+      mockSettings.hide_on_fullscreen = enabled;
+    }
+  },
+  /** Validate a Last.fm key against the service. "ok" | "invalid" | "offline". */
+  async testLastfmKey(key: string): Promise<string> {
+    if (!IN_TAURI) {
+      await new Promise((r) => setTimeout(r, 500));
+      return key.trim() ? "ok" : "invalid";
+    }
+    return invoke<string>("test_lastfm_key", { key });
+  },
+  /** Whether a Last.fm key is present (the reusable gate signal). */
+  async lastfmHasKey(): Promise<boolean> {
+    if (!IN_TAURI) return mockSettings.lastfm_api_key.trim().length > 0;
+    return invoke<boolean>("lastfm_has_key");
+  },
+  /** Wipe play history + thumbnails. */
+  async clearHistory(): Promise<boolean> {
+    if (!IN_TAURI) {
+      mockHistory.length = 0;
+      return true;
+    }
+    return invoke<boolean>("clear_history");
+  },
+  /** Reveal the log dir in the OS file manager. */
+  openLogs(): void {
+    if (IN_TAURI) void invoke("open_logs");
+  },
+  /** Reveal the app-data folder. */
+  openDataFolder(): void {
+    if (IN_TAURI) void invoke("open_data_folder");
+  },
+  /** Open the source repo in the browser. */
+  openRepo(): void {
+    if (IN_TAURI) void invoke("open_repo");
+    else window.open("https://github.com/thientran01/pulse", "_blank", "noopener");
+  },
+  /** On-demand update check. "uptodate" | "dev" | "busy" | "failed" (an
+   * installed update replaces the process and never returns). */
+  async checkForUpdates(): Promise<string> {
+    if (!IN_TAURI) {
+      await new Promise((r) => setTimeout(r, 600));
+      return "uptodate";
+    }
+    return invoke<string>("check_for_updates");
+  },
+  /** The connected Spotify account's display name (prefs "Connected as …"). */
+  async spotifyDisplayName(): Promise<string | null> {
+    if (!IN_TAURI) return mockSpotifyConnected ? "thien" : null;
+    return invoke<string | null>("spotify_display_name");
+  },
 };
 
-type Lyrics = { synced: string | null; plain: string | null };
+/** `offline` (lyrics.rs) distinguishes a transport failure from a served "no
+ * lyrics" answer, so a caption can read "unavailable — offline" vs "No synced
+ * lyrics". Optional/false everywhere except a genuine offline bail. */
+type Lyrics = { synced: string | null; plain: string | null; offline?: boolean };
 const LYRICS_MISS: Lyrics = { synced: null, plain: null };
 
 let lyricsGen = 0;

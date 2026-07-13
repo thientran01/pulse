@@ -319,6 +319,15 @@ pub fn start_connect(app: &AppHandle) {
             Ok(()) => emit_status(&app),
             Err(msg) => {
                 log::warn!("spotify connect failed: {msg}");
+                // Surface the failure IN-APP too (not just the tray label):
+                // the prefs Connectors card and any gate point listen for
+                // this. A user-canceled consent isn't an error to alarm over.
+                let user_msg = if msg.starts_with("consent denied") {
+                    "Connection canceled."
+                } else {
+                    "Couldn't connect to Spotify — please try again."
+                };
+                let _ = app.emit("spotify-auth-error", serde_json::json!({ "message": user_msg }));
                 narrate(&app, "Spotify connect failed — retry");
             }
         }
@@ -1117,6 +1126,26 @@ pub async fn spotify_resolve_uri(
 #[tauri::command]
 pub async fn spotify_status(app: AppHandle) -> SpotifyStatus {
     SpotifyStatus { connected: connected(&app) }
+}
+
+/// The connected account's display name (prefs "Connected as {name}"), via a
+/// GET /me. Falls back to the account id, then None. Blocking HTTP on the
+/// dedicated pool. Never destroys tokens (api_call's own 401 path handles a
+/// dead session).
+#[tauri::command]
+pub async fn spotify_display_name(app: AppHandle) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        match api_call(&app, "GET", "https://api.spotify.com/v1/me") {
+            Ok(Some(v)) => v["display_name"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .or_else(|| v["id"].as_str())
+                .map(String::from),
+            _ => None,
+        }
+    })
+    .await
+    .unwrap_or(None)
 }
 
 #[tauri::command]

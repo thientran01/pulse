@@ -28,6 +28,43 @@ pub struct SimilarTrack {
     pub score: f64,
 }
 
+/// Cheap key validation for the prefs "Test key" button: a minimal request
+/// (chart.getTopArtists, limit 1) whose only failure mode we care about is a
+/// rejected key. Returns "ok" | "invalid" (Last.fm error 10/26) | "offline"
+/// (transport/5xx/garbled). An empty key is "invalid" without a round-trip.
+pub fn validate_key(key: &str) -> &'static str {
+    if key.trim().is_empty() {
+        return "invalid";
+    }
+    let url = format!(
+        "https://ws.audioscrobbler.com/2.0/?method=chart.gettopartists&limit=1&api_key={}&format=json",
+        urlenc(key),
+    );
+    let resp = ureq::get(&url).set("User-Agent", UA).timeout(TIMEOUT).call();
+    let v: serde_json::Value = match resp {
+        Ok(r) => match r.into_json() {
+            Ok(v) => v,
+            Err(_) => return "offline",
+        },
+        // Last.fm serves its application errors as 4xx WITH a JSON body — read
+        // it so a rejected key reports as invalid, not offline.
+        Err(ureq::Error::Status(_, r)) => match r.into_json() {
+            Ok(v) => v,
+            Err(_) => return "offline",
+        },
+        Err(_) => return "offline",
+    };
+    if let Some(code) = v["error"].as_i64() {
+        // 10 = invalid key, 26 = suspended key. Anything else (rate limit,
+        // temporary service error) is not a verdict on the key itself.
+        return match code {
+            10 | 26 => "invalid",
+            _ => "offline",
+        };
+    }
+    "ok"
+}
+
 /// Statuses: "no_key" (key rejected), "no_data" (Last.fm doesn't know the
 /// track), "offline" (transport/5xx). An empty Ok list also means no_data —
 /// the caller collapses them.
