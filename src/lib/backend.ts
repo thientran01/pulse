@@ -705,11 +705,25 @@ export const commands = {
       const delayMs = LYRICS_PARAM && LYRICS_PARAM !== "none" ? Number(LYRICS_PARAM) || 0 : 0;
       if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
       if (LYRICS_PARAM === "none") return LYRICS_MISS;
-      // Mock: a line every 4s across the track so preview exercises karaoke.
-      const lines = Array.from({ length: Math.floor(durationMs / 4000) }, (_, i) => {
-        const t = i * 4;
-        return `[${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}.00]Mock lyric line ${i + 1} — la la la (${title})`;
-      });
+      // Mock: verses on a 4s cadence with real instrumental gaps, so preview
+      // exercises karaoke AND every break-synthesis path (parseLrc): a 12s
+      // intro, a marker-pinned break (the empty stamp at 64s — the mock's
+      // start position of 63s sits right on its doorstep), an UN-marked
+      // 100→124s gap (the estimated-hold path), and a marker-pinned outro.
+      const stamp = (s: number) =>
+        `[${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}.00]`;
+      const lines: string[] = [];
+      let n = 0;
+      const verse = (from: number, to: number) => {
+        for (let s = from; s <= to; s += 4) {
+          lines.push(`${stamp(s)}Mock lyric line ${++n} — la la la (${title})`);
+        }
+      };
+      verse(12, 60);
+      lines.push(`${stamp(64)} `); // vocal-end marker → break 64s→84s
+      verse(84, 100);
+      verse(124, 156); // the un-marked gap before this verse estimates its hold
+      lines.push(`${stamp(160)} `); // vocal-end marker → outro to durationMs
       return { synced: lines.join("\n"), plain: null };
     }
     return lyricsLatestWins(() => invoke("media_lyrics", { artist, title, album, durationMs }));

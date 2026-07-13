@@ -16,7 +16,16 @@ import {
   onSpotifyJumpCancel,
   type DockCorner,
 } from "./lib/backend";
-import { currentLineIndex, msUntilNextLine, parseLrc, VOCAL_LEAD_MS, type LyricLine } from "./lib/lrc";
+import {
+  BREAK_DOTS,
+  breakDotsFilled,
+  currentLineIndex,
+  msUntilNextDot,
+  msUntilNextLine,
+  parseLrc,
+  VOCAL_LEAD_MS,
+  type LyricLine,
+} from "./lib/lrc";
 import { extractAccent } from "./lib/palette";
 import * as posClock from "./lib/posClock";
 import { initReactive } from "./lib/reactive";
@@ -94,6 +103,38 @@ function useLyricIndex(lines: LyricLine[], leadMs: number): number {
     };
   }, [lines, leadMs]);
   return idx;
+}
+
+/** Filled-dot count for the CURRENT break row — the same schedule-not-sample
+ * pattern as useLyricIndex: one timeout armed for the next fifth-of-the-break
+ * breakpoint, re-derived from the clock on fire and on every kernel anchor
+ * event (seek, pause, accepted push), so a seek into the middle of a break
+ * catches the dots up instantly and a pause freezes them. Inactive rows
+ * (not current) schedule nothing. */
+function useBreakDots(line: LyricLine, active: boolean): number {
+  const [filled, setFilled] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    let timer: number | undefined;
+    const sync = () => {
+      window.clearTimeout(timer);
+      timer = undefined;
+      const pos = posClock.now();
+      setFilled(breakDotsFilled(line, pos)); // same value → React bails
+      if (!posClock.isPlaying()) return; // clock frozen — anchor event re-arms
+      const delay = msUntilNextDot(line, pos);
+      if (delay === null) return; // all five lit — nothing left to schedule
+      // Cap long waits and re-verify on fire, against timer throttling.
+      timer = window.setTimeout(sync, Math.min(delay, 30_000));
+    };
+    sync();
+    const unsubscribe = posClock.subscribe(sync);
+    return () => {
+      unsubscribe();
+      window.clearTimeout(timer);
+    };
+  }, [line, active]);
+  return active ? filled : 0;
 }
 
 /** Fields that change what the React tree shows — position fields excluded,
@@ -216,7 +257,7 @@ function useLyrics(np: NowPlaying | null): LyricsState {
       if (!alive || lastKey.current !== key) return;
       // Cap far beyond any real song (~100 lines) — a pathological LRC file
       // shouldn't turn into thousands of DOM nodes.
-      const lines = l.synced ? parseLrc(l.synced).slice(0, 600) : [];
+      const lines = l.synced ? parseLrc(l.synced, np.duration_ms).slice(0, 600) : [];
       setState(lines.length > 0 ? { status: "synced", lines, key } : { status: "none" });
     });
     return () => {
@@ -313,6 +354,72 @@ const LyricLineRow = memo(function LyricLineRow({
         }`}
       />
       {text}
+    </Tag>
+  );
+});
+
+/** An instrumental-break row: five dots counting down the gap, one igniting
+ * per fifth of the break — Apple Music's idle-progress idiom in the living
+ * separator's capsule vocabulary (static, never audio-reactive; the one
+ * living instance per view stays the Waveform). Accent on the lit dots is
+ * the current-line marker's license — content feedback, not chrome; no
+ * marker bar (the dots ARE the current indicator). Filled dots keep
+ * background-color in the transition so an art-change retint sweeps them
+ * like every accent surface. Non-current rows read as read/unread text:
+ * five static muted dots. */
+const BreakRow = memo(function BreakRow({
+  line,
+  index,
+  current,
+  seekable,
+  cascadeDelayMs,
+  anchor,
+}: {
+  line: LyricLine;
+  index: number;
+  current: boolean;
+  seekable: boolean;
+  cascadeDelayMs: number;
+  anchor: boolean;
+}) {
+  const filled = useBreakDots(line, current);
+  const Tag = seekable ? "button" : "div";
+  return (
+    <Tag
+      {...(seekable
+        ? {
+            type: "button" as const,
+            "data-line": index,
+            "aria-label": "Seek to instrumental break",
+            tabIndex: -1,
+          }
+        : // Nothing to read: dots are decoration; the row only speaks when
+          // it's a seek target.
+          { "aria-hidden": true as const })}
+      data-cascade
+      {...(anchor ? { "data-anchor": true } : {})}
+      style={{ "--cascade-delay": `${cascadeDelayMs}ms` } as React.CSSProperties}
+      className={`flex h-8 items-center gap-1.5 rounded-md px-3 py-1 text-left ${
+        seekable ? "cursor-pointer hover:bg-fg/5" : ""
+      }`}
+    >
+      {Array.from({ length: BREAK_DOTS }, (_, i) => (
+        <span
+          key={i}
+          aria-hidden
+          // Tailwind v4 scale-* compiles to the native `scale` property —
+          // that's the one the shorthand names (the IconButton precedent).
+          // A fill is instant at the breakpoint; the 220ms sweep + grow is
+          // how "instant" stays smooth (the retint timing, EASE.out).
+          className={`h-[6px] w-[6px] rounded-full [transition:background-color_220ms_var(--ease-out-tk),scale_220ms_var(--ease-out-tk),opacity_220ms_var(--ease-out-tk)] ${
+            current && i < filled
+              ? "scale-100 bg-accent opacity-100"
+              : current
+                ? "scale-90 bg-muted opacity-60"
+                : "scale-90 bg-muted opacity-40"
+          }`}
+        />
+      ))}
     </Tag>
   );
 });
@@ -448,20 +555,33 @@ function LyricsPanel({
         } ${entering ? "lyrics-entering" : ""}`}
         style={{ transform: `translateY(${-offset}px)` }}
       >
-        {lines.map((line, i) => (
-          <LyricLineRow
-            key={`${line.t}-${i}`}
-            text={line.text}
-            index={i}
-            current={i === idx}
-            seekable={seekable}
-            anchor={i === Math.max(entranceIdx.current, 0)}
-            cascadeDelayMs={
-              CASCADE_BASE_MS +
-              Math.min(Math.abs(i - Math.max(entranceIdx.current, 0)), CASCADE_CAP) * CASCADE_STEP_MS
-            }
-          />
-        ))}
+        {lines.map((line, i) => {
+          const anchor = i === Math.max(entranceIdx.current, 0);
+          const cascadeDelayMs =
+            CASCADE_BASE_MS +
+            Math.min(Math.abs(i - Math.max(entranceIdx.current, 0)), CASCADE_CAP) * CASCADE_STEP_MS;
+          return line.end !== undefined ? (
+            <BreakRow
+              key={`${line.t}-${i}`}
+              line={line}
+              index={i}
+              current={i === idx}
+              seekable={seekable}
+              anchor={anchor}
+              cascadeDelayMs={cascadeDelayMs}
+            />
+          ) : (
+            <LyricLineRow
+              key={`${line.t}-${i}`}
+              text={line.text}
+              index={i}
+              current={i === idx}
+              seekable={seekable}
+              anchor={anchor}
+              cascadeDelayMs={cascadeDelayMs}
+            />
+          );
+        })}
       </div>
       {/* Return-to-now chip — neutral chrome (accent stays on the line
        * marker), on the edge the live line sits past, outside the re-latch
