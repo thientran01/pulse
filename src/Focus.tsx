@@ -2,15 +2,22 @@
  * Focus mode (design "B1") — the fullscreen now-playing takeover, in its
  * own webview window (src-tauri/src/focus.rs; opened from the expanded
  * view's expand bracket, closed by Esc / the collapse control / Alt-F4).
- * ENGINEERING SKELETON: the surfaces, feeds, and entry/exit are real; the
- * visual composition (scale relationships, background treatment, the
- * visualizer's final form) belongs to the 3-design/3-judge panel.
  *
- * One composition: the karaoke panel at the "focus" type scale under a
- * hero header, with the big-art room as the no-lyrics fallback. (A separate
- * visualizer view existed briefly and was CUT on Thien's live feedback,
- * 2026-07-12 — "didn't know it was there, looks bad"; the design panel owns
- * whatever reactive presence replaces it.)
+ * Composition: "SOUNDBOARD" — the 3-design/3-judge panel's winner
+ * (2026-07-12) with the judges' grafts. The room is an instrument and
+ * everything rests on it: the ROOM-scale waveform (src/Waveform.tsx
+ * size="room") spans the lower third as the horizon line; progress and
+ * transport are the console seated beneath it, sharing its exact width;
+ * the upper room holds big art + metadata (left) and a handful of
+ * receding lyric lines (right). Grafts applied: art grown to ~560px (The
+ * Hang), the asymmetric deep-bottom lyric mask (The Hang), the reserved
+ * lyrics-status caption slot (Gatefold), one-stack-two-seats fallback
+ * with an opacity crossfade (The Hang), and the instrument + console
+ * live OUTSIDE the upper-room swap so they never remount. The hero runs
+ * the track-change ANNOUNCEMENT (announceKey): the pill — the
+ * announcement's usual home — is hidden behind the takeover, so the
+ * horizon is the room's one now-playing pulse. The upper room carries NO
+ * other Waveform (SeparatorDot only): one reactive surface per view.
  *
  * Realm notes: own onNowPlaying → posClock.ingest loop (posClock is
  * per-realm), own lyric fetch (disk cache makes the second fetch ~free),
@@ -20,6 +27,7 @@
  * while the main widget hides behind it.
  */
 import { useEffect, useRef, useState } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { MorphIcon } from "./icons/MorphIcon";
 import { commands, onNowPlaying } from "./lib/backend";
 import { VOCAL_LEAD_MS } from "./lib/lrc";
@@ -28,6 +36,7 @@ import * as posClock from "./lib/posClock";
 import { initReactive } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
 import { LyricsPanel, lyricsKeyOf, useLyrics } from "./LyricsPanel";
+import { ProgressBar, Transport } from "./Transport";
 import { SeparatorDot, Waveform } from "./Waveform";
 import type { NowPlaying } from "./types";
 
@@ -95,6 +104,60 @@ function useArtAccent(artUrl: string | null): void {
   }, [artUrl]);
 }
 
+/** The identity stack: art + metadata + the reserved lyrics-status caption
+ * slot (the Gatefold graft — the block never reflows when the state
+ * resolves). One stack, two seats: the lyrics room seats it left, the
+ * fallback room centers the same markup (The Hang's rule; the rooms swap
+ * by opacity crossfade, the art never slides). */
+function IdentityStack({
+  np,
+  artUrl,
+  caption,
+  centered,
+}: {
+  np: NowPlaying;
+  artUrl: string | null;
+  caption: string | null;
+  centered: boolean;
+}) {
+  const align = centered ? "items-center text-center" : "items-start text-left";
+  return (
+    <div className={`flex w-[min(560px,46vh)] flex-col ${align}`}>
+      <div className="grid aspect-square w-full place-items-center overflow-hidden rounded-3xl bg-surface-2 text-muted">
+        {artUrl ? (
+          <img src={artUrl} alt="" className="h-full w-full object-cover" draggable={false} />
+        ) : (
+          <MorphIcon name="note" size={44} />
+        )}
+      </div>
+      {/* Keyed per track: the metadata remounts with the title fade (fast
+          and plain — a track change earns no choreography beyond this). */}
+      <div key={`${np.title}|${np.artist}`} className="title-in mt-8 w-full min-w-0">
+        <p className="truncate text-[40px] font-medium leading-tight text-fg">{np.title}</p>
+        <p className="mt-1 truncate text-[22px] leading-7 text-muted">
+          {np.artist}
+          {np.album && <SeparatorDot />}
+          {np.album}
+        </p>
+      </div>
+      {/* Reserved slot — "Finding lyrics…" answers the wait, the miss stays
+          quiet, and the fixed height means resolution never moves the art. */}
+      <p className="mt-1 h-7 w-full truncate text-[17px] leading-7 text-muted/70">
+        {caption && (
+          <span
+            key={caption}
+            className={`inline-block animate-[caption-in_200ms_var(--ease-out-tk)_both] ${
+              caption === "Finding lyrics…" ? "[animation-delay:400ms]" : ""
+            }`}
+          >
+            {caption}
+          </span>
+        )}
+      </p>
+    </div>
+  );
+}
+
 export default function Focus() {
   const [np, setNp] = useState<NowPlaying | null>(null);
   useEffect(
@@ -109,6 +172,7 @@ export default function Focus() {
   useArtAccent(artUrl);
   const lyrics = useLyrics(np);
   useEffect(() => initReactive(), []);
+  const reducedMotion = useReducedMotion();
 
   // Esc closes — window-level so it works from anywhere in the view.
   useEffect(() => {
@@ -120,19 +184,47 @@ export default function Focus() {
   }, []);
 
   const seekable = !!np?.can_seek;
+  const playing = np?.status === "playing";
   const lyricsLive =
     lyrics.status === "synced" && np !== null && lyrics.key === lyricsKeyOf(np);
   const nothing = !np || np.player === "none";
 
+  // The arrival cascade is earned ONCE per takeover: the first lyrics mount
+  // after open plays it (the user summoned the room and waited on window
+  // creation — or waited on the fetch); later remounts (track changes) swap
+  // plain per the continuity rule.
+  const entranceSpent = useRef(false);
+  const entrance = lyricsLive && !entranceSpent.current;
+  useEffect(() => {
+    if (lyricsLive) entranceSpent.current = true;
+  }, [lyricsLive]);
+
+  const caption = lyricsLive
+    ? null
+    : lyrics.status === "loading"
+      ? "Finding lyrics…"
+      : np && np.player !== "none"
+        ? "No synced lyrics"
+        : null;
+
+  const swap = {
+    initial: { opacity: 0 },
+    animate: { opacity: 1 },
+    exit: { opacity: 0 },
+  };
+  const swapTiming = {
+    duration: reducedMotion ? 0 : DUR[3] / 1000,
+    ease: [...EASE.out] as [number, number, number, number],
+  };
+
   return (
-    // Opaque room — the takeover owns the screen; chrome stays neutral.
-    <div className="group/focus relative flex h-screen w-screen flex-col overflow-hidden bg-surface text-fg">
-      {/* Corner controls: view toggle + collapse, the widget's hover-reveal
-          contract (plain CSS hover is safe here — this window never goes
-          click-through) PLUS the has-[:focus-visible] reveal: the buttons
-          stay in the tab order, and a hover-only reveal strands keyboard
-          users on invisible controls (the widget's own 2026-07-08 catch).
-          Collapse = the contract-bracket verb, going home. */}
+    // Opaque room, one 200ms opacity arrival for the whole surface — chrome
+    // gets no theater; the lyrics cascade and the hero's own bloom are the
+    // arrival's only choreography.
+    <div className="group/focus room-in relative flex h-screen w-screen flex-col overflow-hidden bg-surface text-fg">
+      {/* Corner exit: hover-revealed + the has-[:focus-visible] keyboard
+          reveal (the widget's contract). The contract-bracket verb, going
+          home. */}
       <div className="pointer-events-none absolute right-4 top-4 z-10 flex gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-hover/focus:pointer-events-auto group-hover/focus:opacity-100 has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:opacity-100">
         <button
           type="button"
@@ -149,62 +241,72 @@ export default function Focus() {
         <div className="grid h-full w-full place-items-center">
           <span className="resting-pulse block h-2 w-2 rounded-full bg-muted" aria-hidden />
         </div>
-      ) : lyricsLive ? (
-        <div className="mx-auto flex h-full w-full max-w-4xl flex-col px-10 py-12">
-          <div className="flex items-center gap-5 pb-6 pr-20">
-            {artUrl && (
-              <img
-                src={artUrl}
-                alt=""
-                width={96}
-                height={96}
-                className="h-24 w-24 rounded-xl object-cover"
-              />
-            )}
-            <div className="min-w-0 flex-1">
-              <div className="flex min-w-0 items-center">
-                <p className="min-w-0 truncate text-3xl font-medium text-fg">{np.title}</p>
-                <span className="ml-2 flex shrink-0 items-center">
-                  <Waveform size="md" trailing />
-                </span>
-              </div>
-              <p className="truncate text-lg text-muted">
-                {np.artist}
-                {np.album && <SeparatorDot />}
-                {np.album}
-              </p>
+      ) : (
+        <>
+          {/* THE UPPER ROOM — the only region that swaps (one stack, two
+              seats). Crossfade by opacity; the art never slides. */}
+          <div className="relative min-h-0 flex-1">
+            <AnimatePresence initial={false}>
+              {lyricsLive ? (
+                <motion.div
+                  key={`split:${lyrics.key}`}
+                  {...swap}
+                  transition={swapTiming}
+                  exit={{
+                    opacity: 0,
+                    pointerEvents: "none" as const,
+                    transition: { duration: reducedMotion ? 0 : DUR[2] / 1000, ease: [...EASE.out] as [number, number, number, number] },
+                  }}
+                  className="absolute inset-0 flex items-center gap-[7%] px-[10%] pt-10"
+                >
+                  <IdentityStack np={np} artUrl={artUrl} caption={caption} centered={false} />
+                  <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col py-6">
+                    <LyricsPanel
+                      lines={lyrics.lines}
+                      seekable={seekable}
+                      leadMs={VOCAL_LEAD_MS[np.player]}
+                      entrance={entrance}
+                      scale="focus"
+                    />
+                  </div>
+                </motion.div>
+              ) : (
+                <motion.div
+                  key="centered"
+                  {...swap}
+                  transition={swapTiming}
+                  exit={{
+                    opacity: 0,
+                    pointerEvents: "none" as const,
+                    transition: { duration: reducedMotion ? 0 : DUR[2] / 1000, ease: [...EASE.out] as [number, number, number, number] },
+                  }}
+                  className="absolute inset-0 flex items-center justify-center pt-10"
+                >
+                  <IdentityStack np={np} artUrl={artUrl} caption={caption} centered />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* THE HORIZON — the room's one living reactive surface, OUTSIDE
+              the swap (never remounts; the lastAlive crossfade hazard never
+              applies). It runs the track-change announcement: the pill is
+              hidden behind this takeover, so the horizon is the only
+              now-playing pulse on screen. */}
+          <div className="flex shrink-0 items-center justify-center">
+            <Waveform size="room" announceKey={lyricsKeyOf(np) ?? undefined} />
+          </div>
+
+          {/* THE CONSOLE — persistent (a summoned takeover shows its
+              required controls; the P3/P4 lesson is binding), sharing the
+              instrument's exact width so they read as one machine. */}
+          <div className="mx-auto w-[1170px] max-w-[92vw] shrink-0 pb-12 pt-2">
+            <ProgressBar np={np} size="lg" />
+            <div className="mt-3 flex items-center justify-center">
+              <Transport np={np} seekable={seekable} playing={playing} room />
             </div>
           </div>
-          <LyricsPanel
-            lines={lyrics.lines}
-            seekable={seekable}
-            leadMs={VOCAL_LEAD_MS[np.player]}
-            scale="focus"
-          />
-        </div>
-      ) : (
-        // No synced lyrics: the hero-art room. The art never moves; the
-        // living separator is this view's one reactive surface.
-        <div className="flex h-full w-full flex-col items-center justify-center gap-8">
-          {artUrl && (
-            <img
-              src={artUrl}
-              alt=""
-              width={420}
-              height={420}
-              className="h-[420px] w-[420px] rounded-2xl object-cover"
-            />
-          )}
-          <div className="min-w-0 max-w-[70%] text-center">
-            <p className="truncate text-3xl font-medium text-fg">{np.title}</p>
-            <p className="truncate text-lg text-muted">
-              {np.artist}
-              {np.album && <SeparatorDot />}
-              {np.album}
-            </p>
-          </div>
-          <Waveform size="lg" />
-        </div>
+        </>
       )}
     </div>
   );

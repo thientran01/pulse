@@ -121,16 +121,41 @@ const ENTRANCE_DONE_MS = 800;
 
 export type LyricsScale = "base" | "focus";
 
-/** Per-scale row clothes — same grammar, two sizes. The focus values are the
- * SKELETON's reasonable defaults; the design panel owns the final numbers. */
-const ROW_CLASS: Record<LyricsScale, string> = {
-  base: "px-3 py-1 text-base leading-normal",
-  focus: "px-5 py-2 text-2xl leading-snug",
-};
-const MARKER_CLASS: Record<LyricsScale, string> = {
-  base: "h-4 w-[3px]",
-  focus: "h-6 w-[4px]",
-};
+/** Per-scale clothes + physics — same grammar, two rooms. The focus values
+ * are the Soundboard design (panel verdict, 2026-07-12): 44px uniform rows
+ * (recession by OPACITY, never size — Apple's fullscreen idiom, and size
+ * steps would reflow the translate math), current line anchored slightly
+ * deeper (0.46), and The Hang's asymmetric mask grafted on — the deep
+ * 240px bottom ramp is what makes the room read "a sentence, not a page". */
+const SCALE = {
+  base: {
+    row: "px-3 py-1 text-base leading-normal",
+    marker: "h-4 w-[3px]",
+    anchor: 0.4,
+    mask: "[mask-image:linear-gradient(transparent,black_28px,black_calc(100%-28px),transparent)]",
+    chipTop: "top-8",
+    chipBottom: "bottom-8",
+  },
+  focus: {
+    row: "px-6 py-3 text-[44px] leading-[1.27] tracking-[-0.01em]",
+    marker: "h-9 w-[5px]",
+    anchor: 0.46,
+    mask: "[mask-image:linear-gradient(transparent,black_120px,black_calc(100%-240px),transparent)]",
+    chipTop: "top-36",
+    chipBottom: "bottom-64",
+  },
+} as const satisfies Record<LyricsScale, unknown>;
+
+/** Focus-scale recession: opacity tiers by clamped distance from the current
+ * line. Tiers (not raw distance) keep the row memo effective — a line
+ * advance re-renders only the rows whose tier changed. While the user
+ * wheel-browses, every non-current row relaxes to the base muted/80 (you
+ * scrolled to READ — the falloff would gray out exactly what you came for)
+ * and the tiers re-settle on re-latch. */
+function focusTone(tier: number, browsing: boolean): string {
+  if (browsing) return "text-muted/80";
+  return tier <= 1 ? "text-muted/85" : tier === 2 ? "text-muted/50" : "text-muted/30";
+}
 
 /** One lyric line. Memoized so a line advance reconciles the two rows whose
  * `current` flipped instead of the whole list; clicks are delegated to the
@@ -143,6 +168,8 @@ const LyricLineRow = memo(function LyricLineRow({
   cascadeDelayMs,
   anchor,
   scale,
+  tier,
+  browsing,
 }: {
   text: string;
   index: number;
@@ -157,8 +184,16 @@ const LyricLineRow = memo(function LyricLineRow({
    * instantly — no JS disarm, no engine-dependent delay retargeting. */
   anchor: boolean;
   scale: LyricsScale;
+  /** Clamped distance from the current line (focus recession); null at base. */
+  tier: number | null;
+  browsing: boolean;
 }) {
   const Tag = seekable ? "button" : "div";
+  const tone = current
+    ? "font-medium text-fg"
+    : tier === null
+      ? "text-muted/80"
+      : focusTone(tier, browsing);
   return (
     <Tag
       {...(seekable
@@ -175,9 +210,9 @@ const LyricLineRow = memo(function LyricLineRow({
       data-cascade
       {...(anchor ? { "data-anchor": true } : {})}
       style={{ "--cascade-delay": `${cascadeDelayMs}ms` } as React.CSSProperties}
-      className={`relative rounded-md text-left transition-colors duration-3 ease-out-tk ${ROW_CLASS[scale]} ${
-        current ? "font-medium text-fg" : "text-muted/80"
-      } ${seekable ? "cursor-pointer hover:bg-fg/5" : ""}`}
+      className={`relative rounded-md text-left transition-colors duration-3 ease-out-tk ${SCALE[scale].row} ${tone} ${
+        seekable ? "cursor-pointer hover:bg-fg/5" : ""
+      }`}
     >
       {/* Accent lives on the marker, never the text (contrast floor is 3:1). */}
       <span
@@ -186,7 +221,7 @@ const LyricLineRow = memo(function LyricLineRow({
         // background-color joins opacity: an art-change retint must sweep the
         // marker like every accent-painted surface (220ms EASE.out, the
         // progress fills' retint timing) instead of snapping it.
-        className={`absolute left-0 top-1/2 -translate-y-1/2 rounded-full bg-accent [transition:opacity_200ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)] ${MARKER_CLASS[scale]} ${
+        className={`absolute left-0 top-1/2 -translate-y-1/2 rounded-full bg-accent [transition:opacity_200ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)] ${SCALE[scale].marker} ${
           current ? "opacity-100" : "opacity-0"
         }`}
       />
@@ -256,10 +291,11 @@ export function LyricsPanel({
     if (!viewport || !list) return;
     const line = list.children[Math.max(idx, 0)] as HTMLElement | undefined;
     if (!line) return;
-    const anchor = viewport.clientHeight * 0.4;
+    const anchor = viewport.clientHeight * SCALE[scale].anchor;
     const raw = idx < 0 ? 0 : line.offsetTop + line.offsetHeight / 2 - anchor;
     setAutoOffset(Math.round(Math.min(Math.max(raw, 0), maxOffset())));
-  }, [idx, lines]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idx, lines, scale]);
 
   useEffect(() => () => window.clearTimeout(resumeTimer.current), []);
 
@@ -301,7 +337,7 @@ export function LyricsPanel({
     <div
       ref={viewportRef}
       onWheel={onWheel}
-      className="relative min-h-0 flex-1 overflow-hidden [mask-image:linear-gradient(transparent,black_28px,black_calc(100%-28px),transparent)]"
+      className={`relative min-h-0 flex-1 overflow-hidden ${SCALE[scale].mask}`}
       aria-label="Lyrics"
     >
       <div
@@ -336,6 +372,8 @@ export function LyricsPanel({
             current={i === idx}
             seekable={seekable}
             scale={scale}
+            tier={scale === "focus" ? Math.min(Math.abs(i - Math.max(idx, 0)), 3) : null}
+            browsing={browsing}
             anchor={i === Math.max(entranceIdx.current, 0)}
             cascadeDelayMs={
               CASCADE_BASE_MS +
@@ -355,7 +393,7 @@ export function LyricsPanel({
           aria-label="Now — back to the current line"
           onClick={relatch}
           className={`absolute left-1/2 z-10 flex -translate-x-1/2 items-center rounded-full border border-border/10 bg-surface-2/90 p-1.5 leading-none text-muted [transition:color_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] [animation:caption-in_140ms_var(--ease-out-tk)_both] hover:text-fg active:scale-95 ${
-            nowBelow ? "bottom-8" : "top-8"
+            nowBelow ? SCALE[scale].chipBottom : SCALE[scale].chipTop
           }`}
         >
           <svg

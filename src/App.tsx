@@ -1,9 +1,7 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useIsPresent, useReducedMotion } from "motion/react";
 import type { MorphName } from "./icons/geometry";
 import { MorphIcon } from "./icons/MorphIcon";
-import { useSeekTick } from "./icons/useSeekTick";
-import { useSkipFlick } from "./icons/useSkipFlick";
 import { useBracketPulse } from "./icons/useBracketPulse";
 import {
   commands,
@@ -18,6 +16,7 @@ import {
   type DockCorner,
 } from "./lib/backend";
 import { VOCAL_LEAD_MS } from "./lib/lrc";
+import { PlayPauseButton, ProgressBar, Transport, useProgressDom } from "./Transport";
 import { LyricsPanel, lyricsKeyOf, useLyrics, type LyricsState } from "./LyricsPanel";
 import { extractAccent } from "./lib/palette";
 import * as posClock from "./lib/posClock";
@@ -41,8 +40,6 @@ import {
   type PresenceState,
 } from "./types";
 
-// Keep in sync with SEEK_STEP_MS in src-tauri/src/lib.rs (global hotkeys).
-const SEEK_STEP_MS = 10_000;
 
 type Mode = "pill" | "card" | "expanded";
 
@@ -66,11 +63,6 @@ const MODE_SIZES: Record<Mode, [number, number]> = {
  * first-frame artifact). */
 const WINDOW_MAX: [number, number] = MODE_SIZES.expanded;
 
-
-function fmt(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-}
 
 /** Fields that change what the React tree shows — position fields excluded,
  * they live in posClock and would otherwise re-render the whole app per emit. */
@@ -181,49 +173,6 @@ function useArtAccent(artUrl: string | null): void {
     };
   }, [artUrl]);
 }
-
-function IconButton({
-  label,
-  onClick,
-  onPointerDown,
-  disabled,
-  size = "md",
-  children,
-}: {
-  label: string;
-  onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
-  onPointerDown?: (e: React.PointerEvent<HTMLButtonElement>) => void;
-  disabled?: boolean;
-  size?: "xs" | "sm" | "md";
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      title={label}
-      disabled={disabled}
-      onClick={onClick}
-      onPointerDown={onPointerDown}
-      // Press scale rides DUR[1] (ANIMATIONS_FROM_ZERO §6 — press feedback is
-      // 90ms) while hover bg and the disabled fade keep DUR[2]. Tailwind v4's
-      // scale-95 compiles to the native `scale` property, so that's the one
-      // the shorthand names.
-      className={`grid place-items-center rounded-md text-fg [transition:background-color_140ms_var(--ease-out-tk),opacity_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 active:scale-95 disabled:pointer-events-none disabled:opacity-40 ${
-        size === "xs" ? "h-6 w-6" : size === "sm" ? "h-7 w-7" : "h-8 w-8"
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
-
-const PLAYER_NAMES: Record<NowPlaying["player"], string> = {
-  apple_music: "Apple Music",
-  spotify: "Spotify",
-  other: "Media",
-  none: "",
-};
 
 /** Hover hold before the full-text tooltip shows — reading intent, not a
  * flyby. Native `title` waits about this long; this is the styled stand-in. */
@@ -810,233 +759,6 @@ function HeartButton({
   );
 }
 
-/** The marquee morph, fired optimistically on pointerdown — the morph IS the
- * press response (SMTC command bools lie; the next emit is the
- * reconciliation). Diff-suppressed emits mean a silently failed command never
- * sends a correcting payload, so a timeout falls back to the prop. */
-function PlayPauseButton({
-  playing,
-  iconSize = 18,
-  size = "md",
-}: {
-  playing: boolean;
-  iconSize?: number;
-  size?: "xs" | "sm" | "md";
-}) {
-  const [optimistic, setOptimistic] = useState<boolean | null>(null);
-  useEffect(() => setOptimistic(null), [playing]);
-  useEffect(() => {
-    if (optimistic === null) return;
-    const t = window.setTimeout(() => setOptimistic(null), 2000);
-    return () => window.clearTimeout(t);
-  }, [optimistic]);
-  const shown = optimistic ?? playing;
-  return (
-    <IconButton
-      size={size}
-      label={shown ? "Pause" : "Play"}
-      // Primary button only — a right/middle click or an aborted press never
-      // produces the click that fires the command, and the icon would sit
-      // wrong until the 2s fallback.
-      onPointerDown={(e) => e.button === 0 && setOptimistic(!shown)}
-      onClick={(e) => {
-        // Keyboard activation (e.detail === 0) never fires pointerdown —
-        // give Enter/Space the same optimistic morph pointer users get.
-        if (e.detail === 0) setOptimistic(!shown);
-        commands.playPause();
-      }}
-    >
-      <MorphIcon name={shown ? "pause" : "play"} size={iconSize} dur={DUR[2]} ease={EASE.out} />
-    </IconButton>
-  );
-}
-
-function SeekButton({
-  dir,
-  seekable,
-  player,
-  size,
-}: {
-  dir: -1 | 1;
-  seekable: boolean;
-  player: NowPlaying["player"];
-  size?: "xs" | "sm" | "md";
-}) {
-  const { scope, tick } = useSeekTick(dir);
-  return (
-    <IconButton
-      size={size}
-      label={
-        seekable
-          ? dir < 0
-            ? "Back 10 seconds"
-            : "Forward 10 seconds"
-          : `Seeking not supported by ${PLAYER_NAMES[player]}`
-      }
-      disabled={!seekable}
-      onPointerDown={(e) => e.button === 0 && void tick()}
-      onClick={(e) => {
-        if (e.detail === 0) void tick(); // keyboard gets the tick too
-        commands.seekRel(dir * SEEK_STEP_MS);
-      }}
-    >
-      <span ref={scope} className="grid place-items-center will-change-transform">
-        <MorphIcon name={dir < 0 ? "seekBack" : "seekFwd"} size={17} />
-      </span>
-    </IconButton>
-  );
-}
-
-/** rAF driver shared by the progress surfaces: writes the fill's scaleX every
- * ~90ms (every frame while scrubbing) and the elapsed label + slider aria only
- * on integer-second changes — position never enters React state (the Waveform
- * pattern). Paused frames cost one compare; a hidden window stops rAF cold.
- * React never renders the rAF-owned transform/aria/label, so re-renders can't
- * reset them to stale values. */
-function useProgressDom(
-  durationMs: number,
-  active: boolean,
-  bar: React.RefObject<HTMLDivElement | null>,
-  fill: React.RefObject<HTMLDivElement | null>,
-  time?: React.RefObject<HTMLSpanElement | null>,
-  drag?: React.RefObject<number | null>,
-): void {
-  useLayoutEffect(() => {
-    let raf = 0;
-    let last = 0;
-    let lastFrac = -1;
-    let lastSec = -1;
-    const write = () => {
-      const dragFrac = drag?.current ?? null;
-      const pos = dragFrac !== null ? dragFrac * durationMs : posClock.now();
-      const frac = durationMs > 0 ? Math.min(pos / durationMs, 1) : 0;
-      if (fill.current && Math.abs(frac - lastFrac) > 0.0004) {
-        lastFrac = frac;
-        fill.current.style.transform = `scaleX(${frac})`;
-      }
-      const sec = Math.floor(pos / 1000);
-      if (sec !== lastSec) {
-        lastSec = sec;
-        if (time?.current) time.current.textContent = fmt(pos);
-        bar.current?.setAttribute("aria-valuenow", String(Math.round(pos)));
-        bar.current?.setAttribute("aria-valuetext", `${fmt(pos)} of ${fmt(durationMs)}`);
-      }
-    };
-    write(); // before first paint — the fill has NO baseline style (see JSX)
-    if (!active) {
-      // Frozen clock: no loop at all (the pre-PR paused cost was zero, keep
-      // it zero). Kernel notifications repaint paused seeks/scrubs.
-      return posClock.subscribe(write);
-    }
-    const loop = (t: number) => {
-      raf = requestAnimationFrame(loop);
-      // ~10fps is plenty for playback; every frame while scrubbing.
-      if (drag?.current == null && t - last < 90) return;
-      last = t;
-      write();
-    };
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  }, [durationMs, active, bar, fill, time, drag]);
-}
-
-function ProgressBar({ np }: { np: NowPlaying }) {
-  const barRef = useRef<HTMLDivElement>(null);
-  const fillRef = useRef<HTMLDivElement>(null);
-  const timeRef = useRef<HTMLSpanElement>(null);
-  // While dragging, the bar tracks the pointer; the seek commits on release.
-  // Mirrored into a ref so the rAF loop reads it without effect churn.
-  const [dragFrac, setDragFrac] = useState<number | null>(null);
-  const dragRef = useRef<number | null>(null);
-  dragRef.current = dragFrac;
-  const seekable = np.can_seek && np.duration_ms > 0;
-  useProgressDom(
-    np.duration_ms,
-    np.status === "playing" || dragFrac !== null,
-    barRef,
-    fillRef,
-    timeRef,
-    dragRef,
-  );
-
-  const fracFromPointer = (clientX: number): number => {
-    const r = barRef.current!.getBoundingClientRect();
-    return Math.min(Math.max((clientX - r.left) / r.width, 0), 1);
-  };
-
-  return (
-    <div className="flex items-center gap-2">
-      {/* No JSX children: the rAF driver owns this text (a rendered child
-          would let drag re-renders clobber the drag-preview time). The
-          pre-paint write() populates it at mount. */}
-      {/* Hug width: the elapsed label's left edge sits flush on the album
-          cover's left edge. tabular-nums keeps the width stable within a
-          digit count, so the track edge only moves at e.g. 9:59→10:00. */}
-      <span ref={timeRef} className="text-[11px] leading-4 tabular-nums text-muted" />
-      <div
-        ref={barRef}
-        role={seekable ? "slider" : "progressbar"}
-        aria-label="Track position"
-        aria-valuemin={0}
-        aria-valuemax={np.duration_ms}
-        tabIndex={seekable ? 0 : -1}
-        onKeyDown={(e) => {
-          if (!seekable) return;
-          if (e.key === "ArrowLeft") commands.seekRel(-5000);
-          if (e.key === "ArrowRight") commands.seekRel(5000);
-          if (e.key === "Home") commands.seekAbs(0);
-          if (e.key === "End") commands.seekAbs(np.duration_ms);
-        }}
-        onPointerDown={(e) => {
-          if (!seekable || !barRef.current) return;
-          try {
-            e.currentTarget.setPointerCapture(e.pointerId);
-          } catch {
-            // Pointer already gone (e.g. released between events) — a plain
-            // click-to-seek still commits via onPointerUp.
-          }
-          setDragFrac(fracFromPointer(e.clientX));
-        }}
-        onPointerMove={(e) => {
-          if (dragFrac === null || !barRef.current) return;
-          setDragFrac(fracFromPointer(e.clientX));
-        }}
-        onPointerUp={() => {
-          if (dragFrac === null) return;
-          commands.seekAbs(Math.round(dragFrac * np.duration_ms));
-          setDragFrac(null);
-        }}
-        onPointerCancel={() => setDragFrac(null)}
-        className={`group relative h-3 flex-1 touch-none ${seekable ? "cursor-pointer" : ""}`}
-      >
-        <div
-          className={`absolute inset-x-0 top-1/2 -translate-y-1/2 overflow-hidden rounded-full bg-fg/10 transition-[height] duration-2 ease-out-tk ${
-            dragFrac !== null ? "h-[5px]" : seekable ? "h-[3px] group-hover:h-[5px]" : "h-[3px]"
-          }`}
-        >
-          {/* Fill scales on the compositor instead of animating width (layout).
-              The rAF driver's pre-paint write() styles this before the first
-              frame, so it needs NO baseline — and must have none: a Tailwind
-              scale-x-0 class compiles to the native CSS `scale` property in
-              v4, which MULTIPLIES with the driver's inline transform and
-              pinned this fill at zero width forever (found live 2026-07-08);
-              an inline style baseline would let drag re-renders clobber the
-              driver's writes (the PR-3 label lesson). */}
-          <div
-            ref={fillRef}
-            className={`h-full w-full origin-left rounded-full bg-accent will-change-transform ${
-              dragFrac === null
-                ? "[transition:transform_90ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]"
-                : "[transition:background-color_220ms_var(--ease-out-tk)]"
-            }`}
-          />
-        </div>
-      </div>
-      <span className="text-[11px] leading-4 tabular-nums text-muted">{fmt(np.duration_ms)}</span>
-    </div>
-  );
-}
-
 /** Non-interactive pill progress hairline — same rAF driver, aria only. */
 function Hairline({ np }: { np: NowPlaying }) {
   const barRef = useRef<HTMLDivElement>(null);
@@ -1096,64 +818,6 @@ function Art({ url, size, radiusPx }: { url: string | null; size: number; radius
       ) : (
         <MorphIcon name="note" size={22} />
       )}
-    </div>
-  );
-}
-
-/** Prev/next with the pass-through flick (useSkipFlick): a masked strip of
- * three glyph copies — the live one plus ghosts parked at ±width, which the
- * hook's wrap-on-mash frame-identity depends on. The mask is the glyph's own
- * 16px box, so the wipe happens inside the button and never brushes the
- * neighboring seek button. */
-function SkipButton({ dir, size }: { dir: -1 | 1; size?: "xs" | "sm" | "md" }) {
-  const { scope, tick } = useSkipFlick(dir, 16);
-  const glyph = dir < 0 ? "prev" : "next";
-  return (
-    <IconButton
-      size={size}
-      label={dir < 0 ? "Previous track" : "Next track"}
-      onPointerDown={(e) => e.button === 0 && void tick()}
-      onClick={(e) => {
-        if (e.detail === 0) void tick(); // keyboard gets the flick too
-        (dir < 0 ? commands.prev : commands.next)();
-      }}
-    >
-      <span className="grid h-4 w-4 place-items-center overflow-hidden">
-        <span ref={scope} className="relative grid place-items-center will-change-transform">
-          <MorphIcon name={glyph} size={16} />
-          <span aria-hidden className="absolute right-full top-0 grid">
-            <MorphIcon name={glyph} size={16} />
-          </span>
-          <span aria-hidden className="absolute left-full top-0 grid">
-            <MorphIcon name={glyph} size={16} />
-          </span>
-        </span>
-      </span>
-    </IconButton>
-  );
-}
-
-/** compact = the card's bottom row: 24px buttons on an 8px gap. Expanded
- * keeps the 32px/4px transport — both center in a full-width bottom row. */
-function Transport({
-  np,
-  seekable,
-  playing,
-  compact = false,
-}: {
-  np: NowPlaying;
-  seekable: boolean;
-  playing: boolean;
-  compact?: boolean;
-}) {
-  const size = compact ? "xs" : "md";
-  return (
-    <div className={`flex items-center ${compact ? "gap-2" : "gap-1"}`}>
-      <SkipButton size={size} dir={-1} />
-      <SeekButton size={size} dir={-1} seekable={seekable} player={np.player} />
-      <PlayPauseButton size={size} playing={playing} />
-      <SeekButton size={size} dir={1} seekable={seekable} player={np.player} />
-      <SkipButton size={size} dir={1} />
     </div>
   );
 }

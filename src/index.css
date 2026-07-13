@@ -154,6 +154,13 @@ body {
   animation: caption-in 140ms var(--ease-out-tk) both;
 }
 
+/* Focus mode's arrival: the whole room fades in as one plane (200ms,
+ * opacity only — chrome gets no theater; the lyric cascade and the hero's
+ * own bloom are the arrival's only choreography). */
+.room-in {
+  animation: caption-in 200ms var(--ease-out-tk) both;
+}
+
 /* Caption fade for the big-art view's reserved slot ("Finding lyrics…" /
  * "No synced lyrics") — an animation, not a transition, so it runs on mount. */
 @keyframes caption-in {
