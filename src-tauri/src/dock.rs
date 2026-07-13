@@ -502,19 +502,15 @@ fn spawn_animation(
     });
 }
 
-/// The interactive rect (physical px, screen coords): the frontend-reported
-/// mode footprint anchored at the docked corner, or the whole window before
-/// the first report. This is the widget the user SEES (shell + gutter) —
-/// the click-through gate and the snap decision both key on it, never on
-/// the oversized window rect.
-fn hit_rect(window: &WebviewWindow, wx: i32, wy: i32, ww: i32, wh: i32) -> (i32, i32, i32, i32) {
+/// The mode footprint anchored at the docked corner (physical px, screen
+/// coords), or the whole window before the first hit-size report. The raw
+/// geometry — NO corner-glide grace. The snap decision keys on THIS: it
+/// wants the footprint at the committed corner (where the shell is headed),
+/// not the whole-window fallback, so a settle within the grace window can't
+/// derive — and, during a fullscreen episode, PERSIST — a window-center
+/// corner (quick-review catch, 2026-07-13).
+fn footprint_rect(window: &WebviewWindow, wx: i32, wy: i32, ww: i32, wh: i32) -> (i32, i32, i32, i32) {
     let dock = window.state::<Dock>();
-    // Corner-glide grace: while the shell travels between seats, no
-    // corner-anchored rect is honest — stay whole-window interactive.
-    let changed = *dock.corner_changed.lock().unwrap_or_else(PoisonError::into_inner);
-    if changed.is_some_and(|t| t.elapsed() < Duration::from_millis(HIT_GRACE_MS)) {
-        return (wx, wy, ww, wh);
-    }
     let hit = *dock.hit_size.lock().unwrap_or_else(PoisonError::into_inner);
     let Some((hw, hh)) = hit else {
         return (wx, wy, ww, wh);
@@ -534,6 +530,19 @@ fn hit_rect(window: &WebviewWindow, wx: i32, wy: i32, ww: i32, wh: i32) -> (i32,
         Corner::BottomRight => (wx + ww - hw, wy + wh - hh),
     };
     (l, t, hw, hh)
+}
+
+/// The interactive rect for the click-through gate: footprint_rect, but the
+/// whole window during the corner-glide grace — while the shell travels
+/// between seats, no corner-anchored rect is honest, so the whole window
+/// stays interactive until it lands (see corner_changed / HIT_GRACE_MS).
+fn hit_rect(window: &WebviewWindow, wx: i32, wy: i32, ww: i32, wh: i32) -> (i32, i32, i32, i32) {
+    let dock = window.state::<Dock>();
+    let changed = *dock.corner_changed.lock().unwrap_or_else(PoisonError::into_inner);
+    if changed.is_some_and(|t| t.elapsed() < Duration::from_millis(HIT_GRACE_MS)) {
+        return (wx, wy, ww, wh);
+    }
+    footprint_rect(window, wx, wy, ww, wh)
 }
 
 /// Store the docked corner. If it CHANGED from an existing corner AND the
@@ -569,10 +578,10 @@ fn settle_release(window: &WebviewWindow) {
         return;
     };
     let (w, h) = (size.width as i32, size.height as i32);
-    // The snap corner keys on the VISIBLE widget's center via hit_rect — the
-    // shell sits corner-anchored inside WINDOW_MAX, so a pill dropped just
-    // below the midline would snap UP if judged by the window center.
-    let (hx, hy, hw, hh) = hit_rect(window, pos.x, pos.y, w, h);
+    // The snap corner keys on the VISIBLE widget's center (footprint_rect) —
+    // the shell sits corner-anchored inside WINDOW_MAX, so a pill dropped
+    // just below the midline would snap UP if judged by the window center.
+    let (hx, hy, hw, hh) = footprint_rect(window, pos.x, pos.y, w, h);
     let scale = window.scale_factor().unwrap_or(1.0);
     let (corner, target) =
         settle_target((hx + hw / 2, hy + hh / 2), (pos.x, pos.y), (w, h), &rect, scale);
@@ -759,10 +768,10 @@ pub fn set_window_size(window: WebviewWindow, dock: State<Dock>, width: f64, hei
     });
     let (corner, (x, y)) = match restored {
         Ok(pos) => {
-            // hit_size isn't reported yet at launch, so hit_rect returns the
-            // whole window and the center is the window center — right for a
-            // pure-position launch settle.
-            let (hx, hy, hw, hh) = hit_rect(&window, pos.0, pos.1, w, h);
+            // hit_size isn't reported yet at launch, so footprint_rect
+            // returns the whole window and the center is the window center —
+            // right for a pure-position launch settle.
+            let (hx, hy, hw, hh) = footprint_rect(&window, pos.0, pos.1, w, h);
             settle_target((hx + hw / 2, hy + hh / 2), pos, (w, h), &wa, scale)
         }
         Err(_) => (
