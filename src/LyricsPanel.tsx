@@ -19,7 +19,6 @@ import {
   type LyricLine,
 } from "./lib/lrc";
 import * as posClock from "./lib/posClock";
-import { fmt } from "./Transport";
 import type { NowPlaying } from "./types";
 
 /** Current lyric line by SCHEDULING, not sampling: one timeout armed for the
@@ -309,54 +308,45 @@ const BREAK_DOT_EXIT_STEP_MS = 55; // DUR-adjacent; 4·55 + 220 fade ≈ wavefor
  * the current-line marker's license — content feedback, not chrome; no
  * marker bar (the dots ARE the current indicator). Filled dots keep
  * background-color in the transition so an art-change retint sweeps them
- * like every accent surface. The dots exist ONLY while this row is the
- * current break — hidden (opacity-0) otherwise, so you never see a break's
- * dots ahead of time or lingering after the vocal returns; they still hold
- * their layout box (the focus scale takes its row height from them) so the
- * appear/vanish never shifts the lyric flow. Scale-aware via SCALE[scale]. */
+ * like every accent surface.
+ *
+ * The row is a COLLAPSING line, Apple's "a new line is made for the break":
+ * dormant it takes no vertical space (grid-rows 0fr, -mt-1 eating the flex
+ * gap the zero-height row would still claim), so you never see reserved
+ * emptiness ahead of a break; when the break goes current the line opens
+ * (0fr→1fr) and the dots fade in. On the vocal returning the dots fade out
+ * right-to-left FIRST (the collapse is delayed ~330ms), then the now-empty
+ * line closes. Purely decorative — aria-hidden, no seek target (a break has
+ * no lyric to sing to). Scale-aware via SCALE[scale]. */
 const BreakRow = memo(function BreakRow({
   line,
-  index,
   current,
-  seekable,
   leadMs,
-  cascadeDelayMs,
-  anchor,
   scale,
 }: {
   line: LyricLine;
-  index: number;
   current: boolean;
-  seekable: boolean;
   leadMs: number;
-  cascadeDelayMs: number;
-  anchor: boolean;
   scale: LyricsScale;
 }) {
   const filled = useBreakDots(line, leadMs, current);
-  const Tag = seekable ? "button" : "div";
   return (
-    <Tag
-      {...(seekable
-        ? {
-            type: "button" as const,
-            "data-line": index,
-            // Timestamped: a track can hold several break rows and AT
-            // browse mode exposes them all — identical labels would be
-            // indistinguishable (lyric rows differentiate by their text).
-            "aria-label": `Seek to instrumental break at ${fmt(line.t)}`,
-            tabIndex: -1,
-          }
-        : // Nothing to read: dots are decoration; the row only speaks when
-          // it's a seek target.
-          { "aria-hidden": true as const })}
-      data-cascade
-      {...(anchor ? { "data-anchor": true } : {})}
-      style={{ "--cascade-delay": `${cascadeDelayMs}ms` } as React.CSSProperties}
-      className={`flex items-center rounded-md text-left ${SCALE[scale].breakRow} ${SCALE[scale].breakGap} ${
-        seekable ? "cursor-pointer hover:bg-fg/5" : ""
+    <div
+      aria-hidden
+      // grid-rows 0fr↔1fr is a content-height glide that needs no hardcoded
+      // height (works at both scales). Open is immediate; the collapse waits
+      // (transition-delay) so the dots' right-to-left fade plays out in a
+      // still-open row before the empty line closes. -mt-1 while collapsed
+      // cancels the 4px flex-column gap a zero-height row would still take,
+      // so a dormant break reads as ordinary line spacing.
+      className={`grid ${
+        current
+          ? "mt-0 grid-rows-[1fr] [transition:grid-template-rows_260ms_var(--ease-out-tk),margin-top_260ms_var(--ease-out-tk)]"
+          : "-mt-1 grid-rows-[0fr] [transition:grid-template-rows_260ms_var(--ease-out-tk),margin-top_260ms_var(--ease-out-tk)] [transition-delay:330ms]"
       }`}
     >
+      <div className="overflow-hidden">
+        <div className={`flex items-center ${SCALE[scale].breakRow} ${SCALE[scale].breakGap}`}>
       {Array.from({ length: BREAK_DOTS }, (_, i) => (
         <span
           key={i}
@@ -385,7 +375,9 @@ const BreakRow = memo(function BreakRow({
           }`}
         />
       ))}
-    </Tag>
+        </div>
+      </div>
+    </div>
   );
 });
 
@@ -559,17 +551,7 @@ export function LyricsPanel({
           // Synthesized instrumental-break rows (line.end set) render the
           // five-dot countdown; sung lines render as text.
           return line.end !== undefined ? (
-            <BreakRow
-              key={`${line.t}-${i}`}
-              line={line}
-              index={i}
-              current={i === idx}
-              seekable={seekable}
-              leadMs={leadMs}
-              anchor={anchor}
-              cascadeDelayMs={cascadeDelayMs}
-              scale={scale}
-            />
+            <BreakRow key={`${line.t}-${i}`} line={line} current={i === idx} leadMs={leadMs} scale={scale} />
           ) : (
             <LyricLineRow
               key={`${line.t}-${i}`}
