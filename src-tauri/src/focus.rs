@@ -54,7 +54,14 @@ pub async fn focus_open(app: AppHandle) {
     )
     .title("Pulse Focus")
     .decorations(false)
-    .skip_taskbar(true)
+    // UNLIKE the widget/palette (chromeless floating surfaces that skip the
+    // taskbar), focus mode is a fullscreen view the user actively works in
+    // and Alt+Tabs away from — it MUST stay in the taskbar + Alt+Tab
+    // switcher. With skip_taskbar it dropped behind whatever you switched to
+    // with no way back (not in the switcher, not on the taskbar), leaving
+    // only the Pulse hotkey — which closes focus rather than restoring it
+    // (Thien, 2026-07-12). It is not always-on-top on purpose: switching to
+    // another app should surface that app, and Alt+Tab brings focus back.
     .resizable(false)
     .maximizable(false)
     .minimizable(false)
