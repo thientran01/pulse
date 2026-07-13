@@ -314,9 +314,14 @@ impl ProcessCapture {
             }
         });
 
-        if ready_rx.recv_timeout(Duration::from_secs(3)) != Ok(true) {
+        // 5s comfortably covers the 2s activation wait plus the setup calls
+        // after it. On timeout the thread is DETACHED, never joined: a
+        // wedged WASAPI call would make join() wedge the OWNER (the thread
+        // that renders the bars) — the zombie exits on its own when the call
+        // returns, and it can't touch the ring (a failed ready handshake
+        // means it never entered the packet loop).
+        if ready_rx.recv_timeout(Duration::from_secs(5)) != Ok(true) {
             stop.store(true, Ordering::Relaxed);
-            let _ = join.join();
             return None;
         }
         Some(ProcessCapture {
@@ -451,8 +456,13 @@ fn capture_loop(
                         }
                         drop(ring);
                         frames.fetch_add(1, Ordering::Relaxed);
-                        last_data_ms
-                            .store(epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
+                        // max(1): 0 is has_data's "never delivered" sentinel,
+                        // and a first packet CAN land inside the epoch's
+                        // first millisecond.
+                        last_data_ms.store(
+                            (epoch.elapsed().as_millis() as u64).max(1),
+                            Ordering::Relaxed,
+                        );
                     }
                     if capture.ReleaseBuffer(n_frames).is_err() {
                         break 'outer;

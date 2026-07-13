@@ -308,7 +308,13 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                     // plus the wrong-join demote (a real player is never
                     // THIS silent mid-playback).
                     Capture::Process(p, aumid) => {
-                        if p.done() || !p.target_alive() || *aumid != target_aumid() {
+                        // A capture that died having NEVER delivered is a
+                        // broken join — demote, don't reopen: a plain reopen
+                        // would re-run the full resolution+activation at
+                        // loop cadence against the same broken target.
+                        if p.done() && !p.has_data() {
+                            Act::Demote(aumid.clone())
+                        } else if p.done() || !p.target_alive() || *aumid != target_aumid() {
                             Act::Reopen
                         } else if !p.has_data() && p.ms_since_data() > DEMOTE_AFTER_MS {
                             Act::Demote(aumid.clone())
@@ -353,14 +359,27 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                     Act::TryUpgrade(aumid) => {
                         // The player's session may have appeared since we fell
                         // back — swap up to the scoped capture when it has.
-                        let ring = Arc::new(Mutex::new(Ring::new()));
-                        if let Some(cap) = loopback::resolve_target(&aumid).and_then(|t| {
-                            loopback::ProcessCapture::open(t, ring.clone(), frames.clone())
-                        }) {
-                            let rate = cap.sample_rate;
-                            active = Some((Capture::Process(cap, aumid), rate, ring));
-                            last_frames = frames.load(Ordering::Relaxed);
-                            last_progress = std::time::Instant::now();
+                        // A no-session miss keeps retrying (resolution is a
+                        // cheap enumeration); a join that resolved but FAILED
+                        // to activate demotes stickily — retrying it would
+                        // stutter the working Device stream with a blocking
+                        // multi-second activation attempt every 5s.
+                        match loopback::resolve_target(&aumid) {
+                            None => {}
+                            Some(t) => {
+                                let ring = Arc::new(Mutex::new(Ring::new()));
+                                if let Some(cap) =
+                                    loopback::ProcessCapture::open(t, ring.clone(), frames.clone())
+                                {
+                                    let rate = cap.sample_rate;
+                                    active = Some((Capture::Process(cap, aumid), rate, ring));
+                                    last_frames = frames.load(Ordering::Relaxed);
+                                    last_progress = std::time::Instant::now();
+                                } else {
+                                    eprintln!("audio: process activation failed for {aumid:?} — staying on device mix");
+                                    demoted = Some(aumid);
+                                }
+                            }
                         }
                     }
                 }
