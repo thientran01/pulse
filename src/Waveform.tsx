@@ -2,9 +2,11 @@
  * The living separator: at rest it's a colorless middot between artist and
  * album — a plain typographic separator. When music plays it blooms into
  * five Apple-style accent capsules bouncing on live spectrum bins. On pause
- * it settles in beats: the bars retract into five dots, the dots vanish in
- * pairs from the outside in (reverse-reading as one dot having multiplied),
- * and the survivor drains to gray as the very last event. The app's ONLY
+ * it settles in beats: the bars retract into dots, then the dots fade from
+ * the outside in — a distance-staggered cascade normalized to the drop beat,
+ * so a 5-bar and a 41-bar rendition collapse in the same wall-clock (reverse-
+ * reading as one dot having multiplied) — and the survivor drains to gray as
+ * the very last event. The app's ONLY
  * audio-reactive surface. State morphs use the house EASE token; per-frame
  * motion is DOM spans + scaleY transforms only (compositor-friendly) at
  * ~30fps.
@@ -132,8 +134,11 @@ function barClass(phase: Phase, i: number, size: Size): string {
   if (phase === "alive")
     return `${g.bar} [transition:height_220ms_var(--ease-out-tk),width_220ms_var(--ease-out-tk),opacity_140ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]`;
   // Distance from the center bar drives the collapse: "three" keeps the
-  // survivor plus its immediate pair, so at lg the three outer pairs leave
-  // on one beat — their 260ms fades on 200ms beats still read outside-in.
+  // survivor plus its immediate pair; everything outside that (d>1) drops on
+  // this beat, but dropDelayMs staggers their fades by distance so they leave
+  // outside-in as one smooth cascade at any bar count — the "one" beat then
+  // takes the inner pair. (Formerly the whole d>1 group vanished on a single
+  // beat, so a 9- or 41-bar rendition snapped straight to three dots.)
   const d = Math.abs(i - (BAR_BINS[size].length - 1) / 2);
   const mid = d === 0;
   const dropped = phase === "three" ? d > 1 : phase !== "dots" && !mid;
@@ -141,6 +146,29 @@ function barClass(phase: Phase, i: number, size: Size): string {
   // layer handoff is pixel-perfect.
   const dotSize = mid && (phase === "one" || phase === "rest") ? g.survivor : g.dot;
   return `${dotSize} ${dropped ? `opacity-0 ${g.dropBlur}` : "opacity-100 blur-0"} [transition:height_260ms_var(--ease-out-tk),width_260ms_var(--ease-out-tk),transform_260ms_var(--ease-out-tk),opacity_260ms_var(--ease-out-tk),filter_260ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]`;
+}
+
+/** Outside-in stagger for the settle collapse. Each dropped dot's fade is
+ * delayed by how FAR IN it is from the outermost — normalized to the drop
+ * beat (DROP_MS) so the whole sweep takes the same wall-clock no matter how
+ * many bars a size has: outermost pair leads at 0, the d=2 pair lands a full
+ * DROP_MS later (right as the "one" beat drops the inner d=1 pair), and the
+ * dots in between fill the gap evenly. sm (5 bars, maxD 2) collapses to the
+ * old two-beat feel — d=2 leads on "three", d=1 on "one"; md/lg/room fan the
+ * former single-beat drop into a real cascade.
+ *
+ * Only the hiding phases stagger, and only for the outer dots (d≥2, dropped
+ * on "three"): "alive"/"dots" carry no delay (the rAF loop and the retraction
+ * own those), the inner pair (d<2) needs none — the "one" beat IS its stagger,
+ * and the bloom/announcement never drop outer dots at a size where this fires
+ * (the announcement runs sm-only), so their timing is untouched. */
+function dropDelayMs(phase: Phase, i: number, size: Size): number {
+  if (phase !== "three" && phase !== "one" && phase !== "rest") return 0;
+  const n = BAR_BINS[size].length;
+  const maxD = (n - 1) / 2;
+  const d = Math.abs(i - (n - 1) / 2);
+  if (d < 2 || maxD <= 1) return 0;
+  return Math.round(((maxD - d) / (maxD - 1)) * DROP_MS);
 }
 
 /** Announcement (track change) beat spacing — the bloom's quick cadence for
@@ -449,18 +477,26 @@ export function Waveform({
           atRest ? "opacity-0" : "opacity-100 [transition:opacity_220ms_var(--ease-out-tk)]"
         }`}
       >
-        {bins.map((_, i) => (
-          <span
-            key={i}
-            ref={(el) => {
-              barsRef.current[i] = el;
-            }}
-            className={`origin-center rounded-full will-change-transform ${
-              announceTint ? "bg-muted" : "bg-accent"
-            } ${barClass(phase, i, size)}`}
-            style={{ transform: phase === "alive" ? `scaleY(${REST})` : "scale(1)" }}
-          />
-        ))}
+        {bins.map((_, i) => {
+          // Per-bar collapse stagger (settle only). undefined at delay 0 so
+          // the alive/dots states carry no transition-delay at all.
+          const delay = dropDelayMs(phase, i, size);
+          return (
+            <span
+              key={i}
+              ref={(el) => {
+                barsRef.current[i] = el;
+              }}
+              className={`origin-center rounded-full will-change-transform ${
+                announceTint ? "bg-muted" : "bg-accent"
+              } ${barClass(phase, i, size)}`}
+              style={{
+                transform: phase === "alive" ? `scaleY(${REST})` : "scale(1)",
+                transitionDelay: delay ? `${delay}ms` : undefined,
+              }}
+            />
+          );
+        })}
       </span>
     </span>
   );
