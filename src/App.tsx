@@ -824,9 +824,17 @@ function ExpandedView({
                 mx-1.5 = the same 10px gap as the card. */}
             <div className="flex min-w-0 items-center">
               <TruncateTip text={np.title} className="text-[15px] font-medium text-fg" />
-              <span className="ml-1 flex shrink-0 items-center">
-                <Waveform size="md" trailing />
-              </span>
+              {/* Mounted only while the header shows — one living Waveform per
+                  state (doctrine: one reactive surface per view). In the album
+                  view the lg hero is that surface; leaving both always-mounted
+                  ran two rAF/bands loops at once. lastAlive carries the bloom
+                  state across this mount/unmount, so the album toggle doesn't
+                  re-bloom the capsules from the dot. */}
+              {headerShown && (
+                <span className="ml-1 flex shrink-0 items-center">
+                  <Waveform size="md" trailing />
+                </span>
+              )}
             </div>
             <TruncateTip text={np.artist} className="text-[13px] text-muted" />
           </div>
@@ -890,10 +898,15 @@ function ExpandedView({
           </div>
           {/* The living separator at hero size, filling the dead zone between
               the metadata and the transport. The metadata line keeps a static
-              middot so the reactive surface isn't on screen twice. */}
-          <div className="mt-3">
-            <Waveform size="lg" />
-          </div>
+              middot so the reactive surface isn't on screen twice. Mounted
+              only while the album view is active — one living Waveform per
+              state (the header's md carries lyrics + queue); lastAlive bridges
+              the mount so the toggle doesn't re-bloom it from the dot. */}
+          {active === "album" && (
+            <div className="mt-3">
+              <Waveform size="lg" />
+            </div>
+          )}
         </div>
 
         {/* Queue view — the same fixed header sits above it; the list is the
