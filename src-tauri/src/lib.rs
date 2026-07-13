@@ -272,6 +272,11 @@ pub(crate) fn apply_visibility(app: &AppHandle) {
     // the worst failure class here (quick-review catch, 2026-07-09).
     let is = win.is_visible().unwrap_or(!want);
     if want && !is {
+        // Reconcile the seat context first: a show landing between presence
+        // ticks (hotkey snooze, tray) must never flash at the wrong seat.
+        // The hidden-window swap is an instant jump, and sync_seat never
+        // calls back into apply_visibility.
+        dock::sync_seat(app);
         let _ = win.show();
         // The poll loop skips hidden windows — refresh immediately on show.
         emit_now(app);
@@ -728,6 +733,8 @@ pub fn run() {
             history::init(app.handle());
             // Managed up-next: restore the persisted list + fed marker.
             upnext::init(app.handle());
+            // Docking: restore the persisted fullscreen seat.
+            dock::init(app.handle());
 
             // Global hotkeys, each with its own action.
             type Action = fn(&AppHandle);

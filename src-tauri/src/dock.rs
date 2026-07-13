@@ -1,7 +1,27 @@
 /*
- * Corner docking: the widget always rests in one of the four corners of the
- * monitor's work area (above the taskbar, MARGIN_LOGICAL from the edges).
- * Drags stay free; on release the window glides to the nearest corner.
+ * Corner docking: the widget anchors to one of the four corners of the
+ * monitor's work area, but the OFFSET is free — the corner is a gravity
+ * well, not a cage. Drags stay free; on release the nearest corner is
+ * derived (it stays the anchor IDENTITY: shell-seat glide direction,
+ * hit-rect anchor, queue popover direction all key on it, and all anchor
+ * to the corner of the WINDOW rect, so they work at any position). A drop
+ * within MAGNET_PX of the canonical seat glides home; a drop within
+ * RAIL_PX of a seat coordinate settles that axis onto the margin rail;
+ * anywhere else the drop stands, clamped on-screen. The same settle rule
+ * classifies the restored position at launch: near a seat → re-seat
+ * (heals DPI drift and disconnected monitors, exactly the old behavior),
+ * else the free position survives — the magnet radius IS the
+ * snapped-vs-free classifier, so no persisted bit can drift out of sync.
+ *
+ * The fullscreen seat: while settled fullscreen content owns the WIDGET's
+ * monitor (presence.rs's monitor-scoped verdict — never the global QUNS
+ * states, which can't say WHICH monitor), the widget re-seats against the
+ * FULL MONITOR RECT: the taskbar is covered, and work-area seats float a
+ * taskbar-height too high over game HUDs. The fullscreen position is its
+ * own remembered seat (drags mid-episode update it; persisted
+ * corner-relative in settings.json as "fsSeat" so resolution changes
+ * adapt); the episode ending restores the exact desktop position — the
+ * same episode/restore grammar as the courtesy conceal.
  *
  * The window NEVER RESIZES after launch: it is born at the largest mode's
  * size (tauri.conf.json = App.tsx WINDOW_MAX) and every mode change is the
@@ -18,13 +38,14 @@
  *
  * Corner persistence is derived, not stored: tauri-plugin-window-state
  * restores the last position, and the first positioning call (or the launch
- * Moved event) snaps to whichever corner that position is nearest — which
- * also self-heals positions persisted on a now-disconnected monitor.
+ * Moved event) settles it — which also self-heals positions persisted on a
+ * now-disconnected monitor.
  */
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 use windows::core::BOOL;
 use windows::Win32::Foundation::HWND;
@@ -38,6 +59,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 /// Gap between the window and the work-area edges, in logical px.
 const MARGIN_LOGICAL: f64 = 12.0;
+/// Free placement: a drop within this of the canonical corner seat glides
+/// home. Doubles as the launch-time snapped-vs-free classifier — one rule,
+/// two sites, so they can't disagree.
+const MAGNET_PX: f64 = 80.0;
+/// A free drop within this of a seat coordinate settles that axis onto the
+/// margin rail (per-axis; must stay < MAGNET_PX so the magnet wins near a
+/// full seat). Near-edge drops end up tidy-aligned; mid-screen drops stand.
+const RAIL_PX: f64 = 24.0;
 /// Snap-glide duration = DUR[3] in src/lib/tokens.ts. Keep in sync.
 const SNAP_MS: u64 = 200;
 /// A drag is considered released once Moved events go quiet this long.
@@ -70,6 +99,49 @@ impl Corner {
             Corner::BottomRight => "bottom-right",
         }
     }
+
+    /// Inverse of as_str, for the persisted fullscreen seat.
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "top-left" => Some(Corner::TopLeft),
+            "top-right" => Some(Corner::TopRight),
+            "bottom-left" => Some(Corner::BottomLeft),
+            "bottom-right" => Some(Corner::BottomRight),
+            _ => None,
+        }
+    }
+}
+
+/// Which rect corner math runs against: the work area on the desktop; the
+/// full monitor rect during a fullscreen episode (the taskbar is covered).
+#[derive(Clone, Copy, PartialEq)]
+enum Space {
+    Desktop,
+    Fullscreen,
+}
+
+/// The remembered fullscreen position, as a logical offset from its corner's
+/// canonical monitor-rect seat — corner-relative so resolution/DPI changes
+/// re-resolve instead of landing off-screen.
+#[derive(Clone, Copy)]
+struct FsSeat {
+    corner: Corner,
+    dx: f64,
+    dy: f64,
+}
+
+impl FsSeat {
+    fn to_json(self) -> Value {
+        json!({ "corner": self.corner.as_str(), "dx": self.dx, "dy": self.dy })
+    }
+
+    fn from_json(v: &Value) -> Option<Self> {
+        Some(FsSeat {
+            corner: Corner::from_str(v.get("corner")?.as_str()?)?,
+            dx: v.get("dx")?.as_f64()?,
+            dy: v.get("dy")?.as_f64()?,
+        })
+    }
 }
 
 /// Tell the webview which corner resizes grow out of: App.tsx seats the
@@ -98,6 +170,28 @@ pub struct Dock {
     /// corner) the frontend reports per mode — everything outside it is
     /// click-through. None (pre-report) = the whole window is interactive.
     hit_size: Mutex<Option<(f64, f64)>>,
+    /// Presence's monitor-scoped verdict: fullscreen content owns the
+    /// widget's monitor. What sync_seat reconciles toward.
+    want_fs: AtomicBool,
+    /// The seat currently applied — diverges from want_fs only while a swap
+    /// is deferred (mid-press) and the presence tick hasn't retried yet.
+    seated_fs: AtomicBool,
+    /// Exact position + corner at fullscreen-episode start, restored
+    /// verbatim (clamped) when the episode ends.
+    desktop_return: Mutex<Option<((i32, i32), Corner)>>,
+    /// The remembered fullscreen seat (settings.json "fsSeat"). None →
+    /// first episode defaults to the same corner against the monitor rect.
+    fs_seat: Mutex<Option<FsSeat>>,
+    /// Serializes sync_seat end to end: it's reachable from the presence
+    /// tick AND from apply_visibility (hotkey/tray/any thread), and two
+    /// callers both past the want==seated check would double-capture
+    /// desktop_return — the second one reading a position the first
+    /// already moved (3-agent quick-review convergence, 2026-07-12).
+    seat_gate: Mutex<()>,
+    /// A "desktopReturn" persisted by a quit mid-episode, stashed by init
+    /// (logical px) for set_window_size to settle instead of the
+    /// window-state position — which IS the fullscreen seat in that case.
+    launch_pos: Mutex<Option<(f64, f64)>>,
 }
 
 impl Default for Dock {
@@ -109,6 +203,12 @@ impl Default for Dock {
             last_moved: Mutex::new(Instant::now()),
             watcher_armed: AtomicBool::new(false),
             hit_size: Mutex::new(None),
+            want_fs: AtomicBool::new(false),
+            seated_fs: AtomicBool::new(false),
+            desktop_return: Mutex::new(None),
+            fs_seat: Mutex::new(None),
+            seat_gate: Mutex::new(()),
+            launch_pos: Mutex::new(None),
         }
     }
 }
@@ -121,21 +221,33 @@ struct WorkArea {
     h: i32,
 }
 
-/// Work area of the window's monitor, falling back to the primary monitor —
-/// a position persisted on a now-disconnected monitor must still resolve
-/// somewhere visible so the corner math can pull the window back on-screen.
-fn work_area(window: &WebviewWindow) -> Option<WorkArea> {
+/// The window's monitor rect for the given space (work area on the desktop,
+/// full monitor rect during a fullscreen episode), falling back to the
+/// primary monitor — a position persisted on a now-disconnected monitor must
+/// still resolve somewhere visible so the settle math can pull the window
+/// back on-screen.
+fn space_rect(window: &WebviewWindow, space: Space) -> Option<WorkArea> {
     let monitor = window
         .current_monitor()
         .ok()
         .flatten()
         .or_else(|| window.primary_monitor().ok().flatten())?;
-    let r = monitor.work_area();
-    Some(WorkArea {
-        x: r.position.x,
-        y: r.position.y,
-        w: r.size.width as i32,
-        h: r.size.height as i32,
+    Some(match space {
+        Space::Desktop => {
+            let r = monitor.work_area();
+            WorkArea {
+                x: r.position.x,
+                y: r.position.y,
+                w: r.size.width as i32,
+                h: r.size.height as i32,
+            }
+        }
+        Space::Fullscreen => WorkArea {
+            x: monitor.position().x,
+            y: monitor.position().y,
+            w: monitor.size().width as i32,
+            h: monitor.size().height as i32,
+        },
     })
 }
 
@@ -183,6 +295,92 @@ fn apply_pos(window: &WebviewWindow, x: i32, y: i32, size: Option<(i32, i32)>) {
     unsafe {
         let _ = SetWindowPos(hwnd, None, x, y, cx, cy, flags);
     }
+}
+
+/// One instant positioning op: epoch bump (kills any in-flight glide) +
+/// animating guard around a single move. For moves the user can't watch
+/// (the window is hidden) — visible moves glide via animate_to.
+fn jump_to(window: &WebviewWindow, x: i32, y: i32) {
+    let dock = window.state::<Dock>();
+    dock.epoch.fetch_add(1, Ordering::SeqCst);
+    dock.animating.store(true, Ordering::SeqCst);
+    apply_pos(window, x, y, None);
+    dock.animating.store(false, Ordering::SeqCst);
+}
+
+/// Center of the VISIBLE footprint (the current mode's hit rect, anchored at
+/// the docked corner of the window rect) in physical px. The oversized
+/// WINDOW_MAX window's center misleads the nearest-corner call by up to half
+/// the gutter — a pill dropped just past the work-area midline could snap
+/// the wrong way when judged by the window center. Falls back to the window
+/// center before the first hit-size report (launch).
+fn footprint_center(window: &WebviewWindow, pos: (i32, i32), size: (i32, i32)) -> (i32, i32) {
+    let dock = window.state::<Dock>();
+    let (wx, wy) = pos;
+    let (ww, wh) = size;
+    let hit = *dock.hit_size.lock().unwrap_or_else(PoisonError::into_inner);
+    match hit {
+        None => (wx + ww / 2, wy + wh / 2),
+        Some((hw, hh)) => {
+            let scale = window.scale_factor().unwrap_or(1.0);
+            let hw = ((hw * scale).round() as i32).min(ww);
+            let hh = ((hh * scale).round() as i32).min(wh);
+            let corner = dock
+                .corner
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .unwrap_or(Corner::BottomRight);
+            let (l, t) = match corner {
+                Corner::TopLeft => (wx, wy),
+                Corner::TopRight => (wx + ww - hw, wy),
+                Corner::BottomLeft => (wx, wy + wh - hh),
+                Corner::BottomRight => (wx + ww - hw, wy + wh - hh),
+            };
+            (l + hw / 2, t + hh / 2)
+        }
+    }
+}
+
+/// Clamp an origin so the w×h window sits inside `rect`, keeping the
+/// top-left reachable when the window outgrows it (mirrors corner_origin's
+/// rule — the chromeless drag surface must stay on-screen).
+fn clamp_origin(pos: (i32, i32), rect: &WorkArea, w: i32, h: i32) -> (i32, i32) {
+    (
+        pos.0.clamp(rect.x, (rect.x + rect.w - w).max(rect.x)),
+        pos.1.clamp(rect.y, (rect.y + rect.h - h).max(rect.y)),
+    )
+}
+
+/// The settle decision for a released (or launch-restored) position: derive
+/// the corner identity from `center`, clamp the window into `rect`, then
+/// apply the corner magnet and the per-axis edge rails. Pure — callers apply
+/// the returned corner + target.
+fn settle_target(
+    center: (i32, i32),
+    pos: (i32, i32),
+    size: (i32, i32),
+    rect: &WorkArea,
+    scale: f64,
+) -> (Corner, (i32, i32)) {
+    let (w, h) = size;
+    let margin = (MARGIN_LOGICAL * scale).round() as i32;
+    let corner = nearest_corner(center.0, center.1, rect);
+    let seat = corner_origin(corner, rect, w, h, margin);
+    // Clamp first: a half-off-screen drop lands flush, and its now-margin-off
+    // distance is the rails' problem below.
+    let (x, y) = clamp_origin(pos, rect, w, h);
+    // Magnet: near the canonical seat, glide home — the anchor's convenience.
+    let (dx, dy) = ((x - seat.0) as i64, (y - seat.1) as i64);
+    let magnet = (MAGNET_PX * scale).round() as i64;
+    if dx * dx + dy * dy <= magnet * magnet {
+        return (corner, seat);
+    }
+    // Rails: per-axis, the seat coordinate IS the margin rail on the
+    // corner's side — a near-edge drop settles flush instead of a few px off.
+    let rail = (RAIL_PX * scale).round() as i32;
+    let x = if (x - seat.0).abs() <= rail { seat.0 } else { x };
+    let y = if (y - seat.1).abs() <= rail { seat.1 } else { y };
+    (corner, (x, y))
 }
 
 /// Physical state of the primary mouse button (drag may still be in flight).
@@ -325,33 +523,181 @@ fn spawn_animation(
     });
 }
 
-/// Dock to the nearest work-area corner from the current position.
-fn snap_to_nearest(window: &WebviewWindow) {
+/// Settle a released drag: derive the corner, run the magnet/rails/clamp
+/// decision, glide there. During a fullscreen episode the settle runs
+/// against the monitor rect and the landing becomes the remembered
+/// fullscreen seat (the desktop position waits in desktop_return).
+fn settle_release(window: &WebviewWindow) {
     let dock = window.state::<Dock>();
-    let Some(wa) = work_area(window) else { return };
+    let space = if dock.seated_fs.load(Ordering::SeqCst) {
+        Space::Fullscreen
+    } else {
+        Space::Desktop
+    };
+    let Some(rect) = space_rect(window, space) else { return };
     let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
         return;
     };
     let (w, h) = (size.width as i32, size.height as i32);
-    let corner = nearest_corner(pos.x + w / 2, pos.y + h / 2, &wa);
+    let center = footprint_center(window, (pos.x, pos.y), (w, h));
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let (corner, target) = settle_target(center, (pos.x, pos.y), (w, h), &rect, scale);
     *dock.corner.lock().unwrap_or_else(PoisonError::into_inner) = Some(corner);
     emit_corner(window, corner);
-    let scale = window.scale_factor().unwrap_or(1.0);
-    let margin = (MARGIN_LOGICAL * scale).round() as i32;
-    let target = corner_origin(corner, &wa, w, h, margin);
+    if space == Space::Fullscreen {
+        // The landing is the new fullscreen seat: remember it corner-relative
+        // (logical) and persist. File IO is fine here — this runs on the
+        // drag-release watcher thread, never the main thread.
+        let margin = (MARGIN_LOGICAL * scale).round() as i32;
+        let seat = corner_origin(corner, &rect, w, h, margin);
+        let fs = FsSeat {
+            corner,
+            dx: (target.0 - seat.0) as f64 / scale,
+            dy: (target.1 - seat.1) as f64 / scale,
+        };
+        *dock.fs_seat.lock().unwrap_or_else(PoisonError::into_inner) = Some(fs);
+        crate::settings::set_value(window.app_handle(), "fsSeat", fs.to_json());
+    }
     animate_to(window, (pos.x, pos.y), target);
 }
 
-/// Size + dock the window in ONE corner-pinned SetWindowPos. Called once at
-/// launch with WINDOW_MAX (the window is born at that size, so this is
-/// effectively pure positioning): it derives the corner from wherever
-/// window-state restored us — that IS the startup dock — and seeds the
-/// dock-corner event. Mode changes never call this; the window stays at
-/// WINDOW_MAX for its whole life (see the module comment).
+/// Load the persisted fullscreen seat, and consume any "desktopReturn"
+/// left by a quit mid-episode — window-state persisted the FULLSCREEN
+/// position then, and settling that as the launch position would silently
+/// replace a free desktop placement. Call once from setup (file IO belongs
+/// here, not in the sync set_window_size command — main-thread rule).
+pub fn init(app: &AppHandle) {
+    let dock = app.state::<Dock>();
+    if let Some(seat) = crate::settings::get_value(app, "fsSeat")
+        .as_ref()
+        .and_then(FsSeat::from_json)
+    {
+        *dock.fs_seat.lock().unwrap_or_else(PoisonError::into_inner) = Some(seat);
+    }
+    if let Some(v) = crate::settings::get_value(app, "desktopReturn") {
+        if let (Some(x), Some(y)) = (
+            v.get("x").and_then(Value::as_f64),
+            v.get("y").and_then(Value::as_f64),
+        ) {
+            *dock.launch_pos.lock().unwrap_or_else(PoisonError::into_inner) = Some((x, y));
+        }
+        if !v.is_null() {
+            crate::settings::set_value(app, "desktopReturn", Value::Null);
+        }
+    }
+}
+
+/// Presence's monitor-scoped fullscreen verdict feeds the seat context.
+/// Idempotent — presence calls it every tick, which doubles as the retry
+/// for a swap deferred mid-press.
+pub fn set_fullscreen_context(app: &AppHandle, on: bool) {
+    app.state::<Dock>().want_fs.store(on, Ordering::SeqCst);
+    sync_seat(app);
+}
+
+/// Reconcile the window to the wanted seat context (the positioning sibling
+/// of apply_visibility). Entering a fullscreen episode: remember the exact
+/// desktop position, take the remembered fullscreen seat (or the same
+/// corner against the monitor rect when none). Leaving: restore the desktop
+/// position verbatim, clamped — the resolution may have changed mid-episode.
+/// Hidden windows jump instantly (a glide nobody sees just delays the hit
+/// rect); visible ones glide. Deferred (not skipped) while a press is in
+/// flight — moving the window mid-drag would yank it out from under the
+/// hand, the conceal's exact rule.
+pub fn sync_seat(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else { return };
+    let dock = app.state::<Dock>();
+    // One reconciler at a time — see the seat_gate field doc.
+    let _gate = dock.seat_gate.lock().unwrap_or_else(PoisonError::into_inner);
+    let want = dock.want_fs.load(Ordering::SeqCst);
+    if want == dock.seated_fs.load(Ordering::SeqCst) {
+        return;
+    }
+    let visible = window.is_visible().unwrap_or(false);
+    if visible && primary_button_down() {
+        return; // defer: the next presence tick retries
+    }
+    let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
+        return;
+    };
+    let (w, h) = (size.width as i32, size.height as i32);
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let margin = (MARGIN_LOGICAL * scale).round() as i32;
+
+    let (corner, target) = if want {
+        let cur_corner = dock
+            .corner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or(Corner::BottomRight);
+        *dock
+            .desktop_return
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(((pos.x, pos.y), cur_corner));
+        // Mirror it to disk (logical px) for the quit-mid-episode case:
+        // window-state would persist the FULLSCREEN position as the launch
+        // position, silently replacing a free desktop placement — init +
+        // set_window_size consume this instead.
+        crate::settings::set_value(
+            app,
+            "desktopReturn",
+            json!({ "x": pos.x as f64 / scale, "y": pos.y as f64 / scale }),
+        );
+        let Some(rect) = space_rect(&window, Space::Fullscreen) else { return };
+        match *dock.fs_seat.lock().unwrap_or_else(PoisonError::into_inner) {
+            Some(s) => {
+                let seat = corner_origin(s.corner, &rect, w, h, margin);
+                // saturating: dx/dy come from a hand-editable file — a huge
+                // value must clamp on-screen below, not overflow-panic here
+                // (the float→int cast saturates, but the ADD would panic in
+                // dev builds and kill the presence thread).
+                let x = seat.0.saturating_add((s.dx * scale).round() as i32);
+                let y = seat.1.saturating_add((s.dy * scale).round() as i32);
+                (s.corner, clamp_origin((x, y), &rect, w, h))
+            }
+            None => (cur_corner, corner_origin(cur_corner, &rect, w, h, margin)),
+        }
+    } else {
+        // Resolve the rect BEFORE taking the return seat: a monitor-info
+        // miss must leave it in place for the next tick's retry.
+        let Some(rect) = space_rect(&window, Space::Desktop) else { return };
+        let Some(((rx, ry), rcorner)) = dock
+            .desktop_return
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        else {
+            dock.seated_fs.store(false, Ordering::SeqCst);
+            return; // nothing to restore (never actually seated)
+        };
+        // The episode ended cleanly — the persisted copy has done its job.
+        crate::settings::set_value(app, "desktopReturn", Value::Null);
+        (rcorner, clamp_origin((rx, ry), &rect, w, h))
+    };
+
+    dock.seated_fs.store(want, Ordering::SeqCst);
+    *dock.corner.lock().unwrap_or_else(PoisonError::into_inner) = Some(corner);
+    emit_corner(&window, corner);
+    if visible {
+        animate_to(&window, (pos.x, pos.y), target);
+    } else {
+        jump_to(&window, target.0, target.1);
+    }
+}
+
+/// Size + settle the window in ONE SetWindowPos. Called once at launch with
+/// WINDOW_MAX (the window is born at that size, so this is effectively pure
+/// positioning): the window-state-restored position runs through the SAME
+/// settle rule as a drag release — near a canonical seat → re-seat (heals
+/// margin drift, DPI changes, disconnected monitors, exactly the old
+/// always-snap behavior); anywhere else → the free position survives,
+/// clamped + railed. Seeds the dock-corner event. Mode changes never call
+/// this; the window stays at WINDOW_MAX for its whole life (see the module
+/// comment).
 #[tauri::command]
 pub fn set_window_size(window: WebviewWindow, dock: State<Dock>, width: f64, height: f64) {
     dock.epoch.fetch_add(1, Ordering::SeqCst); // cancel any in-flight glide
-    let Some(wa) = work_area(&window) else {
+    let Some(wa) = space_rect(&window, Space::Desktop) else {
         // No monitor info at all — still honor the size so the native window
         // matches the React layout; position keeps its last value.
         let _ = window.set_size(tauri::LogicalSize::new(width, height));
@@ -361,17 +707,29 @@ pub fn set_window_size(window: WebviewWindow, dock: State<Dock>, width: f64, hei
     let w = (width * scale).round() as i32;
     let h = (height * scale).round() as i32;
     let margin = (MARGIN_LOGICAL * scale).round() as i32;
-    let from = window.outer_size().unwrap_or(tauri::PhysicalSize::new(w as u32, h as u32));
-    let (w0, h0) = (from.width as i32, from.height as i32);
-    let corner = {
-        let mut c = dock.corner.lock().unwrap_or_else(PoisonError::into_inner);
-        *c.get_or_insert_with(|| match window.outer_position() {
-            Ok(pos) => nearest_corner(pos.x + w0 / 2, pos.y + h0 / 2, &wa),
-            Err(_) => Corner::BottomRight,
-        })
+    // A quit mid-fullscreen-episode persisted the FULLSCREEN position as the
+    // window-state position; init stashed the true desktop seat — prefer it.
+    let launch_pos = dock
+        .launch_pos
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+        .map(|(x, y)| ((x * scale).round() as i32, (y * scale).round() as i32));
+    let restored = launch_pos.map(Ok).unwrap_or_else(|| {
+        window.outer_position().map(|p| (p.x, p.y)).map_err(|_| ())
+    });
+    let (corner, (x, y)) = match restored {
+        Ok(pos) => {
+            let center = footprint_center(&window, pos, (w, h));
+            settle_target(center, pos, (w, h), &wa, scale)
+        }
+        Err(_) => (
+            Corner::BottomRight,
+            corner_origin(Corner::BottomRight, &wa, w, h, margin),
+        ),
     };
+    *dock.corner.lock().unwrap_or_else(PoisonError::into_inner) = Some(corner);
     emit_corner(&window, corner);
-    let (x, y) = corner_origin(corner, &wa, w, h, margin);
     dock.animating.store(true, Ordering::SeqCst);
     apply_pos(&window, x, y, Some((w, h)));
     dock.animating.store(false, Ordering::SeqCst);
@@ -512,15 +870,18 @@ pub fn on_moved(window: &Window) {
             // Geometry lives on WebviewWindow (Window-level APIs are behind
             // tauri's `unstable` feature) — resolve it by label.
             if let Some(wv) = window.get_webview_window(window.label()) {
-                snap_to_nearest(&wv);
+                settle_release(&wv);
             }
         });
     }
 }
 
 /// Tray recovery: show and re-dock to the bottom-right of the current
-/// monitor. Launch snapping already heals disconnected-monitor positions;
-/// this is the manual belt-and-braces path.
+/// monitor. Launch settling already heals disconnected-monitor positions;
+/// this is the manual belt-and-braces path. Context-aware: during a
+/// fullscreen episode it homes to the MONITOR rect's bottom-right and
+/// forgets the remembered fullscreen seat (reset means "back to defaults"
+/// for whichever seat is live); the desktop return position is untouched.
 pub fn reset_position(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else { return };
     // An explicit summons: clear manual hide, snooze any conceal episode,
@@ -532,9 +893,16 @@ pub fn reset_position(app: &AppHandle) {
     }
     crate::apply_visibility(app);
     let dock = app.state::<Dock>();
+    let space = if dock.seated_fs.load(Ordering::SeqCst) {
+        *dock.fs_seat.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        crate::settings::set_value(app, "fsSeat", Value::Null);
+        Space::Fullscreen
+    } else {
+        Space::Desktop
+    };
     *dock.corner.lock().unwrap_or_else(PoisonError::into_inner) = Some(Corner::BottomRight);
     emit_corner(&window, Corner::BottomRight);
-    let Some(wa) = work_area(&window) else { return };
+    let Some(wa) = space_rect(&window, space) else { return };
     let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
         return;
     };
