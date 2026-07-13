@@ -19,7 +19,6 @@ import {
   type LyricLine,
 } from "./lib/lrc";
 import * as posClock from "./lib/posClock";
-import { fmt } from "./Transport";
 import type { NowPlaying } from "./types";
 
 /** Current lyric line by SCHEDULING, not sampling: one timeout armed for the
@@ -296,6 +295,12 @@ const LyricLineRow = memo(function LyricLineRow({
   );
 });
 
+/** Per-dot stagger for the break-row exit: when the vocal resumes the dots
+ * fade out RIGHT-TO-LEFT, rightmost first, one step apart — the waveform
+ * settle's cadence collapsed to a single axis. Entrance is a plain
+ * together-fade (the current state carries no delay). */
+const BREAK_DOT_EXIT_STEP_MS = 55; // DUR-adjacent; 4·55 + 220 fade ≈ waveform settle
+
 /** An instrumental-break row: five dots counting down the gap, one igniting
  * per fifth of the break — Apple Music's idle-progress idiom in the living
  * separator's capsule vocabulary (a content event, and the ONE ambient
@@ -303,70 +308,76 @@ const LyricLineRow = memo(function LyricLineRow({
  * the current-line marker's license — content feedback, not chrome; no
  * marker bar (the dots ARE the current indicator). Filled dots keep
  * background-color in the transition so an art-change retint sweeps them
- * like every accent surface. Non-current rows read as read/unread text:
- * five static muted dots. Scale-aware (base vs focus) via SCALE[scale]. */
+ * like every accent surface.
+ *
+ * The row is a COLLAPSING line, Apple's "a new line is made for the break":
+ * dormant it takes no vertical space (grid-rows 0fr, -mt-1 eating the flex
+ * gap the zero-height row would still claim), so you never see reserved
+ * emptiness ahead of a break; when the break goes current the line opens
+ * (0fr→1fr) and the dots fade in. On the vocal returning the dots fade out
+ * right-to-left FIRST (the collapse is delayed ~330ms), then the now-empty
+ * line closes. Purely decorative — aria-hidden, no seek target (a break has
+ * no lyric to sing to). Scale-aware via SCALE[scale]. */
 const BreakRow = memo(function BreakRow({
   line,
-  index,
   current,
-  seekable,
   leadMs,
-  cascadeDelayMs,
-  anchor,
   scale,
 }: {
   line: LyricLine;
-  index: number;
   current: boolean;
-  seekable: boolean;
   leadMs: number;
-  cascadeDelayMs: number;
-  anchor: boolean;
   scale: LyricsScale;
 }) {
   const filled = useBreakDots(line, leadMs, current);
-  const Tag = seekable ? "button" : "div";
   return (
-    <Tag
-      {...(seekable
-        ? {
-            type: "button" as const,
-            "data-line": index,
-            // Timestamped: a track can hold several break rows and AT
-            // browse mode exposes them all — identical labels would be
-            // indistinguishable (lyric rows differentiate by their text).
-            "aria-label": `Seek to instrumental break at ${fmt(line.t)}`,
-            tabIndex: -1,
-          }
-        : // Nothing to read: dots are decoration; the row only speaks when
-          // it's a seek target.
-          { "aria-hidden": true as const })}
-      data-cascade
-      {...(anchor ? { "data-anchor": true } : {})}
-      style={{ "--cascade-delay": `${cascadeDelayMs}ms` } as React.CSSProperties}
-      className={`flex items-center rounded-md text-left ${SCALE[scale].breakRow} ${SCALE[scale].breakGap} ${
-        seekable ? "cursor-pointer hover:bg-fg/5" : ""
+    <div
+      aria-hidden
+      // grid-rows 0fr↔1fr is a content-height glide that needs no hardcoded
+      // height (works at both scales). Open is immediate; the collapse waits
+      // (transition-delay) so the dots' right-to-left fade plays out in a
+      // still-open row before the empty line closes. -mt-1 while collapsed
+      // cancels the 4px flex-column gap a zero-height row would still take,
+      // so a dormant break reads as ordinary line spacing.
+      className={`grid ${
+        current
+          ? "mt-0 grid-rows-[1fr] [transition:grid-template-rows_260ms_var(--ease-out-tk),margin-top_260ms_var(--ease-out-tk)]"
+          : "-mt-1 grid-rows-[0fr] [transition:grid-template-rows_260ms_var(--ease-out-tk),margin-top_260ms_var(--ease-out-tk)] [transition-delay:330ms]"
       }`}
     >
+      <div className="overflow-hidden">
+        <div className={`flex items-center ${SCALE[scale].breakRow} ${SCALE[scale].breakGap}`}>
       {Array.from({ length: BREAK_DOTS }, (_, i) => (
         <span
           key={i}
           aria-hidden
+          // The exit stagger lives on the HIDDEN state, so it governs the
+          // fade-OUT (current → not-current): rightmost dot leaves first,
+          // each BREAK_DOT_EXIT_STEP_MS later. The current state carries no
+          // delay, so the fade-IN is a plain together-fade.
+          style={
+            current
+              ? undefined
+              : { transitionDelay: `${(BREAK_DOTS - 1 - i) * BREAK_DOT_EXIT_STEP_MS}ms` }
+          }
           // A fill is instant at the breakpoint; the 220ms sweep + grow is
-          // how "instant" stays smooth (the retint timing, EASE.out).
-          // Opacity floors: the CURRENT row's unlit dots carry state (which
-          // fifth you're in) — 75% keeps bg-muted above the 3:1 non-text
-          // contrast floor; non-current rows recede like read lyric text.
+          // how "instant" stays smooth (the retint timing, EASE.out). The
+          // CURRENT row's unlit dots hold at 75% (bg-muted above the 3:1
+          // non-text floor) so you can read which fifth you're in. Hidden
+          // dots keep bg-accent so a completed break (all five lit — the
+          // common exit) fades out AS accent instead of snapping muted first.
           className={`rounded-full ${SCALE[scale].breakDot} [transition:background-color_220ms_var(--ease-out-tk),scale_220ms_var(--ease-out-tk),opacity_220ms_var(--ease-out-tk)] ${
-            current && i < filled
-              ? "scale-100 bg-accent opacity-100"
-              : current
-                ? "scale-90 bg-muted opacity-75"
-                : "scale-90 bg-muted opacity-50"
+            !current
+              ? "scale-90 bg-accent opacity-0"
+              : i < filled
+                ? "scale-100 bg-accent opacity-100"
+                : "scale-90 bg-muted opacity-75"
           }`}
         />
       ))}
-    </Tag>
+        </div>
+      </div>
+    </div>
   );
 });
 
@@ -451,9 +462,10 @@ export function LyricsPanel({
     return Math.max(list.scrollHeight - viewport.clientHeight, 0);
   };
 
-  // Anchor the current line 40% from the top via a compositor-friendly
-  // translate. Rounded — fractional offsets put text off the pixel grid.
-  useLayoutEffect(() => {
+  // Anchor the current line SCALE.anchor down the viewport via a
+  // compositor-friendly translate. Rounded — fractional offsets put text off
+  // the pixel grid.
+  const applyAnchor = () => {
     const viewport = viewportRef.current;
     const list = listRef.current;
     if (!viewport || !list) return;
@@ -462,8 +474,27 @@ export function LyricsPanel({
     const anchor = viewport.clientHeight * SCALE[scale].anchor;
     const raw = idx < 0 ? 0 : line.offsetTop + line.offsetHeight / 2 - anchor;
     setAutoOffset(Math.round(Math.min(Math.max(raw, 0), maxOffset())));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [idx, lines, scale, pad.top, pad.bottom]);
+  };
+  const applyAnchorRef = useRef(applyAnchor);
+  applyAnchorRef.current = applyAnchor;
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useLayoutEffect(() => applyAnchorRef.current(), [idx, lines, scale, pad.top, pad.bottom]);
+
+  // Re-anchor on any list-height change too, not just line advance. A break
+  // row opens/closes over 260ms (grid-rows glide); anchoring only at the
+  // advance would measure that mid-animation — scrollHeight short by the
+  // break's height — and never recompute, stranding the break's dots
+  // off-screen for its whole duration (worst at the outro, where the break
+  // is the last row). The observer keeps autoOffset glued to the settling
+  // layout; manualOffset still wins the displayed offset while browsing.
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const ro = new ResizeObserver(() => applyAnchorRef.current());
+    ro.observe(list);
+    return () => ro.disconnect();
+  }, []);
 
   useEffect(() => () => window.clearTimeout(resumeTimer.current), []);
 
@@ -540,17 +571,7 @@ export function LyricsPanel({
           // Synthesized instrumental-break rows (line.end set) render the
           // five-dot countdown; sung lines render as text.
           return line.end !== undefined ? (
-            <BreakRow
-              key={`${line.t}-${i}`}
-              line={line}
-              index={i}
-              current={i === idx}
-              seekable={seekable}
-              leadMs={leadMs}
-              anchor={anchor}
-              cascadeDelayMs={cascadeDelayMs}
-              scale={scale}
-            />
+            <BreakRow key={`${line.t}-${i}`} line={line} current={i === idx} leadMs={leadMs} scale={scale} />
           ) : (
             <LyricLineRow
               key={`${line.t}-${i}`}
