@@ -80,14 +80,21 @@ export function useHistoryFeed(active: boolean): {
   useEffect(() => {
     if (!active || seeded.current) return;
     seeded.current = true;
-    void commands.historyPage(null, HISTORY_PAGE).then((page) => {
-      // A live append can land while the seed is in flight — merge, don't
-      // clobber (the page includes it too; dedupe).
-      setEntries((cur) =>
-        cur.length === 0 ? page : [...cur, ...page.filter((p) => !cur.some((c) => sameEntry(c, p)))],
-      );
-      if (page.length < HISTORY_PAGE) setExhausted(true);
-    });
+    void commands
+      .historyPage(null, HISTORY_PAGE)
+      .then((page) => {
+        // A live append can land while the seed is in flight — merge, don't
+        // clobber (the page includes it too; dedupe).
+        setEntries((cur) =>
+          cur.length === 0 ? page : [...cur, ...page.filter((p) => !cur.some((c) => sameEntry(c, p)))],
+        );
+        if (page.length < HISTORY_PAGE) setExhausted(true);
+      })
+      .catch(() => {
+        // Release the latch so a failed seed retries on the next activation
+        // (the panel stays mounted, so nothing else resets it).
+        seeded.current = false;
+      });
   }, [active]);
   useEffect(
     () =>
@@ -101,13 +108,20 @@ export function useHistoryFeed(active: boolean): {
     if (loading.current || exhausted) return;
     loading.current = true;
     const oldest = entriesRef.current[entriesRef.current.length - 1];
-    void commands.historyPage(oldest ? oldest.started_at_ms : null, HISTORY_PAGE).then((page) => {
-      loading.current = false;
-      if (page.length < HISTORY_PAGE) setExhausted(true);
-      if (page.length > 0) {
-        setEntries((cur) => [...cur, ...page.filter((p) => !cur.some((c) => sameEntry(c, p)))]);
-      }
-    });
+    void commands
+      .historyPage(oldest ? oldest.started_at_ms : null, HISTORY_PAGE)
+      .then((page) => {
+        loading.current = false;
+        if (page.length < HISTORY_PAGE) setExhausted(true);
+        if (page.length > 0) {
+          setEntries((cur) => [...cur, ...page.filter((p) => !cur.some((c) => sameEntry(c, p)))]);
+        }
+      })
+      .catch(() => {
+        // Release the latch so a transient history_page failure doesn't jam
+        // pagination for the rest of the session.
+        loading.current = false;
+      });
   }, [exhausted]);
   return { entries, loadMore, exhausted };
 }
