@@ -76,6 +76,10 @@ export interface SpotifyStatus {
   /** The persisted grant includes the library (like/unlike) scopes — false
    * for tokens issued before the scopes were added, until a re-consent. */
   library: boolean;
+  /** Spotify endpoint-blocks library writes for this app id (dev-mode 403
+   * despite valid scopes — verified live 2026-07-12). The heart HIDES on
+   * this; `library: false` shows it disabled with the reconnect answer. */
+  library_blocked: boolean;
 }
 
 /** The Spotify-side identity of what's playing now ("spotify-now" event +

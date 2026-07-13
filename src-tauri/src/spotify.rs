@@ -103,6 +103,14 @@ struct Inner {
     /// the like toggle; cleared with the tokens. The frontend matches it
     /// against its own now-playing identity before trusting `liked`.
     now: Option<NowTrack>,
+    /// Spotify 403s the library endpoints (PUT/DELETE /me/tracks and even
+    /// GET .../contains) for this app DESPITE a valid token carrying the
+    /// library scopes — verified live 2026-07-12 (the /recommendations
+    /// dev-mode blocking's family; endpoint-level, not scope-level). First
+    /// 403 latches this and the heart disappears app-wide: a control that
+    /// flips and reverts on every press is a lie. Memory-only — re-probed
+    /// each session in case Spotify ever unblocks it.
+    library_blocked: bool,
     /// Last KNOWN liked answer per uri (one slot — the current track).
     /// Written only on a successful contains read or a successful like
     /// write, so a transient fetch failure stays "unknown" and the next
@@ -117,6 +125,11 @@ pub struct SpotifyStatus {
     /// The persisted token grant includes the library (like/unlike) scopes —
     /// false for pre-2026-07-11 tokens until a re-consent.
     pub library: bool,
+    /// Spotify endpoint-blocks library writes for this app (see Inner) —
+    /// the heart HIDES on this (the feature doesn't exist for this app id),
+    /// vs. `library: false` which shows it disabled with the reconnect
+    /// answer.
+    pub library_blocked: bool,
 }
 
 /// The Spotify-side identity of what's playing now — "spotify-now" event +
@@ -228,13 +241,28 @@ pub fn jump_active(app: &AppHandle) -> bool {
 /// derived state and every transition flows through here (tray, frontend
 /// command, background invalid_grant), so it can never go stale.
 fn emit_status(app: &AppHandle) {
-    let (connected, library) = {
+    let (connected, library, library_blocked) = {
         let auth = app.state::<SpotifyAuth>();
         let inner = lock(&auth);
-        (inner.tokens.is_some(), has_library_scope(&inner))
+        (inner.tokens.is_some(), has_library_scope(&inner), inner.library_blocked)
     };
-    let _ = app.emit("spotify-status", SpotifyStatus { connected, library });
+    let _ = app.emit("spotify-status", SpotifyStatus { connected, library, library_blocked });
     narrate(app, if connected { "Disconnect Spotify" } else { "Connect Spotify" });
+}
+
+/// First library 403: remember the endpoint block and tell every window —
+/// the heart hides rather than flip-and-revert forever.
+fn latch_library_blocked(app: &AppHandle) {
+    {
+        let auth = app.state::<SpotifyAuth>();
+        let mut inner = lock(&auth);
+        if inner.library_blocked {
+            return;
+        }
+        inner.library_blocked = true;
+    }
+    eprintln!("spotify: library endpoints 403 with valid scopes — the like heart is disabled (endpoint-level dev-mode block)");
+    emit_status(app);
 }
 
 fn save_tokens(inner: &Inner) {
@@ -625,7 +653,7 @@ fn api_call(
     method: &str,
     url: &str,
 ) -> Result<Option<serde_json::Value>, &'static str> {
-    api_call_impl(app, method, url, None)
+    api_call_impl(app, method, url, None, "disconnected")
 }
 
 /// api_call with a JSON body (start_playback's PUT play needs `uris`).
@@ -635,7 +663,20 @@ fn api_call_body(
     url: &str,
     body: &serde_json::Value,
 ) -> Result<Option<serde_json::Value>, &'static str> {
-    api_call_impl(app, method, url, Some(body))
+    api_call_impl(app, method, url, Some(body), "disconnected")
+}
+
+/// The library endpoints' variant: a 403 there is the endpoint-level block
+/// (verified live — valid token, library scopes granted, 403 anyway) and
+/// must be distinguishable so the heart can latch off instead of lying.
+/// Player endpoints keep mapping 403 to "disconnected" (ambiguous there:
+/// scope OR Premium-required).
+fn api_call_library(
+    app: &AppHandle,
+    method: &str,
+    url: &str,
+) -> Result<Option<serde_json::Value>, &'static str> {
+    api_call_impl(app, method, url, None, "forbidden")
 }
 
 fn api_call_impl(
@@ -643,6 +684,7 @@ fn api_call_impl(
     method: &str,
     url: &str,
     body: Option<&serde_json::Value>,
+    on_403: &'static str,
 ) -> Result<Option<serde_json::Value>, &'static str> {
     let mut token = ensure_access(app)?;
     let mut refreshed = false;
@@ -703,11 +745,12 @@ fn api_call_impl(
                 return Err("disconnected");
             }
             Err(ureq::Error::Status(403, _)) => {
-                // 403 is ambiguous: insufficient scope, but ALSO Spotify's
-                // Premium-required answer on player endpoints. Neither is
-                // healed by destroying the session (re-consent is available
-                // from the tray any time) — surface the gate, keep tokens.
-                return Err("disconnected");
+                // 403 is ambiguous on player endpoints (insufficient scope,
+                // but ALSO Spotify's Premium-required answer) and definitive
+                // on library endpoints (the dev-mode endpoint block). The
+                // caller picks the mapping; nothing here destroys tokens —
+                // a re-consent is available from the tray any time.
+                return Err(on_403);
             }
             Err(ureq::Error::Status(429, r)) if !waited_429 => {
                 waited_429 = true;
@@ -1034,15 +1077,22 @@ fn track_id(uri: &str) -> Option<&str> {
 }
 
 /// GET /me/tracks/contains for one track. None = couldn't ask (offline,
-/// non-track uri) — callers keep the previous answer or default false.
+/// non-track uri, or the endpoint block — which latches) — callers keep the
+/// previous answer or default false.
 fn fetch_liked(app: &AppHandle, uri: &str) -> Option<bool> {
     let id = track_id(uri)?;
-    let v = api_call(
+    let v = match api_call_library(
         app,
         "GET",
         &format!("https://api.spotify.com/v1/me/tracks/contains?ids={}", urlenc(id)),
-    )
-    .ok()??;
+    ) {
+        Ok(v) => v?,
+        Err("forbidden") => {
+            latch_library_blocked(app);
+            return None;
+        }
+        Err(_) => return None,
+    };
     v.as_array()?.first()?.as_bool()
 }
 
@@ -1064,7 +1114,9 @@ fn update_now(app: &AppHandle, t: &QueueTrack) {
                 .as_ref()
                 .filter(|(u, _)| u == &t.uri)
                 .map(|(_, l)| *l),
-            has_library_scope(&inner),
+            // The latched endpoint block also stops the per-track contains
+            // read — no point 403ing once per song forever.
+            has_library_scope(&inner) && !inner.library_blocked,
         )
     };
     let liked = match prev_liked {
@@ -1208,6 +1260,7 @@ pub async fn spotify_status(app: AppHandle) -> SpotifyStatus {
     SpotifyStatus {
         connected: inner.tokens.is_some(),
         library: has_library_scope(&inner),
+        library_blocked: inner.library_blocked,
     }
 }
 
@@ -1219,9 +1272,9 @@ pub async fn spotify_now(app: AppHandle) -> Option<NowTrack> {
     inner.now.clone()
 }
 
-/// PUT/DELETE /me/tracks — the like heart. "ok" | "disconnected" | "offline".
-/// Callers gate on SpotifyStatus.library, so the ambiguous-403 path
-/// (api_call maps it to "disconnected") is never the discovery mechanism.
+/// PUT/DELETE /me/tracks — the like heart. "ok" | "blocked" (the endpoint-
+/// level dev-mode 403 — latches; the heart hides app-wide) | "disconnected"
+/// | "offline". Callers gate on SpotifyStatus.library for the scope case.
 #[tauri::command]
 pub async fn spotify_set_liked(app: AppHandle, uri: String, liked: bool) -> String {
     tauri::async_runtime::spawn_blocking(move || set_liked(&app, &uri, liked).to_string())
@@ -1238,7 +1291,7 @@ fn set_liked(app: &AppHandle, uri: &str, liked: bool) -> &'static str {
     };
     let method = if liked { "PUT" } else { "DELETE" };
     let url = format!("https://api.spotify.com/v1/me/tracks?ids={}", urlenc(id));
-    match api_call(app, method, &url) {
+    match api_call_library(app, method, &url) {
         Ok(_) => {
             // Reflect into the cache + re-emit so every consumer converges —
             // but only when the cached now is still this track (a track
@@ -1262,6 +1315,10 @@ fn set_liked(app: &AppHandle, uri: &str, liked: bool) -> &'static str {
                 let _ = app.emit("spotify-now", Some(n));
             }
             "ok"
+        }
+        Err("forbidden") => {
+            latch_library_blocked(app);
+            "blocked"
         }
         Err(e) => e,
     }

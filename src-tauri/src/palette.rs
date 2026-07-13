@@ -24,9 +24,12 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 pub const LABEL: &str = "palette";
 /// Born at this logical size, never resized (house rule). The webview keeps
-/// a shadow gutter inside it; the visible shell is smaller.
-const W: f64 = 560.0;
-const H: f64 = 420.0;
+/// a shadow gutter inside it; the visible shell is smaller. Sized between
+/// Raycast and the first cut's 560×420 (Thien's live call, 2026-07-12 —
+/// "too small and hard to read"); the type/row scale in Palette.tsx steps
+/// up with it.
+const W: f64 = 680.0;
+const H: f64 = 520.0;
 
 /// Setup-time create-once-hidden. A failure downgrades gracefully: the
 /// hotkey and tray simply find no window.

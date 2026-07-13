@@ -82,6 +82,15 @@ body {
   outline-offset: 2px;
 }
 
+/* The palette's search input is the pane's ONLY focusable element and is
+ * focused programmatically on every summon — the global ring (built for
+ * 28px buttons) pinned on it permanently as a square orange bar (Thien's
+ * live catch, twice). The caret is that input's focus signal. Same
+ * specificity as the global rule, later in the cascade — wins outright. */
+.palette-search:focus-visible {
+  outline: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

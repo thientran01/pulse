@@ -146,7 +146,7 @@ async function computeResurfaced(): Promise<PaletteRow[]> {
 
 function SearchGlyph() {
   return (
-    <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden>
+    <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden>
       <circle cx="7" cy="7" r="4.4" />
       <path d="M 10.4,10.4 L 13.6,13.6" />
     </svg>
@@ -154,13 +154,13 @@ function SearchGlyph() {
 }
 
 const PlusGlyph = (
-  <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" aria-hidden>
+  <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" aria-hidden>
     <path d="M 8,3.4 L 8,12.6" />
     <path d="M 3.4,8 L 12.6,8" />
   </svg>
 );
 const PlayGlyph = (
-  <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+  <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
     <path d="M 5.4,3.4 L 5.4,12.6" />
     <path d="M 5.4,3.4 L 13,8 L 5.4,12.6" />
   </svg>
@@ -367,7 +367,7 @@ export default function Palette() {
           window clip budget the card shadow once overflowed. */}
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border/10 bg-surface shadow-xl shadow-black/40">
         {/* Search row — the palette's one verb. */}
-        <div className="flex items-center gap-2.5 border-b border-border/10 px-4 py-3">
+        <div className="flex items-center gap-3 border-b border-border/10 px-5 py-4">
           <span className={searching ? "text-fg" : "text-muted"}>
             <SearchGlyph />
           </span>
@@ -389,33 +389,33 @@ export default function Palette() {
             // full-width input it rendered as a square orange bar (Thien's
             // live feedback). The caret is this input's focus signal; it is
             // the pane's only focusable element.
-            className="min-w-0 flex-1 bg-transparent text-[15px] text-fg outline-none placeholder:text-muted focus-visible:[outline:none]"
+            className="palette-search min-w-0 flex-1 bg-transparent text-[18px] text-fg outline-none placeholder:text-muted focus-visible:[outline:none]"
           />
-          <span className="shrink-0 text-[10px] text-muted/60">
+          <span className="shrink-0 text-[11px] text-muted/60">
             ↵ play · ⇧↵ queue
           </span>
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-1.5 [scrollbar-width:none]">
           {gateCaption ? (
-            <p className="m-0 px-2 py-2 text-xs text-muted">{gateCaption}</p>
+            <p className="m-0 px-2.5 py-2.5 text-[13px] text-muted">{gateCaption}</p>
           ) : (
             <>
               {!hasQuery && rows.length > 0 && (
-                <p className="m-0 px-2 pb-1 pt-1.5 text-[10px] uppercase tracking-widest text-muted">
+                <p className="m-0 px-2.5 pb-1.5 pt-2 text-[11px] uppercase tracking-widest text-muted">
                   From your history
                 </p>
               )}
               {!hasQuery && rows.length === 0 && (
-                <p className="m-0 px-2 py-2 text-xs text-muted">
+                <p className="m-0 px-2.5 py-2.5 text-[13px] text-muted">
                   Type to search Spotify — tracks you play will gather here.
                 </p>
               )}
               {hasQuery && searching && rows.length === 0 && (
-                <p className="m-0 px-2 py-2 text-xs text-muted">Searching…</p>
+                <p className="m-0 px-2.5 py-2.5 text-[13px] text-muted">Searching…</p>
               )}
               {hasQuery && !searching && rows.length === 0 && (
-                <p className="m-0 px-2 py-2 text-xs text-muted">No matches on Spotify</p>
+                <p className="m-0 px-2.5 py-2.5 text-[13px] text-muted">No matches on Spotify</p>
               )}
               <div
                 id="palette-list"
@@ -435,19 +435,19 @@ export default function Palette() {
                       if (prev) setSelected(i);
                     }}
                     onClick={() => void playRow(row)}
-                    className={`group/row flex h-[44px] cursor-pointer select-none items-center gap-2.5 rounded-md px-2 [transition:background-color_140ms_var(--ease-out-tk)] ${
+                    className={`group/row flex h-[52px] cursor-pointer select-none items-center gap-3 rounded-md px-3 [transition:background-color_140ms_var(--ease-out-tk)] ${
                       flashKeys.has(row.key) ? "bg-accent/15" : i === sel ? "bg-fg/10" : ""
                     }`}
                   >
-                    <RowThumb url={row.artUrl} />
+                    <RowThumb url={row.artUrl} size={32} />
                     <span className="flex min-w-0 flex-1 flex-col">
-                      <span className="truncate text-xs font-medium text-fg">{row.title}</span>
-                      <span className="truncate text-[11px] text-muted">{row.artist}</span>
+                      <span className="truncate text-[14px] font-medium leading-5 text-fg">{row.title}</span>
+                      <span className="truncate text-[12px] leading-4 text-muted">{row.artist}</span>
                     </span>
                     {/* The pick's why — without it the resurfacing reads as
                         a bug. Yields to the action buttons on hover. */}
                     {row.reason && (
-                      <span className="shrink-0 text-[10px] text-muted/60 [transition:opacity_140ms_var(--ease-out-tk)] group-hover/row:opacity-0">
+                      <span className="shrink-0 text-[11px] text-muted/60 [transition:opacity_140ms_var(--ease-out-tk)] group-hover/row:opacity-0">
                         {row.reason}
                       </span>
                     )}
@@ -463,7 +463,7 @@ export default function Palette() {
                         e.stopPropagation();
                         void playRow(row);
                       }}
-                      className="grid h-[26px] w-[26px] shrink-0 place-items-center rounded-md text-fg opacity-0 [transition:opacity_140ms_var(--ease-out-tk),background-color_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 active:scale-95 group-hover/row:opacity-100"
+                      className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-md text-fg opacity-0 [transition:opacity_140ms_var(--ease-out-tk),background-color_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 active:scale-95 group-hover/row:opacity-100"
                     >
                       {PlayGlyph}
                     </button>
@@ -477,7 +477,7 @@ export default function Palette() {
                         e.stopPropagation();
                         void queueRow(row);
                       }}
-                      className="grid h-[26px] w-[26px] shrink-0 place-items-center rounded-md text-fg opacity-0 [transition:opacity_140ms_var(--ease-out-tk),background-color_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 active:scale-95 group-hover/row:opacity-100"
+                      className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-md text-fg opacity-0 [transition:opacity_140ms_var(--ease-out-tk),background-color_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 active:scale-95 group-hover/row:opacity-100"
                     >
                       {PlusGlyph}
                     </button>
@@ -489,7 +489,7 @@ export default function Palette() {
         </div>
 
         {/* Quiet feedback line — the palette's toast. */}
-        <p aria-live="polite" className="m-0 min-h-[26px] truncate border-t border-border/10 px-4 py-1 text-[11px] leading-[18px] text-muted">
+        <p aria-live="polite" className="m-0 min-h-[30px] truncate border-t border-border/10 px-5 py-1.5 text-[12px] leading-[18px] text-muted">
           {note}
         </p>
       </div>

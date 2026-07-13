@@ -149,6 +149,8 @@ const QUEUE_EMPTY =
   !IN_TAURI && new URLSearchParams(window.location.search).get("queue") === "empty";
 const LIBRARY_OFF =
   !IN_TAURI && new URLSearchParams(window.location.search).get("library") === "off";
+const LIBRARY_BLOCKED =
+  !IN_TAURI && new URLSearchParams(window.location.search).get("library") === "blocked";
 const LIKE_FAIL =
   !IN_TAURI && new URLSearchParams(window.location.search).get("like") === "fail";
 /** `?similar=<status>` forces moreLikeThis to answer that status (no_data /
@@ -161,7 +163,12 @@ let mockSpotifyConnected = !SPOTIFY_OFF;
 const mockSpotifyListeners = new Set<(s: SpotifyStatus) => void>();
 
 function mockStatus(): SpotifyStatus {
-  return { connected: mockSpotifyConnected, library: mockSpotifyConnected && !LIBRARY_OFF };
+  return {
+    connected: mockSpotifyConnected,
+    library: mockSpotifyConnected && !LIBRARY_OFF,
+    // `?library=blocked` previews the endpoint-block state (heart hidden).
+    library_blocked: LIBRARY_BLOCKED,
+  };
 }
 
 function pushMockSpotify(connected: boolean): void {

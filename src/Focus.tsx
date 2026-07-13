@@ -35,7 +35,9 @@ import { extractAccent } from "./lib/palette";
 import * as posClock from "./lib/posClock";
 import { initReactive } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
+import { HeartButton, useSpotifyNow } from "./Heart";
 import { LyricsPanel, lyricsKeyOf, useLyrics } from "./LyricsPanel";
+import { QueuePanel, useSpotifyStatus } from "./Queue";
 import { ProgressBar, Transport } from "./Transport";
 import { SeparatorDot, Waveform } from "./Waveform";
 import type { NowPlaying } from "./types";
@@ -114,11 +116,15 @@ function IdentityStack({
   artUrl,
   caption,
   centered,
+  heart,
 }: {
   np: NowPlaying;
   artUrl: string | null;
   caption: string | null;
   centered: boolean;
+  /** The like heart, seated trailing the title (null when the feature is
+   * hidden — see src/Heart.tsx on the endpoint block). */
+  heart: React.ReactNode;
 }) {
   const align = centered ? "items-center text-center" : "items-start text-left";
   return (
@@ -133,7 +139,10 @@ function IdentityStack({
       {/* Keyed per track: the metadata remounts with the title fade (fast
           and plain — a track change earns no choreography beyond this). */}
       <div key={`${np.title}|${np.artist}`} className="title-in mt-8 w-full min-w-0">
-        <p className="truncate text-[40px] font-medium leading-tight text-fg">{np.title}</p>
+        <div className={`flex min-w-0 items-center ${centered ? "justify-center" : ""}`}>
+          <p className="min-w-0 truncate text-[40px] font-medium leading-tight text-fg">{np.title}</p>
+          {heart}
+        </div>
         <p className="mt-1 truncate text-[22px] leading-7 text-muted">
           {np.artist}
           {np.album && <SeparatorDot />}
@@ -173,11 +182,20 @@ export default function Focus() {
   const lyrics = useLyrics(np);
   useEffect(() => initReactive(), []);
   const reducedMotion = useReducedMotion();
+  const spotify = useSpotifyStatus();
+  const spotifyNow = useSpotifyNow();
+  // The room's queue/history surface — same QueuePanel, this realm's own
+  // open bit (the widget's queueOpen is another window's state).
+  const [queueOpen, setQueueOpen] = useState(false);
 
-  // Esc closes — window-level so it works from anywhere in the view.
+  // Esc peels one layer: the queue panel first, then the room.
+  const queueOpenRef = useRef(queueOpen);
+  queueOpenRef.current = queueOpen;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") commands.focusClose();
+      if (e.key !== "Escape") return;
+      if (queueOpenRef.current) setQueueOpen(false);
+      else commands.focusClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -185,6 +203,14 @@ export default function Focus() {
 
   const seekable = !!np?.can_seek;
   const playing = np?.status === "playing";
+  // Hidden entirely under the endpoint block (src/Heart.tsx) — a control
+  // that flips and reverts is worse than absence.
+  const heartLive =
+    np?.player === "spotify" && spotify.connected && !spotify.library_blocked;
+  const heart =
+    np && heartLive ? (
+      <HeartButton np={np} now={spotifyNow} library={spotify.library} className="ml-2" />
+    ) : null;
   const lyricsLive =
     lyrics.status === "synced" && np !== null && lyrics.key === lyricsKeyOf(np);
   const nothing = !np || np.player === "none";
@@ -228,6 +254,17 @@ export default function Focus() {
       <div className="pointer-events-none absolute right-4 top-4 z-10 flex gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-hover/focus:pointer-events-auto group-hover/focus:opacity-100 has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:opacity-100">
         <button
           type="button"
+          aria-label={queueOpen ? "Close queue" : "Show queue"}
+          title={queueOpen ? "Close queue" : "Show queue"}
+          onClick={() => setQueueOpen((o) => !o)}
+          className={`grid h-8 w-8 place-items-center rounded-md text-fg [transition:background-color_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 active:scale-95 ${
+            queueOpen ? "bg-fg/10" : ""
+          }`}
+        >
+          <MorphIcon name="queue" size={15} dur={DUR[3]} ease={EASE.inOut} />
+        </button>
+        <button
+          type="button"
           aria-label="Leave focus (Esc)"
           title="Leave focus (Esc)"
           onClick={() => commands.focusClose()}
@@ -257,10 +294,10 @@ export default function Focus() {
                     pointerEvents: "none" as const,
                     transition: { duration: reducedMotion ? 0 : DUR[2] / 1000, ease: [...EASE.out] as [number, number, number, number] },
                   }}
-                  className="absolute inset-0 flex items-center gap-[7%] px-[10%] pt-10"
+                  className="absolute inset-0 flex items-start gap-[7%] px-[10%] pt-[7vh]"
                 >
-                  <IdentityStack np={np} artUrl={artUrl} caption={caption} centered={false} />
-                  <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col py-6">
+                  <IdentityStack np={np} artUrl={artUrl} caption={caption} centered={false} heart={heart} />
+                  <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col pb-4">
                     <LyricsPanel
                       lines={lyrics.lines}
                       seekable={seekable}
@@ -280,12 +317,28 @@ export default function Focus() {
                     pointerEvents: "none" as const,
                     transition: { duration: reducedMotion ? 0 : DUR[2] / 1000, ease: [...EASE.out] as [number, number, number, number] },
                   }}
-                  className="absolute inset-0 flex items-center justify-center pt-10"
+                  className="absolute inset-0 flex items-start justify-center pt-[7vh]"
                 >
-                  <IdentityStack np={np} artUrl={artUrl} caption={caption} centered />
+                  <IdentityStack np={np} artUrl={artUrl} caption={caption} centered heart={heart} />
                 </motion.div>
               )}
             </AnimatePresence>
+          </div>
+
+          {/* The queue/history surface — the widget's QueuePanel wholesale,
+              floating over the upper room's right side on the popover shell
+              recipe. Always mounted (scroll + feed survive toggling), the
+              expanded-surface visibility grammar. */}
+          <div
+            inert={!queueOpen}
+            className={`absolute right-6 top-16 z-20 flex w-[380px] flex-col rounded-xl border border-border/10 bg-surface p-1.5 shadow-xl shadow-black/40 ${
+              queueOpen
+                ? "visible opacity-100 [transition:opacity_140ms_var(--ease-out-tk)]"
+                : "invisible opacity-0 [transition:opacity_140ms_var(--ease-out-tk),visibility_0s_140ms]"
+            }`}
+            style={{ bottom: "calc(170px + 176px)" }}
+          >
+            <QueuePanel np={np} connected={spotify.connected} open={queueOpen} />
           </div>
 
           {/* THE HORIZON — the room's one living reactive surface, OUTSIDE

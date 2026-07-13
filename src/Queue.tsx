@@ -36,7 +36,7 @@ export const POPOVER_GAP = 12;
 // ---- data hooks ----
 
 export function useSpotifyStatus(): SpotifyStatus {
-  const [status, setStatus] = useState<SpotifyStatus>({ connected: false, library: false });
+  const [status, setStatus] = useState<SpotifyStatus>({ connected: false, library: false, library_blocked: false });
   useEffect(() => onSpotifyStatus(setStatus), []);
   return status;
 }
@@ -187,15 +187,19 @@ async function playTrackNow(t: { uri: string; title: string; artist: string }): 
 
 // ---- rows ----
 
-/** 26px cover thumb (remote url straight into an img; note glyph fallback).
- * Exported for the palette's result rows — same row grammar, other window. */
-export function RowThumb({ url }: { url: string | null }) {
+/** Cover thumb (remote url straight into an img; note glyph fallback) —
+ * 26px in the queue rows; the palette passes its own size (same grammar,
+ * bigger room). Exported for the palette's result rows. */
+export function RowThumb({ url, size = 26 }: { url: string | null; size?: number }) {
   return (
-    <span className="grid h-[26px] w-[26px] shrink-0 place-items-center overflow-hidden rounded-md bg-surface-2 text-muted">
+    <span
+      className="grid shrink-0 place-items-center overflow-hidden rounded-md bg-surface-2 text-muted"
+      style={{ width: size, height: size }}
+    >
       {url ? (
         <img src={url} alt="" className="h-full w-full object-cover" draggable={false} />
       ) : (
-        <MorphIcon name="note" size={13} />
+        <MorphIcon name="note" size={Math.round(size / 2)} />
       )}
     </span>
   );
