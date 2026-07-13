@@ -63,6 +63,13 @@ pub struct HistoryEntry {
     /// Stamped by the up-next engine's enrichment while Spotify is connected
     /// (PR 3) — lets history rows replay without a search round-trip.
     pub spotify_uri: Option<String>,
+    /// GSMTC MediaPlaybackType bucket ("music" | "video" | "image" |
+    /// "unknown"), copied from the snapshot. Read surfaces (page + the
+    /// history-appended emit) keep only music via `is_music`. `#[serde(default)]`
+    /// → "" on pre-feature rows, which is exactly the legacy sentinel is_music
+    /// falls back on; new rows are always non-empty.
+    #[serde(default)]
+    pub media_kind: String,
 }
 
 /// The in-progress listen — becomes a HistoryEntry when it finalizes.
@@ -84,6 +91,8 @@ struct Candidate {
     /// the same track reappears within REAPPEAR_GRACE.
     vanished_at: Option<Instant>,
     spotify_uri: Option<String>,
+    /// GSMTC MediaPlaybackType bucket, carried through to the finalized entry.
+    media_kind: String,
 }
 
 impl Candidate {
@@ -106,6 +115,7 @@ impl Candidate {
             last_raw_pos_ms: if np.position_at_ms > 0 { np.position_ms } else { 0 },
             vanished_at: None,
             spotify_uri: None,
+            media_kind: np.media_kind.clone(),
         }
     }
 
@@ -119,7 +129,7 @@ impl Candidate {
     fn into_entry(mut self) -> HistoryEntry {
         self.close_span();
         HistoryEntry {
-            v: 1,
+            v: 2, // +media_kind
             key: self.key,
             app_id: self.app_id,
             player: self.player,
@@ -131,6 +141,7 @@ impl Candidate {
             ms_listened: self.listened_ms,
             duration_ms: self.duration_ms,
             spotify_uri: self.spotify_uri,
+            media_kind: self.media_kind,
         }
     }
 }
@@ -211,7 +222,11 @@ pub fn ingest(app: &AppHandle, np: &NowPlaying) {
         inner.ingest(np)
     };
     if let Some(entry) = finalized {
-        let _ = app.emit("history-appended", &entry);
+        // Persisted regardless (inside ingest); only music is announced to
+        // the queue's live prepend, so non-music never surfaces.
+        if is_music(&entry) {
+            let _ = app.emit("history-appended", &entry);
+        }
     }
 }
 
@@ -234,7 +249,9 @@ pub fn tick(app: &AppHandle) {
         }
     };
     if let Some(entry) = finalized {
-        let _ = app.emit("history-appended", &entry);
+        if is_music(&entry) {
+            let _ = app.emit("history-appended", &entry);
+        }
     }
 }
 
@@ -366,16 +383,27 @@ impl Inner {
             Some(ts) => self.index.partition_point(|e| e.started_at_ms < ts),
             None => self.index.len(),
         };
-        let start = end.saturating_sub(limit);
-        if start >= end {
+        if end == 0 || limit == 0 {
             return Vec::new();
         }
         let Ok(file) = std::fs::File::open(log_path(dir)) else {
             return Vec::new();
         };
         let mut reader = BufReader::new(file);
-        let mut out = Vec::with_capacity(end - start);
-        for i in (start..end).rev() {
+        let mut out = Vec::with_capacity(limit);
+        // Fill-to-limit, newest→oldest: skip non-music rows and keep scanning
+        // rather than taking a fixed window, so a page short of `limit` means
+        // "reached the start" — the exhausted signal both consumers rely on
+        // (Palette RESURFACE scan, Queue loadMore). Deliberately uncapped: the
+        // cursor advances past the oldest RETURNED row each loadMore, so rows
+        // above it are never re-read — total work is O(index) across a full
+        // scroll, not per-call. A scan cap would be wrong here: returning
+        // < limit while music remains below would falsely mark the feed
+        // exhausted and silently truncate it.
+        for i in (0..end).rev() {
+            if out.len() >= limit {
+                break;
+            }
             if reader.seek(SeekFrom::Start(self.index[i].offset)).is_err() {
                 continue;
             }
@@ -384,10 +412,26 @@ impl Inner {
                 continue;
             }
             if let Ok(e) = serde_json::from_str::<HistoryEntry>(line.trim_end()) {
-                out.push(e);
+                if is_music(&e) {
+                    out.push(e);
+                }
             }
         }
         out
+    }
+}
+
+/// Music gate for the READ surfaces (palette + queue). Conservative: only a
+/// POSITIVE video/image kind is dropped, so a music app that mislabels its
+/// PlaybackType as Unknown is never lost. "" is the pre-feature legacy row
+/// (no media_kind persisted) — those fall back to the player bucket, which
+/// keeps old Apple Music/Spotify listens and hides old browser/video ones.
+/// Persistence is untouched; this only governs what surfaces.
+fn is_music(e: &HistoryEntry) -> bool {
+    match e.media_kind.as_str() {
+        "video" | "image" => false,
+        "" => matches!(e.player.as_str(), "apple_music" | "spotify"),
+        _ => true, // "music", "unknown", any future kind
     }
 }
 

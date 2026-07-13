@@ -19,6 +19,10 @@ export interface NowPlaying {
   position_at_ms: number;
   can_seek: boolean;
   art_id: string | null;
+  /** GSMTC MediaPlaybackType bucket ("music" | "video" | "image" | "unknown").
+   *  Backend-only today — history uses it to keep read surfaces music-only;
+   *  no frontend surface reads it. */
+  media_kind?: string;
 }
 
 /** Settled device-context state from the presence engine (presence.rs).
@@ -67,6 +71,10 @@ export interface HistoryEntry {
   duration_ms: number;
   /** Stamped by the up-next engine while Spotify is connected (PR 3). */
   spotify_uri: string | null;
+  /** GSMTC MediaPlaybackType bucket ("music" | "video" | "image" | "unknown");
+   *  "" on pre-feature rows. Read surfaces are already filtered to music
+   *  backend-side (history::is_music), so no consumer reads this. */
+  media_kind?: string;
 }
 
 /** Spotify Web API connection state (spotify.rs) — OAuth tokens present.
