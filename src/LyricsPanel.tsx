@@ -296,6 +296,12 @@ const LyricLineRow = memo(function LyricLineRow({
   );
 });
 
+/** Per-dot stagger for the break-row exit: when the vocal resumes the dots
+ * fade out RIGHT-TO-LEFT, rightmost first, one step apart — the waveform
+ * settle's cadence collapsed to a single axis. Entrance is a plain
+ * together-fade (the current state carries no delay). */
+const BREAK_DOT_EXIT_STEP_MS = 55; // DUR-adjacent; 4·55 + 220 fade ≈ waveform settle
+
 /** An instrumental-break row: five dots counting down the gap, one igniting
  * per fifth of the break — Apple Music's idle-progress idiom in the living
  * separator's capsule vocabulary (a content event, and the ONE ambient
@@ -303,8 +309,11 @@ const LyricLineRow = memo(function LyricLineRow({
  * the current-line marker's license — content feedback, not chrome; no
  * marker bar (the dots ARE the current indicator). Filled dots keep
  * background-color in the transition so an art-change retint sweeps them
- * like every accent surface. Non-current rows read as read/unread text:
- * five static muted dots. Scale-aware (base vs focus) via SCALE[scale]. */
+ * like every accent surface. The dots exist ONLY while this row is the
+ * current break — hidden (opacity-0) otherwise, so you never see a break's
+ * dots ahead of time or lingering after the vocal returns; they still hold
+ * their layout box (the focus scale takes its row height from them) so the
+ * appear/vanish never shifts the lyric flow. Scale-aware via SCALE[scale]. */
 const BreakRow = memo(function BreakRow({
   line,
   index,
@@ -352,17 +361,27 @@ const BreakRow = memo(function BreakRow({
         <span
           key={i}
           aria-hidden
+          // The exit stagger lives on the HIDDEN state, so it governs the
+          // fade-OUT (current → not-current): rightmost dot leaves first,
+          // each BREAK_DOT_EXIT_STEP_MS later. The current state carries no
+          // delay, so the fade-IN is a plain together-fade.
+          style={
+            current
+              ? undefined
+              : { transitionDelay: `${(BREAK_DOTS - 1 - i) * BREAK_DOT_EXIT_STEP_MS}ms` }
+          }
           // A fill is instant at the breakpoint; the 220ms sweep + grow is
-          // how "instant" stays smooth (the retint timing, EASE.out).
-          // Opacity floors: the CURRENT row's unlit dots carry state (which
-          // fifth you're in) — 75% keeps bg-muted above the 3:1 non-text
-          // contrast floor; non-current rows recede like read lyric text.
+          // how "instant" stays smooth (the retint timing, EASE.out). The
+          // CURRENT row's unlit dots hold at 75% (bg-muted above the 3:1
+          // non-text floor) so you can read which fifth you're in. Hidden
+          // dots keep bg-accent so a completed break (all five lit — the
+          // common exit) fades out AS accent instead of snapping muted first.
           className={`rounded-full ${SCALE[scale].breakDot} [transition:background-color_220ms_var(--ease-out-tk),scale_220ms_var(--ease-out-tk),opacity_220ms_var(--ease-out-tk)] ${
-            current && i < filled
-              ? "scale-100 bg-accent opacity-100"
-              : current
-                ? "scale-90 bg-muted opacity-75"
-                : "scale-90 bg-muted opacity-50"
+            !current
+              ? "scale-90 bg-accent opacity-0"
+              : i < filled
+                ? "scale-100 bg-accent opacity-100"
+                : "scale-90 bg-muted opacity-75"
           }`}
         />
       ))}
