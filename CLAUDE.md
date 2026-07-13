@@ -22,18 +22,41 @@ src-tauri/src/
                 diff-suppressed and unchanged heartbeat ticks skip the snapshot, so a
                 payload arrives only when the player's data actually moved
                 (splits into media_core/ + adapters/ when M5 adds Spotify Web API)
-  dock.rs       corner docking: window lives in one of the 4 work-area corners (12px
-                margin, above the taskbar); free drag snaps to the nearest corner on
-                release (Moved-debounce + GetAsyncKeyState — no drag-end event exists;
-                glide stays native EASE.out — pure moves never shake). The window
-                NEVER RESIZES after launch: born at WINDOW_MAX (tauri.conf =
-                MODE_SIZES.expanded, keep in sync), docked once; every mode change
-                is the shell's 200ms EASE.inOut CSS glide inside it. NEVER resize
-                the native window for animation — WebView2's composited frame lags
-                the rect one frame, so per-frame animation shakes (measured v0.5.0)
-                and even a single snap blinks (measured PR #51). The oversized
-                window's gutter is kept from eating clicks by spawn_hit_watcher:
-                cursor-polled whole-window click-through (set_ignore_cursor_events)
+  dock.rs       corner-anchored docking with a FREE OFFSET (the corner is a
+                gravity well, not a cage): drag release derives the nearest
+                corner from the VISIBLE footprint center — the corner stays
+                the anchor IDENTITY (shell seat, hit-rect anchor, popover
+                direction all key on it and all anchor to the window rect,
+                so they work at any position) — then a drop within MAGNET_PX
+                (80) of the canonical seat glides home, within RAIL_PX (24)
+                of a seat coordinate settles that axis onto the 12px rail,
+                anywhere else stands clamped on-screen (Moved-debounce +
+                GetAsyncKeyState — no drag-end event exists; glide stays
+                native EASE.out — pure moves never shake). Launch runs the
+                SAME settle rule on the window-state-restored position: the
+                magnet radius IS the snapped-vs-free classifier (near a seat
+                → re-seat/heal, else the free spot survives; nothing new
+                persisted). The FULLSCREEN SEAT: while presence's
+                monitor-scoped verdict says fullscreen owns the widget's
+                monitor, sync_seat (the positioning sibling of
+                apply_visibility) re-seats against the FULL MONITOR RECT
+                (the taskbar is covered — work-area seats float a
+                taskbar-height too high over game HUDs) using a separately
+                remembered seat (mid-episode drags update it; persisted
+                corner-relative as settings.json "fsSeat"; default = same
+                corner vs monitor rect); episode end restores the exact
+                desktop position — the conceal's episode/restore grammar,
+                deferred mid-press the same way, hidden swaps jump instantly
+                and apply_visibility syncs the seat before every show. The
+                window NEVER RESIZES after launch: born at WINDOW_MAX
+                (tauri.conf = MODE_SIZES.expanded, keep in sync); every mode
+                change is the shell's 200ms EASE.inOut CSS glide inside it.
+                NEVER resize the native window for animation — WebView2's
+                composited frame lags the rect one frame, so per-frame
+                animation shakes (measured v0.5.0) and even a single snap
+                blinks (measured PR #51). The oversized window's gutter is
+                kept from eating clicks by spawn_hit_watcher: cursor-polled
+                whole-window click-through (set_ignore_cursor_events)
                 gated on the frontend-reported hit rect (set_hit_size, the mode's
                 footprint at the docked corner). The snap corner is decided from
                 that hit rect's center too — the VISIBLE widget, not the oversized
@@ -67,8 +90,7 @@ src-tauri/src/
   spotify.rs    Spotify Web API adapter (the app's first OAuth): PKCE +
                 loopback redirect (127.0.0.1:43117/callback — the dashboard
                 app must register EXACTLY that URI; SPOTIFY_CLIENT_ID const,
-                public under PKCE, EMPTY until Thien's dashboard app exists —
-                tray narrates "setup needed"). Tokens in their own
+                public under PKCE — set 2026-07-10). Tokens in their own
                 app-data/spotify_tokens.json (NOT clobber-write settings.json);
                 refresh on demand <60s to expiry, single-flighted
                 (refresh_gate) with rotation persisted. Tokens are destroyed
@@ -88,8 +110,19 @@ src-tauri/src/
                 context-preserving jump (position target in the real queue,
                 skip to it, VERIFY the landing by re-read — never trust
                 command results, matrix finding 3 — re-queue everything
-                skipped over; never `PUT play uris`, which kills the
-                playlist context)
+                skipped over; never `PUT play uris` INTO a live context,
+                which kills it — the ONE carve-out is start_playback: from
+                no_playback there is no context to kill, so the bare-uris
+                PUT on the best non-restricted device is how the palette
+                plays from silence, landing verified the same way;
+                play_now's no_playback status is therefore no_device
+                now). History enrichment: every settled track
+                change on a connected session fetches currently-playing
+                (enrich_now, one in-flight) and stamps the uri onto
+                history's candidate — THE path that makes history rows
+                actionable; un-enriched rows (older entries, AM listens)
+                resolve on demand via spotify_resolve_uri (search, cached
+                per key frontend-side)
   upnext.rs     Pulse-managed up-next: Spotify's API can't remove/reorder
                 queue items, so Pulse keeps its OWN ordered list
                 (app-data/upnext.json, "upnext-changed" + upnext_list seed;
@@ -99,12 +132,43 @@ src-tauri/src/
                 ms_listened; feed HTTP on the blocking pool, never the media
                 loop thread). Fed marker persisted (no restart double-feed);
                 fed item popped when it starts playing (loose title/artist
-                match), unmarked when the user jumps elsewhere; fed-pop
-                bookkeeping suspends while a play_now jump flickers through
-                intermediates. Honest limits (matrix finding 11): chain
-                holds only while Pulse runs + Spotify connected; skips
-                inside the Spotify app bypass the list; removing a fed
-                front leaks that one track to Spotify's queue
+                match, with same-key restart detection so repeat-one and a
+                re-queued current track behave); a change that BYPASSES a
+                pending fed item keeps it armed and fires one reconcile
+                read (still queued at Spotify → keep waiting; consumed
+                where Pulse couldn't see → drop + unmark, feeder moves on)
+                — the fed marker never floats free of ground truth. A next
+                pressed IN PULSE (transport / Ctrl+Alt+N) is QUEUE-AWARE:
+                upnext::try_queue_skip runs the play_now jump on the front
+                (falling back to plain GSMTC next when it can't act), so a
+                mid-song skip lands on the queued item instead of the
+                playlist — the one transition feed-late missed; the
+                "spotify-jump" event arms the pill's announcement
+                suppression for it. Fed-pop
+                bookkeeping and HISTORY ingestion both suspend while a
+                play_now jump flickers through intermediates. Honest limits
+                (matrix finding 11): chain holds only while Pulse runs +
+                Spotify connected; skips inside the Spotify app bypass the
+                list; removing a fed front leaks that one track to
+                Spotify's queue
+  palette.rs    the summon palette's window — Pulse's FIRST second webview
+                (multi-window pioneer; focus mode reuses the seams). Created
+                ONCE hidden at setup (WebView2 cold-create costs ~100s of
+                ms; a laggy summon is dead), 560×420 born-at-size, shown by
+                Ctrl+Alt+S centered high on the CURSOR's monitor, hidden on
+                blur (lib.rs Focused(false) handler) / Esc / background
+                click. Its show/hide ledger is deliberately OUTSIDE
+                VisIntent/apply_visibility (that owns the MAIN window's
+                intent composition; palette.rs is the one other,
+                label-scoped owner). Multi-window invariants added with it:
+                capabilities/default.json must list every window label (a
+                missing label = ZERO IPC, silently); window-state denylists
+                palette+focus; dock's Moved forwarding is label-guarded to
+                "main" (unguarded, corner-snap armed on palette moves);
+                UiReactive is a per-window-label vote map OR'd (votes drop
+                on Destroyed); window identity rides the builder URL's
+                ?window= param, routed in src/main.tsx — the same param
+                mock-iterates each window in a plain browser
   presence.rs   fullscreen sensing + the courtesy conceal: own 1s watcher
                 thread sensing settled fullscreen foreground content
                 (rect-vs-monitor — widget-monitor scoped — OR'd with
@@ -121,9 +185,49 @@ src-tauri/src/
                 too — the rect method carries that case).
                 docs/presence-signal-matrix.md is the source of truth for
                 what Windows reports per scenario
-  audio.rs      WASAPI loopback (cpal input stream on the output device) → FFT →
-                smoothed auto-gained band energies at ~30Hz; capture runs ONLY
-                while visible AND playing (stream dropped otherwise)
+  focus.rs      focus mode (B1): the fullscreen now-playing takeover — a
+                user-invoked, TRANSIENT second window (the expanded view's
+                expand bracket = the ladder's fourth rung, "Expand to
+                focus"; Esc / its collapse control / Alt-F4 close it via
+                ONE path, the label-filtered Destroyed handler).
+                Create-on-open, destroy-on-close, born fullscreen on the
+                widget's monitor (position → set_fullscreen → show; a
+                DIFFERENT window born at size is never-resize-legal).
+                VisIntent gains focus_open (memory-only — a relaunch can
+                never boot into focus; pulse.mode never learns about it):
+                effective = !user_hidden && !(concealed && !snoozed) &&
+                !focus_open, so closing restores the EXACT prior intent.
+                Ctrl+Alt+M and the single-instance summons are focus-aware
+                (the hotkey leaves focus; the summons no-ops) — reasoning
+                from raw visibility there would silently corrupt that
+                intent. The media loop's `visible` and the audio capture
+                gate widen to main-OR-focus (main hides behind the
+                takeover; ungated, the player froze). Frontend:
+                src/Focus.tsx (skeleton — composition reserved for the
+                design panel), two views on the mic⇄note grammar (lyrics
+                at the LyricsPanel "focus" type scale / the
+                src/Visualizer.tsx room-scale instrument — NOT a fourth
+                Waveform size; one reactive surface per view holds).
+                This is the removed P3's want with the correct trigger:
+                invoked, never guessed
+  audio.rs      audio capture → FFT → smoothed auto-gained band energies at
+                ~30Hz. Capture is PROCESS-SCOPED (loopback.rs) so the bars
+                ride the SONG, not the device mix — whole-mix loopback heard
+                Discord voice + game SFX and the auto-gain danced to whoever
+                was loudest (reported live 2026-07-12). Device-wide cpal
+                loopback survives as the fallback when the AUMID→PID join
+                misses (unknown player, pre-2004 Win10), with a 5s upgrade
+                retry. Capture runs ONLY while a Pulse window is visible
+                (main OR focus) AND playing (dropped otherwise)
+  loopback.rs   process-scoped WASAPI loopback: joins the GSMTC AUMID to a
+                PID via the render-session list (packaged apps by
+                GetApplicationUserModelId equality, unpackaged by exe-stem
+                heuristics), then captures that process TREE via
+                ActivateAudioInterfaceAsync + the process-loopback virtual
+                device (Win10 2004+). Quirk the API encodes: a quiet target
+                delivers NO packets (staleness = silence, never a stall) —
+                audio.rs skips its device-path stall watchdog here and zeros
+                the ring after 250ms so bars fall instead of freezing
 src/            React widget: pill ↔ card ↔ expanded modes; lib/posClock.ts is the ONE
                 owner of playback position (monotonic per track while playing — raw pairs
                 in, display clock out; all seek/pause/jitter filtering lives there);
@@ -138,7 +242,46 @@ src/            React widget: pill ↔ card ↔ expanded modes; lib/posClock.ts 
                 together. Browser mock: npm run dev → /?am replays Apple Music's
                 pathological emit profile (1s-floored positions, pause-era stamp on
                 resume, can_seek=false) for posClock repro without a live
-                player; /?nothing forces the no-session resting state
+                player; /?nothing forces the no-session resting state;
+                /?spotify=off forces the queue gate, ?jump=partial the jump
+                failure caption
+src/Queue.tsx   the 11a queue & history UI: Pulse's up-next list + the
+                "Earlier" history feed, TWO garments off ONE queueOpen bit —
+                a 312px popover floating above the pill/card (corner-aware:
+                opens away from the docked side; rides the mode resize on
+                the shell's 200ms EASE.inOut; max-height from the REAL
+                440px window: pill 330 / card 296) and, inside expanded, one
+                of three PEER LAYERS (lyrics · album · queue) that crossfade
+                in place under a fixed absolute now-playing header — opacity
+                only (200ms in / 140ms out EASE.out, no scale: the earlier
+                .98-exhale scale-overlay read as a panel opening and let the
+                layer behind peek at the edges, and a flex-flow header
+                reflowed the album column, 2026-07-12), visibility deferred,
+                inert when hidden; still always-mounted so scroll + feed
+                survive the swap; the shared header (lyrics + queue) is
+                absolute so it never reflows the album column, and chrome +
+                toggles never move. The
+                garment follows effectiveMode, so continuity across the
+                ladder is free. WHILE THE POPOVER IS OPEN THE HIT RECT
+                UNIONS ITS BOX (App's footprint effect) — a consumer that
+                forgets this puts clicks through to the desktop, the worst
+                failure class. Rows: 44px, hover-revealed actions
+                (history: play-now/+, uri-gated on enrichment; queue:
+                grip/×), pointer reorder with ±26px live swap, history→queue
+                ghost-chip drag (history itself never reorders), accent/16
+                flash + 1.6s aria-live toast, keyboard ↑/↓/Delete/Enter.
+                play_now suppresses the pill announcement for intermediates
+                (isAnnounceSuppressed) — the target announces once. The
+                queue toggle left the bracket cluster (2026-07-11: brackets
+                = container verbs, queue = content surface): card/expanded
+                seat it bottom-left (QueueSeat, left-[7px] bottom-[4px] —
+                mirrors the cluster and holds pixels across card⇄expanded);
+                the pill seats it in the hover scrim beside play/pause
+                ([queue][play/pause] on the cluster's gap-1 rhythm, ending
+                108px from the shell right edge — the pill's bottom-left IS
+                the album art). The cluster stays [collapse][expand]. The
+                expanded note seat stays the ONLY lyrics entry and exits
+                the queue surface to lyrics
 src/icons/      morphing icon system (benji.org/morphing-icons-with-claude, generalized):
                 every icon = 3 strokes × 2 cubics with identical command skeletons, so
                 any icon morphs into any other by tweening d strings — geometry.ts is
@@ -155,17 +298,20 @@ src/icons/      morphing icon system (benji.org/morphing-icons-with-claude, gene
                 never a direction chevron. Dev sequencer: npm run dev → /?lab
 ```
 
-Design rule: chrome stays neutral (house semantic tokens); the album-art palette is the **accent layer only** — progress fills, the **living separator** (src/Waveform.tsx — a colorless muted middot that blooms into Apple-style accent capsules while music plays and settles back on pause; the ONLY audio-reactive surface — one living instance per view, riding the TITLE line everywhere (the capsules are a now-playing pulse — they belong to the song), sized to its container (pill: `sm` inline between title·artist, where a track change while playing runs the **announcement** — the ladder collapses to the lone dot with the old song's color draining at the bottom, re-multiplies gray on the bloom cadence, and ignites LAST (in the incoming album's accent when the palette has resolved; AM art can lag ~10s, and the standard retint sweep recolors late arrivals); the keyed title/artist fade in up front (`.title-in`, mount-gated so a mode switch into the pill never replays it; `__mockNext()` drives it from console in preview) — separator vocabulary responding to a content event, not a new ambient license; card + expanded lyrics header: `md` trailing the title, bars-only while playing, 10px gap = ml-1 over the built-in mx-1.5, with the artist/album lines on a static `SeparatorDot` — an md separator overpowered the 12px line, 2026-07-10; expanded big-art: standalone `lg` hero, nine capsules, constant footprint so the art never moves, metadata line on a static `SeparatorDot`); supersedes the art-halo direction and the shell glow blessed 2026-07-06), and the current-lyric **marker** (the lyric line's text stays fg — extracted accents only guarantee 3:1, below the 4.5:1 text floor). No glow anywhere: the card shell shadow is neutral black and non-reactive (lift only), the art carries no shadow. The art never moves; nothing moves *ambiently* except the separator's bars and the resting pulse (the no-session breathing dot) — interactive icon glyphs may morph in response to input (press, mode change), per src/icons/. Accent never colors text or chrome surfaces. Motion uses EASE/DUR tokens — `/emil-pass` binds to them. Transitions earn continuity by content identity: arrival choreography (the expanded view's lyric cascade) is reserved for content the user actually waited on; on a track change the outgoing view exits fast and plain — stale art/lyrics never get choreographed continuity, and chrome (transport/progress/mode cluster) holds still by living outside the swap.
+Design rule: chrome stays neutral (house semantic tokens); the album-art palette is the **accent layer only** — progress fills, the **living separator** (src/Waveform.tsx — a colorless muted middot that blooms into Apple-style accent capsules while music plays and settles back on pause; the ONLY audio-reactive surface — one living instance per view, riding the TITLE line everywhere (the capsules are a now-playing pulse — they belong to the song), sized to its container (pill: `sm` inline between title·artist, where a track change while playing runs the **announcement** — the ladder collapses to the lone dot with the old song's color draining at the bottom, re-multiplies gray on the bloom cadence, and ignites LAST (in the incoming album's accent when the palette has resolved; AM art can lag ~10s, and the standard retint sweep recolors late arrivals); the keyed title/artist fade in up front (`.title-in`, mount-gated so a mode switch into the pill never replays it; `__mockNext()` drives it from console in preview) — separator vocabulary responding to a content event, not a new ambient license; card + the expanded lyrics/queue header (one shared, fixed header across those two peer layers — gated to ONE mounted instance per state so the album view's lg hero is the only reactive surface there): `md` trailing the title, bars-only while playing, 10px gap = ml-1 over the built-in mx-1.5, with the artist/album lines on a static `SeparatorDot` — an md separator overpowered the 12px line, 2026-07-10; expanded big-art: standalone `lg` hero, nine capsules, constant footprint so the art never moves, metadata line on a static `SeparatorDot`); supersedes the art-halo direction and the shell glow blessed 2026-07-06), and the current-lyric **marker** (the lyric line's text stays fg — extracted accents only guarantee 3:1, below the 4.5:1 text floor), plus the 11a queue feedback (the newly-queued row flash `accent/15` and the drop-zone glow `border-accent/55 bg-accent/5` — transient content feedback, handoff-licensed 2026-07-10, NOT a new ambient or chrome license). No glow anywhere: the card shell shadow is neutral black and non-reactive (lift only), the art carries no shadow. The art never moves; nothing moves *ambiently* except the separator's bars and the resting pulse (the no-session breathing dot) — interactive icon glyphs may morph in response to input (press, mode change), per src/icons/. Accent never colors text or chrome surfaces. Motion uses EASE/DUR tokens — `/emil-pass` binds to them. Transitions earn continuity by content identity: arrival choreography (the expanded view's lyric cascade) is reserved for content the user actually waited on; on a track change the outgoing view exits fast and plain — stale art/lyrics never get choreographed continuity, and chrome (transport/progress/mode cluster) holds still by living outside the swap.
 
-**Presence (the courtesy layer):** the widget senses ONE thing — settled fullscreen foreground content (src-tauri/src/presence.rs) — and takes ONE action: the courtesy conceal. Fullscreen content on the widget's monitor (rect-vs-monitor, OR'd with SHQueryUserNotificationState's GLOBAL D3D/presentation states; hysteresis 2s in / 1s out) hides the native window; the episode ending restores it exactly as it was. Visibility is intent-composed (`VisIntent` in lib.rs) — a manual hide is sticky across episodes, a manual show (hotkey/tray/reset/relaunch) snoozes the conceal for the current episode, and **every show/hide flows through `apply_visibility`, never raw hide()/show()** (grep rule). The tray "Hide on fullscreen" check item (id/settings key still `companion`) is the persisted switch for the action (sensing continues). The resting pulse (the no-session breathing dot, `.resting-pulse`) stays — it reacts to the MUSIC being absent, not to the user. **The idle-driven behaviors (P3 ambient AFK grow, P4 working quiet) were REMOVED 2026-07-11 after two weeks of soak:** behaviors that guess at attention from idle timers (away thresholds, input duty) fought manual intent hard enough to need latches on latches; the conceal acts on a fact and never misfired. Do not re-propose idle-driven mode changes — PRs #57–#59 hold the machinery and the lessons if this is ever revisited. Presence never resizes or moves the native window, never touches accent or color, and manual input always wins. docs/presence-signal-matrix.md is the source of truth for what Windows actually reports — check it before trusting a detection path.
+**Presence (the courtesy layer):** the widget senses ONE thing — settled fullscreen foreground content (src-tauri/src/presence.rs) — and takes ONE action: the courtesy conceal. Fullscreen content on the widget's monitor (rect-vs-monitor, OR'd with SHQueryUserNotificationState's GLOBAL D3D/presentation states; hysteresis 2s in / 1s out) hides the native window; the episode ending restores it exactly as it was. Visibility is intent-composed (`VisIntent` in lib.rs) — a manual hide is sticky across episodes, a manual show (hotkey/tray/reset/relaunch) snoozes the conceal for the current episode, and **every show/hide flows through `apply_visibility`, never raw hide()/show()** (grep rule). The tray "Hide on fullscreen" check item (id/settings key still `companion`) is the persisted switch for the action (sensing continues). The resting pulse (the no-session breathing dot, `.resting-pulse`) stays — it reacts to the MUSIC being absent, not to the user. **The idle-driven behaviors (P3 ambient AFK grow, P4 working quiet) were REMOVED 2026-07-11 after two weeks of soak:** behaviors that guess at attention from idle timers (away thresholds, input duty) fought manual intent hard enough to need latches on latches; the conceal acts on a fact and never misfired. Do not re-propose idle-driven mode changes — PRs #57–#59 hold the machinery and the lessons if this is ever revisited. Presence has exactly TWO consumers, both acting on the same fullscreen fact: the conceal (visibility) and dock.rs's fullscreen seat context (a monitor-scoped settled verdict → sync_seat re-seats against the monitor rect for the episode, restores the exact desktop position after — see the dock.rs entry). Presence never resizes the native window, never moves it except through sync_seat's episode seat swap, never touches accent or color, and manual input always wins. docs/presence-signal-matrix.md is the source of truth for what Windows actually reports — check it before trusting a detection path.
 
 
 ## Global hotkeys (M1 defaults, constants in src-tauri/src/lib.rs)
 
 - `Ctrl+Alt+K` play/pause (Space variant was taken system-wide on this machine)
 - `Ctrl+Alt+←/→` seek ∓10s (current session; the hotkey always fires the SMTC call — Apple Music silently ignores it, only the UI buttons are capability-gated)
-- `Ctrl+Alt+N/P` next/previous track
+- `Ctrl+Alt+N/P` next/previous track (next is queue-aware: lands on the up-next front when one exists)
 - `Ctrl+Alt+M` show/hide the widget
+- `Ctrl+Alt+S` summon the search palette (src/Palette.tsx — Enter plays now,
+  from silence it starts playback outright; Shift+Enter queues to up-next and
+  stays open; Esc/blur dismiss; empty state = resurfacing rows from history)
 
 Commands route to the OS "current" media session, which Windows re-points to
 whichever app played most recently (pause AM while Spotify plays → next command

@@ -5,9 +5,10 @@
 //! command async so nothing blocks the webview's STA thread (lib.rs rule).
 //!
 //! Tokens live in their own app-data file (`spotify_tokens.json`) — NOT
-//! settings.json, which is a whole-file clobber write. Plaintext on disk is
-//! the standard desktop-app tradeoff: the file is user-profile-scoped and
-//! holds a refresh token limited to this app's scopes.
+//! settings.json (a shared key-value file; settings.rs owns its
+//! read-modify-write). Plaintext on disk is the standard desktop-app
+//! tradeoff: the file is user-profile-scoped and holds a refresh token
+//! limited to this app's scopes.
 //!
 //! Token-destruction policy (quick-review hardening, 2026-07-10): tokens are
 //! cleared ONLY on evidence the session itself is dead — a 400-class answer
@@ -35,12 +36,16 @@ use tauri_plugin_opener::OpenerExt;
 /// Redirect URI EXACTLY `http://127.0.0.1:43117/callback` (literal 127.0.0.1,
 /// not localhost — Spotify's loopback rules), Web API enabled, then paste the
 /// Client ID here. Empty = the tray narrates "Spotify setup needed".
-const SPOTIFY_CLIENT_ID: &str = "";
+const SPOTIFY_CLIENT_ID: &str = "3f82e7a35eea45ddab8625819a79d1de";
 
 const REDIRECT_PORT: u16 = 43117;
 /// read = queue/currently-playing; modify = add-to-queue/skip (play-now and
-/// the up-next feeder, PR 3+) — requested up front so PR 3 needs no
-/// re-consent.
+/// the up-next feeder) — requested up front so later features need no
+/// re-consent. The library scopes (the like heart) were REQUESTED AND CUT
+/// 2026-07-12: Spotify endpoint-blocks PUT/DELETE /me/tracks and GET
+/// .../contains for this app id — 403 with a valid token carrying the
+/// scopes (verified live; the dev-mode blocking family). Don't re-add
+/// without re-verifying the endpoints answer.
 const SCOPES: &str = "user-read-playback-state user-modify-playback-state";
 const UA: &str = "Pulse/0.1 (https://github.com/thientran01/pulse)";
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -83,6 +88,9 @@ pub struct SpotifyAuth {
     /// One play_now jump at a time; also gates upnext's fed-pop bookkeeping
     /// against the intermediate track flicker a jump produces.
     jump_in_flight: AtomicBool,
+    /// One currently-playing enrichment read at a time (fired per track
+    /// change from the media loop — must never stack).
+    enrich_in_flight: AtomicBool,
 }
 
 #[derive(Default)]
@@ -92,6 +100,12 @@ struct Inner {
     tokens: Option<Tokens>,
     /// (fetched_at unix ms, result) — the QUEUE_CACHE_MS response cache.
     queue_cache: Option<(i64, QueueResult)>,
+    /// The current track's uri, remembered by update_now (settled enrichment
+    /// reads, verified jump landings) — similar.rs excludes what's playing
+    /// from a more-like-this fill by it. Cleared with the tokens. (This slot
+    /// once carried a liked flag for the like heart — CUT 2026-07-12:
+    /// Spotify endpoint-blocks library writes for this app id.)
+    now_uri: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -205,12 +219,15 @@ fn save_tokens(inner: &Inner) {
 /// Drop tokens + file; callers follow with emit_status.
 fn clear_tokens(app: &AppHandle) {
     let auth = app.state::<SpotifyAuth>();
-    let mut inner = lock(&auth);
-    if let Some(dir) = &inner.dir {
-        let _ = std::fs::remove_file(tokens_path(dir));
+    {
+        let mut inner = lock(&auth);
+        if let Some(dir) = &inner.dir {
+            let _ = std::fs::remove_file(tokens_path(dir));
+        }
+        inner.tokens = None;
+        inner.queue_cache = None;
+        inner.now_uri = None;
     }
-    inner.tokens = None;
-    inner.queue_cache = None;
 }
 
 /// Shared by the command and the tray click.
@@ -228,7 +245,7 @@ fn b64url_random(len: usize) -> String {
 }
 
 /// Percent-encode for query components (RFC 3986 unreserved kept).
-fn urlenc(s: &str) -> String {
+pub(crate) fn urlenc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -461,26 +478,36 @@ fn token_request(form: &[(&str, &str)]) -> Result<Tokens, String> {
     let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
     let access = v["access_token"].as_str().ok_or("no access_token")?.to_string();
     let expires_in = v["expires_in"].as_i64().unwrap_or(3600);
-    // Rotation: a refresh response may omit refresh_token (keep the old one —
-    // the caller merges); an authorization response always carries it.
+    // Rotation: a refresh response may omit refresh_token AND scope (keep the
+    // old ones — the caller merges); an authorization response carries both.
+    // The scope fallback must NOT be the SCOPES const: has_library_scope
+    // gates the heart on this string, and stamping today's requested scopes
+    // onto a pre-library-consent token would re-open the click-time-403 path
+    // the gate exists to avoid (quick-review catch, 2026-07-11).
     let refresh = v["refresh_token"].as_str().unwrap_or_default().to_string();
     Ok(Tokens {
         v: 1,
         access_token: access,
         refresh_token: refresh,
         expires_at_ms: unix_ms() + expires_in * 1000 - 5_000,
-        scope: v["scope"].as_str().unwrap_or(SCOPES).to_string(),
+        scope: v["scope"].as_str().unwrap_or_default().to_string(),
     })
 }
 
 fn exchange_code(code: &str, redirect: &str, verifier: &str) -> Result<Tokens, String> {
-    token_request(&[
+    let mut tokens = token_request(&[
         ("grant_type", "authorization_code"),
         ("code", code),
         ("redirect_uri", redirect),
         ("client_id", SPOTIFY_CLIENT_ID),
         ("code_verifier", verifier),
-    ])
+    ])?;
+    if tokens.scope.is_empty() {
+        // A fresh authorization grants exactly what was asked (Spotify
+        // consent is all-or-nothing) — only here is the const the truth.
+        tokens.scope = SCOPES.to_string();
+    }
+    Ok(tokens)
 }
 
 /// A valid bearer token, refreshing on demand. Refreshes are single-flighted
@@ -502,13 +529,13 @@ fn ensure_access(app: &AppHandle) -> Result<String, &'static str> {
     // Slow path: serialize refreshes; a waiter re-checks and usually finds
     // the winner's fresh token.
     let _gate = auth.refresh_gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (old_access, refresh_token) = {
+    let (old_access, refresh_token, old_scope) = {
         let inner = lock(&auth);
         let Some(t) = &inner.tokens else { return Err("disconnected") };
         if t.expires_at_ms - unix_ms() > REFRESH_MARGIN_MS {
             return Ok(t.access_token.clone());
         }
-        (t.access_token.clone(), t.refresh_token.clone())
+        (t.access_token.clone(), t.refresh_token.clone(), t.scope.clone())
     };
     if refresh_token.is_empty() {
         // Shouldn't happen (authorization always grants one) — a dead
@@ -525,6 +552,10 @@ fn ensure_access(app: &AppHandle) -> Result<String, &'static str> {
         Ok(mut fresh) => {
             if fresh.refresh_token.is_empty() {
                 fresh.refresh_token = refresh_token;
+            }
+            if fresh.scope.is_empty() {
+                // A refresh can't widen a grant — carry the old truth.
+                fresh.scope = old_scope;
             }
             let access = fresh.access_token.clone();
             let mut inner = lock(&auth);
@@ -560,15 +591,47 @@ fn api_call(
     method: &str,
     url: &str,
 ) -> Result<Option<serde_json::Value>, &'static str> {
+    api_call_impl(app, method, url, None, "disconnected")
+}
+
+/// api_call with a JSON body (start_playback's PUT play needs `uris`).
+fn api_call_body(
+    app: &AppHandle,
+    method: &str,
+    url: &str,
+    body: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, &'static str> {
+    api_call_impl(app, method, url, Some(body), "disconnected")
+}
+
+fn api_call_impl(
+    app: &AppHandle,
+    method: &str,
+    url: &str,
+    body: Option<&serde_json::Value>,
+    on_403: &'static str,
+) -> Result<Option<serde_json::Value>, &'static str> {
     let mut token = ensure_access(app)?;
     let mut refreshed = false;
     let mut waited_429 = false;
     loop {
-        let resp = ureq::request(method, url)
+        let req = ureq::request(method, url)
             .set("User-Agent", UA)
             .set("Authorization", &format!("Bearer {token}"))
-            .timeout(TIMEOUT)
-            .call();
+            .timeout(TIMEOUT);
+        // Non-GETs must carry an explicit body even when empty: ureq's
+        // bodyless call() sends no Content-Length and Spotify's edge answers
+        // 411 "Length Required" — which read as "Spotify unreachable" on
+        // every play_now and silently starved the feeder (first live soak,
+        // 2026-07-11; GETs were never affected, which is why search/enrich
+        // worked).
+        let resp = match (method, body) {
+            ("GET", _) => req.call(),
+            (_, Some(b)) => req
+                .set("Content-Type", "application/json")
+                .send_string(&b.to_string()),
+            (_, None) => req.send_bytes(&[]),
+        };
         match resp {
             Ok(r) => {
                 if r.status() == 204 {
@@ -607,11 +670,12 @@ fn api_call(
                 return Err("disconnected");
             }
             Err(ureq::Error::Status(403, _)) => {
-                // 403 is ambiguous: insufficient scope, but ALSO Spotify's
-                // Premium-required answer on player endpoints. Neither is
-                // healed by destroying the session (re-consent is available
-                // from the tray any time) — surface the gate, keep tokens.
-                return Err("disconnected");
+                // 403 is ambiguous on player endpoints (insufficient scope,
+                // but ALSO Spotify's Premium-required answer) and definitive
+                // on library endpoints (the dev-mode endpoint block). The
+                // caller picks the mapping; nothing here destroys tokens —
+                // a re-consent is available from the tray any time.
+                return Err(on_403);
             }
             Err(ureq::Error::Status(429, r)) if !waited_429 => {
                 waited_429 = true;
@@ -754,8 +818,9 @@ fn queue_impl(app: &AppHandle, use_cache: bool) -> QueueResult {
 /// skipped-over item re-queued in order. Under the managed up-next model
 /// Spotify's queue stays shallow, so the normal case is 0–2 skips.
 ///
-/// Returns: "ok" | "busy" | "gone" | "diverged" | "partial" |
-/// "disconnected" | "offline".
+/// Returns: "ok" | "busy" | "gone" | "diverged" | "partial" | "no_device"
+/// (nothing playing AND Spotify open nowhere it can play) | "disconnected" |
+/// "offline". From silence it starts playback outright (start_playback).
 pub fn play_now(app: &AppHandle, uri: &str) -> &'static str {
     let auth = app.state::<SpotifyAuth>();
     if auth
@@ -767,7 +832,63 @@ pub fn play_now(app: &AppHandle, uri: &str) -> &'static str {
     }
     let outcome = jump(app, uri);
     app.state::<SpotifyAuth>().jump_in_flight.store(false, Ordering::SeqCst);
+    // NO jump-cancel on "diverged" — upnext::try_queue_skip deliberately
+    // lets suppression ride out its window there (the outcome is genuinely
+    // uncertain; skips DID happen), and a blanket cancel here would undo
+    // that call (quick-review catch). Pre-arm failures (gone/no_device/...)
+    // never emitted the arm, and the 6s expiry covers the rest.
     outcome
+}
+
+/// Start playback of `uri` from SILENCE. play_now's never-PUT-play-uris rule
+/// exists to protect a live playlist context — from no_playback there is no
+/// context to kill, and the bare-uris PUT on the best available device is
+/// exactly right (the palette's headline case: summon, type, play, with
+/// nothing running). "ok" | "no_device" | "disconnected" | "offline".
+fn start_playback(app: &AppHandle, uri: &str) -> &'static str {
+    let devices = match api_call(app, "GET", "https://api.spotify.com/v1/me/player/devices") {
+        Ok(Some(v)) => v,
+        Ok(None) => return "no_device",
+        Err(e) => return e,
+    };
+    let list = devices["devices"].as_array().cloned().unwrap_or_default();
+    // Prefer the active device — but never a restricted one (Connect
+    // hardware that rejects Web API commands with a 403); fall back to the
+    // first commandable device.
+    let commandable = |d: &&serde_json::Value| d["is_restricted"].as_bool() != Some(true);
+    let dev = list
+        .iter()
+        .filter(commandable)
+        .find(|d| d["is_active"].as_bool() == Some(true))
+        .or_else(|| list.iter().find(commandable));
+    let Some(id) = dev.and_then(|d| d["id"].as_str()) else {
+        return "no_device"; // Spotify isn't open anywhere it can play
+    };
+    if let Err(e) = api_call_body(
+        app,
+        "PUT",
+        &format!("https://api.spotify.com/v1/me/player/play?device_id={}", urlenc(id)),
+        &serde_json::json!({ "uris": [uri] }),
+    ) {
+        return e;
+    }
+    // Verify the landing — never trust command answers (matrix finding 3;
+    // jump() re-reads the same way). A device that accepted the PUT and
+    // then went dead reports "diverged": honest uncertainty, retryable.
+    for _ in 0..3 {
+        std::thread::sleep(Duration::from_millis(400));
+        if let Ok(Some(v)) =
+            api_call(app, "GET", "https://api.spotify.com/v1/me/player/currently-playing")
+        {
+            if v["item"]["uri"].as_str() == Some(uri) {
+                if let Some(t) = parse_track(&v["item"]) {
+                    update_now(app, &t);
+                }
+                return "ok";
+            }
+        }
+    }
+    "diverged"
 }
 
 fn jump(app: &AppHandle, target: &str) -> &'static str {
@@ -775,16 +896,18 @@ fn jump(app: &AppHandle, target: &str) -> &'static str {
     let q = queue_fresh(app);
     match q.status.as_str() {
         "ok" => {}
-        "no_playback" => return "no_playback",
+        // Nothing playing = nothing to jump within — start from silence
+        // instead (see start_playback; this is the palette's core promise).
+        "no_playback" => return start_playback(app, target),
         "disconnected" => return "disconnected",
         _ => return "offline",
     }
     if q.currently_playing.as_ref().is_some_and(|t| t.uri == target) {
         return "ok"; // already playing
     }
-    let (skips, skipped): (usize, Vec<QueueTrack>) =
+    let (skips, skipped, target_track): (usize, Vec<QueueTrack>, QueueTrack) =
         match q.queue.iter().position(|t| t.uri == target) {
-            Some(k) => (k + 1, q.queue[..k].to_vec()),
+            Some(k) => (k + 1, q.queue[..k].to_vec(), q.queue[k].clone()),
             None => {
                 // Not in the queue (a history replay / Pulse up-next row):
                 // append it, then find where it landed — user-queued items
@@ -795,21 +918,38 @@ fn jump(app: &AppHandle, target: &str) -> &'static str {
                 }
                 let q2 = queue_fresh(app);
                 if q2.status != "ok" {
-                    return "diverged";
+                    // Nothing has been skipped yet — "gone" keeps this in
+                    // the pre-skip class (callers may safely fall back to a
+                    // plain next; "diverged" is reserved for skips-happened-
+                    // landing-unverified).
+                    return "gone";
                 }
                 let Some(k) = q2.queue.iter().position(|t| t.uri == target) else {
                     return "gone";
                 };
-                (k + 1, q2.queue[..k].to_vec())
+                (k + 1, q2.queue[..k].to_vec(), q2.queue[k].clone())
             }
         };
 
+    // Arm the pill's announcement suppression in EVERY realm before skipping.
+    // The queue UI arms its own realm frontend-side, but a palette-initiated
+    // play runs in a different webview — the pill's realm only hears about
+    // it through this event (same payload as upnext's queue-aware skip).
+    let _ = app.emit(
+        "spotify-jump",
+        serde_json::json!({ "title": target_track.title, "artist": target_track.artist }),
+    );
+
     // 2. Skip to it. A failure midway leaves playback partway — re-queue
-    // what was already consumed (best effort) and report.
+    // what was already consumed (best effort) and report "diverged": skips
+    // happened but the target's arrival is unconfirmed. ("partial" is
+    // reserved for a VERIFIED landing whose re-queue was incomplete —
+    // callers pop the queue front on it, so it must imply the target
+    // actually played; quick-review catch, 2026-07-11.)
     for i in 0..skips {
         if next_track(app).is_err() {
             requeue(app, &skipped[..i.min(skipped.len())]);
-            return "partial";
+            return "diverged";
         }
         std::thread::sleep(Duration::from_millis(150));
     }
@@ -834,9 +974,10 @@ fn jump(app: &AppHandle, target: &str) -> &'static str {
     let Some(t) = landing else {
         return "diverged"; // concurrent user action — stopped, not forced
     };
-    // The verified landing is trustworthy — enrich here (mid-jump reads
-    // deliberately don't).
-    crate::history::enrich_uri(app, &t.title, &t.artist, &t.uri);
+    // The verified landing is trustworthy — enrich + publish here (mid-jump
+    // reads deliberately don't), so the heart follows a jump without waiting
+    // for the next settled enrich.
+    update_now(app, &t);
     if !requeued_ok {
         return "partial";
     }
@@ -854,7 +995,123 @@ fn requeue(app: &AppHandle, items: &[QueueTrack]) -> bool {
     ok
 }
 
+// ---- the current-track memory (history enrichment + similar.rs's seed) ----
+
+/// The single writer of the current-track memory: stamp history's candidate
+/// and remember the uri. Callers hand it a track they TRUST: a settled
+/// currently-playing read (enrich_now) or a verified jump landing — never a
+/// mid-jump snapshot.
+fn update_now(app: &AppHandle, t: &QueueTrack) {
+    crate::history::enrich_uri(app, &t.title, &t.artist, &t.uri);
+    let auth = app.state::<SpotifyAuth>();
+    let mut inner = lock(&auth);
+    // A disconnect can race this in-flight read — its clear must win.
+    if inner.tokens.is_some() {
+        inner.now_uri = Some(t.uri.clone());
+    }
+}
+
+// ---- history enrichment + uri resolution ----
+
+/// Stamp the CURRENT track's uri onto history's in-flight candidate. Fired
+/// once per track change from the media loop (via upnext::tick) while
+/// connected and Spotify is active — this is the path that makes history
+/// rows actionable (play-now/+ anchor by uri). The v0.6.0 wiring only
+/// enriched from queue reads the shipped UI never performs, so no entry
+/// ever earned a uri and the up-next list was unbootstrappable (Thien's
+/// live find, 2026-07-11).
+pub fn enrich_now(app: &AppHandle) {
+    let auth = app.state::<SpotifyAuth>();
+    if !connected(app)
+        || auth
+            .enrich_in_flight
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+    {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Ok(Some(v)) = api_call(&app, "GET", "https://api.spotify.com/v1/me/player/currently-playing")
+        {
+            if let Some(t) = parse_track(&v["item"]) {
+                update_now(&app, &t);
+            }
+        }
+        app.state::<SpotifyAuth>().enrich_in_flight.store(false, Ordering::SeqCst);
+    });
+}
+
+/// Raw ranked track search — the palette's list and the fielded resolvers'
+/// substrate. Ok(empty) = the API answered with no hits.
+pub fn search_tracks(
+    app: &AppHandle,
+    query: &str,
+    limit: u32,
+) -> Result<Vec<QueueTrack>, &'static str> {
+    let url = format!(
+        "https://api.spotify.com/v1/search?type=track&limit={limit}&q={}",
+        urlenc(query)
+    );
+    let v = api_call(app, "GET", &url)?;
+    Ok(v
+        .and_then(|v| {
+            v["tracks"]["items"]
+                .as_array()
+                .map(|items| items.iter().filter_map(parse_track).collect())
+        })
+        .unwrap_or_default())
+}
+
+/// Resolve the best-matching track by search — the path for history entries
+/// logged before enrichment existed (or from Apple Music sessions), and the
+/// track builder for more-like-this. Best match = same title (ci) + artist
+/// overlap, first 5 results.
+pub fn search_best(app: &AppHandle, title: &str, artist: &str) -> Option<QueueTrack> {
+    let items = search_tracks(app, &format!("track:{title} artist:{artist}"), 5).ok()?;
+    let title_lc = title.trim().to_lowercase();
+    let artist_lc = artist.trim().to_lowercase();
+    items
+        .iter()
+        .find(|t| {
+            let a = t.artist.trim().to_lowercase();
+            t.title.trim().to_lowercase() == title_lc
+                && (artist_lc.is_empty() || a.contains(&artist_lc) || artist_lc.contains(&a))
+        })
+        // Fall back to Spotify's own top hit — search relevance is usually
+        // right even when metadata strings differ (remaster suffixes etc).
+        .or_else(|| items.first())
+        .cloned()
+}
+
+pub fn search_track(app: &AppHandle, title: &str, artist: &str) -> Option<String> {
+    search_best(app, title, artist).map(|t| t.uri)
+}
+
+/// The current track's uri, if the enrichment has seen one.
+pub fn now_uri(app: &AppHandle) -> Option<String> {
+    let auth = app.state::<SpotifyAuth>();
+    let inner = lock(&auth);
+    inner.now_uri.clone()
+}
+
 // ---- commands ----
+
+/// Search-resolve a uri for a history row that never got enriched. Returns
+/// null on no match / disconnected / offline — the UI toasts.
+#[tauri::command]
+pub async fn spotify_resolve_uri(
+    app: AppHandle,
+    title: String,
+    artist: String,
+) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || search_track(&app, &title, &artist))
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("spotify resolve task panicked: {e}");
+            None
+        })
+}
 
 #[tauri::command]
 pub async fn spotify_status(app: AppHandle) -> SpotifyStatus {
@@ -878,11 +1135,11 @@ pub async fn spotify_queue(app: AppHandle) -> QueueResult {
         })
 }
 
-/// The context-preserving jump. Statuses: ok | busy (a jump is already
-/// running — ignore) | no_playback (nothing to skip within — start playback
-/// first) | gone | diverged (concurrent user action; stopped) | partial
-/// (re-queue incomplete) | disconnected | offline. Up to ~several seconds of
-/// blocking work — dedicated pool.
+/// The context-preserving jump (from silence: an outright start). Statuses:
+/// ok | busy (a jump is already running — ignore) | no_device (nothing
+/// playing and Spotify open nowhere) | gone | diverged (concurrent user
+/// action; stopped) | partial (re-queue incomplete) | disconnected |
+/// offline. Up to ~several seconds of blocking work — dedicated pool.
 #[tauri::command]
 pub async fn spotify_play_now(app: AppHandle, uri: String) -> String {
     tauri::async_runtime::spawn_blocking(move || play_now(&app, &uri).to_string())
@@ -891,4 +1148,29 @@ pub async fn spotify_play_now(app: AppHandle, uri: String) -> String {
             eprintln!("spotify play_now task panicked: {e}");
             "offline".into()
         })
+}
+
+#[derive(Serialize, Clone)]
+pub struct SearchResult {
+    /// "ok" | "disconnected" | "offline"
+    pub status: String,
+    pub tracks: Vec<QueueTrack>,
+}
+
+/// Free-text track search for the palette. Ok + empty list = a real "no
+/// hits" answer.
+#[tauri::command]
+pub async fn spotify_search(app: AppHandle, query: String, limit: Option<u32>) -> SearchResult {
+    tauri::async_runtime::spawn_blocking(move || {
+        let limit = limit.unwrap_or(8).clamp(1, 20);
+        match search_tracks(&app, &query, limit) {
+            Ok(tracks) => SearchResult { status: "ok".into(), tracks },
+            Err(e) => SearchResult { status: e.into(), tracks: Vec::new() },
+        }
+    })
+    .await
+    .unwrap_or_else(|e| {
+        eprintln!("spotify search task panicked: {e}");
+        SearchResult { status: "offline".into(), tracks: Vec::new() }
+    })
 }

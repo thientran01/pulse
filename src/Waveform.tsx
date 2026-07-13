@@ -13,28 +13,52 @@ import { useEffect, useRef, useState } from "react";
 import { type AudioBands } from "./lib/backend";
 import { Envelope, subscribeBands } from "./lib/reactive";
 
-/** Three renditions of the same instrument: "sm" is the pill's inline text
+/** Four renditions of the same instrument: "sm" is the pill's inline text
  * separator (5 bars); "md" is the card and lyrics-header separator (7 bars,
  * scaled up — those containers are ~3× the pill's, so the separator steps
  * with them; the lyrics header is also that view's only now-playing signal);
  * "lg" is the standalone hero in the expanded big-art view (9 bars — the
- * wider stage earns the extra pairs) — same choreography, scaled geometry.
- * boxH/aliveW/restW size the container: sm/md morph
- * width between rest and alive; the lg footprint is CONSTANT (no width/margin
- * morph, rest keeps the full box) because it sits in a centered column above
- * the transport — collapsing it would re-center the column and move the art. */
-type Size = "sm" | "md" | "lg";
+ * wider stage earns the extra pairs); "room" is focus mode's horizon (the
+ * Soundboard design, 2026-07-12: a 1170×150 instrument spanning the lower
+ * third of the fullscreen takeover). Room was RESHAPED 2026-07-12 after the
+ * first cut read wrong at fullscreen size: 24px-wide bars turned into fat
+ * ovals whenever they went short (a wide rounded-full shape is a blob when
+ * height ≈ width), worst at the edges where the quiet high bins keep them
+ * shortest. Now 41 thin (12px) capsules — a thin capsule stays a capsule at
+ * any height — under a gentle symmetric peak envelope (roomPeak) so the
+ * horizon reads as one intentional instrument (tall bass center, tapered
+ * edges) instead of a random picket. Same choreography at every size.
+ * boxH/aliveW/restW size the container: sm/md morph width between rest and
+ * alive; the HERO footprints (lg, room) are CONSTANT (no width/margin morph,
+ * rest keeps the full box) because they sit in centered columns/bands —
+ * collapsing would re-seat everything around them. */
+type Size = "sm" | "md" | "lg" | "room";
 const GEOM = {
   sm: { bar: "h-[9px] w-[2px]", dot: "h-[2px] w-[2px]", survivor: "h-[3px] w-[3px]", dropBlur: "blur-[1.5px]", boxH: "h-[11px]", aliveW: "w-[18px]", restW: "w-[5px]" },
   md: { bar: "h-[18px] w-[4px]", dot: "h-[3px] w-[3px]", survivor: "h-[4px] w-[4px]", dropBlur: "blur-[2px]", boxH: "h-[20px]", aliveW: "w-[46px]", restW: "w-[6px]" },
   lg: { bar: "h-[26px] w-[5px]", dot: "h-[5px] w-[5px]", survivor: "h-[7px] w-[7px]", dropBlur: "blur-[3px]", boxH: "h-[30px]", aliveW: "w-[85px]", restW: "w-[85px]" },
+  room: { bar: "h-[150px] w-[12px]", dot: "h-[6px] w-[6px]", survivor: "h-[10px] w-[10px]", dropBlur: "blur-[4px]", boxH: "h-[170px]", aliveW: "w-[1170px]", restW: "w-[1170px]" },
 } as const;
+/** The constant-footprint, purely-decorative standalone renditions. */
+const HERO: ReadonlySet<Size> = new Set(["lg", "room"]);
 /** Which spectrum bin each bar rides: center gets the lowest (Apple's
  * tall-middle silhouette); neighbors sit on staggered mids/highs so the
  * bars never bounce in lockstep. md is sm's inner five plus an outer high
  * pair; lg adds one more high pair outside those (15/13 deliberately
- * asymmetric — twin bins would bounce the edges in lockstep). */
-const BAR_BINS = { sm: [9, 4, 1, 6, 11], md: [12, 9, 4, 1, 6, 11, 14], lg: [15, 12, 9, 4, 1, 6, 11, 14, 13] } as const;
+ * asymmetric — twin bins would bounce the edges in lockstep). room walks
+ * the same asymmetric pattern out to 41: the center rides bass (bin 1 — the
+ * tall middle) and the bins trend toward the highs at the edges (so energy
+ * tapers outward WITH the roomPeak envelope), jittered so no two neighbors
+ * share a bin and the two halves are never mirror images. */
+const BAR_BINS = {
+  sm: [9, 4, 1, 6, 11],
+  md: [12, 9, 4, 1, 6, 11, 14],
+  lg: [15, 12, 9, 4, 1, 6, 11, 14, 13],
+  room: [
+    12, 15, 13, 14, 15, 13, 15, 12, 14, 11, 13, 9, 12, 7, 10, 5, 8, 3, 6, 4, 1,
+    3, 5, 7, 6, 9, 8, 11, 9, 13, 11, 14, 12, 15, 13, 15, 14, 13, 15, 14, 15,
+  ],
+} as const;
 /** Minimum bar height while alive, as a fraction of the full bar. */
 const REST = 0.15;
 /** Frontend envelope on top of the backend's smoothing: fast attack so hits
@@ -45,6 +69,19 @@ const ENV_RELEASE_MS = 180;
 /** Height shaping exponent: <1 lifts moderate energy, but 0.6 compressed
  * everything to "medium-tall" — 0.85 keeps the loud/quiet contrast. */
 const SHAPE_EXP = 0.85;
+/** Room hero silhouette: a gentle symmetric envelope so the horizon reads as
+ * one intentional instrument (tall center, tapered edges — Apple's soundwave
+ * shape) instead of a random picket of equal-max bars. It caps each bar's
+ * PEAK scaleY only; the REST floor stays uniform, so a quiet moment is a
+ * clean flat line of equal capsules and energy blooms into the taper. Edges
+ * never fall below EDGE_FLOOR of full height — the knob if the dome reads too
+ * strong (raise toward 1 to flatten). Non-room sizes keep a flat peak of 1. */
+const EDGE_FLOOR = 0.62;
+function roomPeak(i: number, n: number): number {
+  const t = (i / (n - 1)) * 2 - 1; // -1 (left edge) → 0 (center) → 1 (right edge)
+  const shape = Math.pow(Math.cos((t * Math.PI) / 2), 0.7); // 1 at center, 0 at edges
+  return EDGE_FLOOR + (1 - EDGE_FLOOR) * shape;
+}
 /** Stop animating once every envelope has decayed below this. */
 const IDLE_EPS = 0.004;
 /** Level above which the separator wakes; falls asleep after quiet holds. */
@@ -138,6 +175,8 @@ export function Waveform({
 
   useEffect(() => {
     const envs = bins.map(() => new Envelope(ENV_ATTACK_MS, ENV_RELEASE_MS));
+    // Per-bar peak ceiling: the room silhouette envelope; a flat 1 elsewhere.
+    const peaks = size === "room" ? bins.map((_, i) => roomPeak(i, bins.length)) : bins.map(() => 1);
     let latest: AudioBands | null = null;
     let raf = 0;
     let running = false;
@@ -170,9 +209,10 @@ export function Waveform({
         const e = envs[i].step(target, dt);
         peak = Math.max(peak, e);
         const el = barsRef.current[i];
-        // Mildly concave shaping: lifts moderate energy without flattening
-        // the loud/quiet contrast (see SHAPE_EXP).
-        if (el) el.style.transform = `scaleY(${(REST + Math.pow(e, SHAPE_EXP) * (1 - REST)).toFixed(3)})`;
+        // Mildly concave shaping (SHAPE_EXP) between the uniform REST floor and
+        // this bar's PEAK ceiling (the room envelope; 1 elsewhere) — quiet
+        // settles to an even line, energy blooms into the tapered silhouette.
+        if (el) el.style.transform = `scaleY(${(REST + Math.pow(e, SHAPE_EXP) * (peaks[i] - REST)).toFixed(3)})`;
       }
       // Idle-stop once decayed; the next band event restarts the loop.
       if (peak < IDLE_EPS && (b === null || b.level <= 0.001)) {
@@ -367,14 +407,15 @@ export function Waveform({
   // `trailing`: nothing follows this separator (lyrics view; empty album) —
   // there is nothing to separate, so rest state renders NOTHING (no dangling
   // dot, no sr-only dash) and the bars bloom in only while music plays.
-  // Ignored at lg: the hero always keeps its middot (rest = a single dot in
-  // the reserved box) and is purely decorative (no sr-only dash).
-  const showDot = size === "lg" || !trailing;
+  // Ignored at the hero sizes: a hero always keeps its middot (rest = a
+  // single dot in the reserved box) and is purely decorative (no sr-only
+  // dash).
+  const showDot = HERO.has(size) || !trailing;
   return (
     <span
-      aria-hidden={size === "lg" || undefined}
+      aria-hidden={HERO.has(size) || undefined}
       className={`relative inline-flex ${GEOM[size].boxH} items-center align-middle ${
-        size === "lg"
+        HERO.has(size)
           ? GEOM[size].aliveW
           : `[transition:width_220ms_var(--ease-out-tk),margin_220ms_var(--ease-out-tk)] ${
               atRest ? (trailing ? "mx-0 w-0" : `mx-1.5 ${GEOM[size].restW}`) : `mx-1.5 ${GEOM[size].aliveW}`
@@ -382,8 +423,8 @@ export function Waveform({
       }`}
     >
       {/* AT hears the separator only when it actually separates two things —
-          any text-separator size (the lg hero is purely decorative). */}
-      {size !== "lg" && !trailing && <span className="sr-only"> — </span>}
+          any text-separator size (the heroes are purely decorative). */}
+      {!HERO.has(size) && !trailing && <span className="sr-only"> — </span>}
       {/* Resting state: a colorless middot — just a separator. It swaps in
           INSTANTLY over the survivor dot (identical pixels, so no crossfade
           is needed and none is wanted — a fade would ghost while the

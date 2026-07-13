@@ -1,9 +1,15 @@
 mod audio;
 mod dock;
+mod focus;
 mod history;
+mod lastfm;
+mod loopback;
 mod lyrics;
 mod media;
+mod palette;
 mod presence;
+mod settings;
+mod similar;
 mod spotify;
 mod upnext;
 
@@ -36,6 +42,8 @@ const HK_SEEK_FWD: &str = "ctrl+alt+right";
 const HK_NEXT: &str = "ctrl+alt+n";
 const HK_PREV: &str = "ctrl+alt+p";
 const HK_TOGGLE: &str = "ctrl+alt+m";
+/// S for search/summon — the palette (Thien's pick, 2026-07-11).
+const HK_PALETTE: &str = "ctrl+alt+s";
 
 // Every command that touches GSMTC (or the network) is `async` — NOT for
 // concurrency, but to move it OFF the main thread. Tauri runs sync commands
@@ -53,6 +61,13 @@ async fn media_play_pause(app: AppHandle) -> bool {
 
 #[tauri::command]
 async fn media_next(app: AppHandle) -> bool {
+    // Queue-aware: a next pressed in Pulse lands on the up-next front when
+    // there is one (upnext::try_queue_skip) — the mid-song skip is the one
+    // transition the feed-late model missed. Falls through to the plain
+    // GSMTC skip otherwise.
+    if upnext::try_queue_skip(&app) {
+        return true;
+    }
     let ok = media::next();
     emit_now(&app);
     ok
@@ -80,13 +95,30 @@ async fn media_seek_abs(position_ms: i64) -> bool {
     media::seek_abs_ms(position_ms)
 }
 
-/// The frontend's vote on audio reactivity (false under OS reduced-motion) —
-/// ANDed into the capture switch so suppressed visuals also stop the capture.
-struct UiReactive(Arc<AtomicBool>);
+/// Per-window frontend votes on audio reactivity (false under OS
+/// reduced-motion) — the effective value is the OR of live windows' votes,
+/// ANDed into the capture switch. A single shared atomic worked while
+/// "main" was the only webview; with the palette (and focus mode next) each
+/// realm's initReactive would clobber the others'. Empty map (pre-vote
+/// startup) defaults true, matching the old atomic's default. The label
+/// comes from the invoking window's IPC context, never a parameter — a
+/// webview can only vote for itself. Votes drop on Destroyed (the window
+/// event handler) so a dead window can't wedge the gate.
+struct UiReactive(Arc<Mutex<std::collections::HashMap<String, bool>>>);
+
+fn reactive_effective(votes: &Mutex<std::collections::HashMap<String, bool>>) -> bool {
+    let m = votes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    m.is_empty() || m.values().any(|v| *v)
+}
 
 #[tauri::command]
-fn set_reactive_enabled(enabled: bool, state: State<UiReactive>) {
-    state.0.store(enabled, Ordering::Relaxed);
+fn set_reactive_enabled(
+    enabled: bool,
+    window: tauri::WebviewWindow,
+    state: State<UiReactive>,
+) {
+    let mut votes = state.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    votes.insert(window.label().to_string(), enabled);
 }
 
 /// Fetch synced/plain lyrics for a track (LRCLIB + disk cache). Worst case
@@ -161,7 +193,7 @@ struct Stamped {
 /// the position pipeline (ad-hoc emit_now callers included).
 struct LastEmit(Mutex<Option<media::NowPlaying>>);
 
-fn emit_now(app: &AppHandle) -> media::NowPlaying {
+pub(crate) fn emit_now(app: &AppHandle) -> media::NowPlaying {
     let cache = app.state::<ArtCache>();
     let last = app.state::<LastEmit>();
     // Snapshot INSIDE the lock: concurrent callers (media loop, commands,
@@ -180,11 +212,13 @@ fn emit_now(app: &AppHandle) -> media::NowPlaying {
     np
 }
 
-/// Visibility INTENT — the single owner of WHY the window is shown or
+/// Visibility INTENT — the single owner of WHY the MAIN window is shown or
 /// hidden. `is_visible()` stays the OS truth, but every mutation flows
-/// through apply_visibility (the ONLY caller of show()/hide() — grep rule),
+/// through apply_visibility (the ONLY caller of the main window's
+/// show()/hide() — grep rule; palette.rs is the one other, window-scoped
+/// visibility ledger, for its own label only),
 /// which reconciles the window to:
-///   effective = !user_hidden && !(concealed && !conceal_snoozed)
+///   effective = !user_hidden && !(concealed && !conceal_snoozed) && !focus_open
 pub struct VisIntent {
     /// Sticky manual hide (hotkey/tray while visible). Survives conceal
     /// episodes: a game ending must not resurrect a widget the user hid.
@@ -198,6 +232,11 @@ pub struct VisIntent {
     /// persisted in app-data settings.json): sensing continues, behaviors
     /// stop. Persisted because a setting that silently resets erodes trust.
     pub companion: AtomicBool,
+    /// The fullscreen focus window is open (focus.rs) — the widget yields
+    /// unconditionally and returns to its EXACT prior intent on close (a
+    /// sticky manual hide stays hidden; a live conceal episode still holds).
+    /// Memory-only, never persisted: a relaunch can never boot into focus.
+    pub focus_open: AtomicBool,
 }
 
 impl Default for VisIntent {
@@ -207,6 +246,7 @@ impl Default for VisIntent {
             concealed: AtomicBool::new(false),
             conceal_snoozed: AtomicBool::new(false),
             companion: AtomicBool::new(true),
+            focus_open: AtomicBool::new(false),
         }
     }
 }
@@ -216,6 +256,7 @@ impl VisIntent {
         !self.user_hidden.load(Ordering::Relaxed)
             && !(self.concealed.load(Ordering::Relaxed)
                 && !self.conceal_snoozed.load(Ordering::Relaxed))
+            && !self.focus_open.load(Ordering::Relaxed)
     }
 }
 
@@ -231,6 +272,11 @@ pub(crate) fn apply_visibility(app: &AppHandle) {
     // the worst failure class here (quick-review catch, 2026-07-09).
     let is = win.is_visible().unwrap_or(!want);
     if want && !is {
+        // Reconcile the seat context first: a show landing between presence
+        // ticks (hotkey snooze, tray) must never flash at the wrong seat.
+        // The hidden-window swap is an instant jump, and sync_seat never
+        // calls back into apply_visibility.
+        dock::sync_seat(app);
         let _ = win.show();
         // The poll loop skips hidden windows — refresh immediately on show.
         emit_now(app);
@@ -242,6 +288,23 @@ pub(crate) fn apply_visibility(app: &AppHandle) {
 fn toggle_widget(app: &AppHandle) {
     let Some(win) = app.get_webview_window("main") else { return };
     let vis = app.state::<VisIntent>();
+    // During the focus takeover the hotkey means "give me the widget back":
+    // LEAVE FOCUS (the Destroyed handler restores the exact prior intent).
+    // Reasoning from raw visibility here would see main hidden and silently
+    // wipe a sticky manual hide / snooze a live conceal with zero visible
+    // effect — corrupting the prior intent focus promises to restore
+    // (quick-review catch, 2026-07-11).
+    if vis.focus_open.load(Ordering::Relaxed) {
+        if let Some(focus_win) = app.get_webview_window(focus::LABEL) {
+            let _ = focus_win.destroy();
+        } else {
+            // Window gone but the flag stuck (a failed create/show) — the
+            // hotkey is the recovery path: clear and reconcile.
+            vis.focus_open.store(false, Ordering::Relaxed);
+            apply_visibility(app);
+        }
+        return;
+    }
     // Decide from what the user actually SEES, not the intent flags — this
     // self-heals any intent/OS desync. Hiding is always a user act; showing
     // during a conceal episode snoozes the conceal for that episode (the
@@ -257,29 +320,15 @@ fn toggle_widget(app: &AppHandle) {
     apply_visibility(app);
 }
 
-/// Companion-mode persistence: one tiny JSON next to the lyrics cache.
-fn settings_path(app: &AppHandle) -> Option<std::path::PathBuf> {
-    app.path().app_data_dir().ok().map(|d| d.join("settings.json"))
-}
-
+/// Companion-mode persistence — thin wrappers over the shared settings.rs
+/// read-modify-write (the old wholesale `{"companion": on}` write clobbered
+/// every other key the moment a second one existed).
 fn load_companion(app: &AppHandle) -> bool {
-    settings_path(app)
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("companion").and_then(|b| b.as_bool()))
-        .unwrap_or(true)
+    settings::get_bool(app, "companion", true)
 }
 
 fn save_companion(app: &AppHandle, on: bool) {
-    let Some(path) = settings_path(app) else { return };
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    // In-session behavior rides the atomic either way; a failed write only
-    // surfaces at next launch — say so instead of diverging silently.
-    if let Err(e) = std::fs::write(path, serde_json::json!({ "companion": on }).to_string()) {
-        eprintln!("companion setting not persisted: {e}");
-    }
+    settings::set_value(app, "companion", serde_json::Value::Bool(on));
 }
 
 /// Frontend-initiated connect (the queue UI's gate state, PR 4) — same flow
@@ -403,6 +452,12 @@ pub fn run() {
             // block there (see the async-command note above), so the whole
             // reconcile defers to the async pool.
             let vis = app.state::<VisIntent>();
+            // During the focus takeover, Pulse IS surfaced — the summons is
+            // already satisfied, and the flag-clears below would silently
+            // corrupt the prior intent focus restores on close.
+            if vis.focus_open.load(Ordering::Relaxed) {
+                return;
+            }
             vis.user_hidden.store(false, Ordering::Relaxed);
             if vis.concealed.load(Ordering::Relaxed) {
                 vis.conceal_snoozed.store(true, Ordering::Relaxed);
@@ -429,6 +484,10 @@ pub fn run() {
         .plugin(
             tauri_plugin_window_state::Builder::new()
                 .with_state_flags(tauri_plugin_window_state::StateFlags::POSITION)
+                // Only "main" persists position. The palette recenters per
+                // summon and focus mode is born fullscreen — a restored
+                // stale position would be wrong for both.
+                .with_denylist(&[palette::LABEL, focus::LABEL])
                 .build(),
         )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -437,7 +496,7 @@ pub fn run() {
         .manage(history::Tracker::default())
         .manage(spotify::SpotifyAuth::default())
         .manage(upnext::UpNext::default())
-        .manage(UiReactive(Arc::new(AtomicBool::new(true))))
+        .manage(UiReactive(Arc::new(Mutex::new(std::collections::HashMap::new()))))
         .manage(dock::Dock::default())
         .manage(presence::Presence::default())
         .manage(VisIntent::default())
@@ -459,10 +518,16 @@ pub fn run() {
             spotify::spotify_disconnect,
             spotify::spotify_queue,
             spotify::spotify_play_now,
+            spotify::spotify_resolve_uri,
+            spotify::spotify_search,
+            palette::palette_hide,
+            focus::focus_open,
+            focus::focus_close,
             upnext::upnext_list,
             upnext::upnext_add,
             upnext::upnext_remove,
             upnext::upnext_move,
+            similar::more_like_this,
             dock::set_window_size,
             dock::set_hit_size,
             dock::start_drag,
@@ -471,8 +536,38 @@ pub fn run() {
             presence::set_presence_debug
         ])
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Moved(_) = event {
-                dock::on_moved(window);
+            match event {
+                // Corner-snap is the MAIN window's behavior only — the
+                // handler fires for every window's moves, and an unguarded
+                // forward would arm the snap on the palette (live-verified
+                // trap from the multi-window planning pass).
+                tauri::WindowEvent::Moved(_) if window.label() == "main" => {
+                    dock::on_moved(window);
+                }
+                // Blur dismisses the palette — the OS focus event is the
+                // trustworthy signal (webview-side blur can lie during
+                // devtools/IME churn).
+                tauri::WindowEvent::Focused(false) if window.label() == palette::LABEL => {
+                    palette::hide(window.app_handle());
+                }
+                // A dead window's reactive vote must not wedge the capture
+                // gate (the palette is create-once so this mostly serves
+                // focus mode's create/destroy lifecycle). Focus mode's
+                // destroy is ALSO its close path — Esc, the collapse
+                // control, and Alt-F4 all converge here, where the widget
+                // returns to its exact prior intent.
+                tauri::WindowEvent::Destroyed => {
+                    let votes = window.app_handle().state::<UiReactive>();
+                    {
+                        let mut m =
+                            votes.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        m.remove(window.label());
+                    }
+                    if window.label() == focus::LABEL {
+                        focus::on_destroyed(window.app_handle());
+                    }
+                }
+                _ => {}
             }
         })
         .setup(|app| {
@@ -638,10 +733,13 @@ pub fn run() {
             history::init(app.handle());
             // Managed up-next: restore the persisted list + fed marker.
             upnext::init(app.handle());
+            // Docking: restore the persisted fullscreen seat.
+            dock::init(app.handle());
 
             // Global hotkeys, each with its own action.
             type Action = fn(&AppHandle);
-            let hotkeys: [(&str, Action); 6] = [
+            let hotkeys: [(&str, Action); 7] = [
+                (HK_PALETTE, |app| palette::toggle(app)),
                 (HK_PLAY_PAUSE, |app| {
                     media::play_pause();
                     emit_now(app);
@@ -654,9 +752,13 @@ pub fn run() {
                 (HK_SEEK_FWD, |_app| {
                     media::seek_rel_ms(SEEK_STEP_MS);
                 }),
+                // Queue-aware like the media_next command — same one gesture,
+                // same landing.
                 (HK_NEXT, |app| {
-                    media::next();
-                    emit_now(app);
+                    if !upnext::try_queue_skip(app) {
+                        media::next();
+                        emit_now(app);
+                    }
                 }),
                 (HK_PREV, |app| {
                     media::prev();
@@ -694,6 +796,9 @@ pub fn run() {
             let audio_switch = Arc::new(AtomicBool::new(false));
             audio::spawn(app.handle().clone(), audio_switch.clone());
             let ui_reactive = app.state::<UiReactive>().0.clone();
+            // The palette window: create-once-hidden so Ctrl+Alt+S is
+            // instant (WebView2 cold-create costs hundreds of ms).
+            palette::init(app.handle());
 
             // Media loop → "now-playing" events: a heartbeat poll plus GSMTC
             // change events that cut the wait short, so track changes,
@@ -725,10 +830,19 @@ pub fn run() {
                     if let Some(w) = watch.as_mut() {
                         w.resubscribe(std::mem::take(&mut resubscribe));
                     }
+                    // Widened for focus mode: main hides behind the takeover
+                    // (VisIntent.focus_open), and a loop gated on main alone
+                    // would stop emitting — a frozen player in the focus
+                    // window (verified in planning). The audio capture
+                    // switch below inherits this for free.
                     let visible = handle
                         .get_webview_window("main")
                         .and_then(|w| w.is_visible().ok())
-                        .unwrap_or(true);
+                        .unwrap_or(true)
+                        || handle
+                            .get_webview_window(focus::LABEL)
+                            .and_then(|w| w.is_visible().ok())
+                            .unwrap_or(false);
                     let playing = if visible {
                         hidden_beats = 0;
                         let tick = media::tick_key();
@@ -765,7 +879,12 @@ pub fn run() {
                     // Grace-expiry sweep for a vanish-pending entry (a gone
                     // session produces no ticks to ride).
                     history::tick(&handle);
-                    let reactive = ui_reactive.load(Ordering::Relaxed);
+                    let reactive = reactive_effective(&ui_reactive);
+                    // The capture's process-scoping target rides the same
+                    // beat as the switch: whichever app GSMTC says is
+                    // playing is the app whose audio the waveform should
+                    // hear (loopback.rs — never the whole device mix).
+                    audio::set_target(last_tick.as_ref().map(|k| k.0.as_str()).unwrap_or(""));
                     audio_switch.store(visible && playing && reactive, Ordering::Relaxed);
                     use std::sync::mpsc::RecvTimeoutError;
                     match wake_rx.recv_timeout(Duration::from_millis(POLL_INTERVAL_MS)) {

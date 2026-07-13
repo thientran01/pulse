@@ -30,7 +30,8 @@ export type MorphName =
   | "contract"
   | "mic"
   | "micOff"
-  | "note";
+  | "note"
+  | "queue";
 
 export type Stroke = { d: string; o: 0 | 1 };
 
@@ -129,5 +130,14 @@ export const ICONS: Record<MorphName, [Stroke, Stroke, Stroke]> = {
     { d: "M 7.7,11.8 C 7.7,10.3 7.7,8.7 7.7,7.2 C 7.7,5.7 7.7,4.1 7.7,2.6", o: 1 },
     { d: "M 7.7,2.6 C 10.2,3.0 11.2,4.0 11.4,5.6 C 11.5,6.6 11.0,7.5 10.2,8.2", o: 1 },
     { d: "M 7.7,11.8 C 7.7,14.3 3.9,14.3 3.9,11.8 C 3.9,9.3 7.7,9.3 7.7,11.8", o: 1 },
+  ],
+  // Queue = the list pictogram: two full rows + a short last row (the 11a
+  // handoff sketched rows + a "+", but a plus is two strokes — the 3-stroke
+  // budget sacrifices it, the micOff-stem doctrine; the add affordance lives
+  // on the rows themselves). Short row = "more coming", the queue read.
+  queue: [
+    { d: "M 3.2,4.6 C 4.8,4.6 6.4,4.6 8.0,4.6 C 9.6,4.6 11.2,4.6 12.8,4.6", o: 1 },
+    { d: "M 3.2,8.0 C 4.8,8.0 6.4,8.0 8.0,8.0 C 9.6,8.0 11.2,8.0 12.8,8.0", o: 1 },
+    { d: "M 3.2,11.4 C 4.1,11.4 5.0,11.4 5.9,11.4 C 6.8,11.4 7.7,11.4 8.6,11.4", o: 1 },
   ],
 };

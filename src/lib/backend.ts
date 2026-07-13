@@ -11,6 +11,7 @@ import {
   type PresenceDebug,
   type PresenceState,
   type QueueTrack,
+  type SearchResult,
   type SpotifyQueueResult,
   type SpotifyStatus,
 } from "../types";
@@ -110,7 +111,9 @@ function mockHistoryEntry(
     ended_at_ms: startedAtMs + listenedMs,
     ms_listened: listenedMs,
     duration_ms: MOCK_DURATION,
-    spotify_uri: null,
+    // Same scheme as mockQueueTrack — history rows' play-now/+/drag are
+    // uri-gated, and the mock's enrichment always "succeeded".
+    spotify_uri: `spotify:track:mock-${t.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
   };
 }
 
@@ -139,14 +142,43 @@ const SPOTIFY_OFF =
   !IN_TAURI && new URLSearchParams(window.location.search).get("spotify") === "off";
 const QUEUE_EMPTY =
   !IN_TAURI && new URLSearchParams(window.location.search).get("queue") === "empty";
+/** `?similar=<status>` forces moreLikeThis to answer that status (no_data /
+ * no_key / offline …) so every toast is preview-reachable. */
+const SIMILAR_FORCE = IN_TAURI
+  ? null
+  : new URLSearchParams(window.location.search).get("similar");
 
 let mockSpotifyConnected = !SPOTIFY_OFF;
 const mockSpotifyListeners = new Set<(s: SpotifyStatus) => void>();
 
+function mockStatus(): SpotifyStatus {
+  return { connected: mockSpotifyConnected };
+}
+
 function pushMockSpotify(connected: boolean): void {
   mockSpotifyConnected = connected;
-  mockSpotifyListeners.forEach((cb) => cb({ connected }));
+  mockSpotifyListeners.forEach((cb) => cb(mockStatus()));
 }
+
+/** The palette window was just summoned (palette.rs show) — the webview
+ * refocuses its input and recomputes the resurfacing rows. Mock: never fires
+ * (a plain-browser palette is always "shown"). */
+export function onPaletteShown(cb: () => void): () => void {
+  if (!IN_TAURI) return () => {};
+  const un = listen("palette-shown", () => cb());
+  return () => {
+    un.then((f) => f());
+  };
+}
+
+/** Extra searchable fixtures beyond the ring so the mock palette has more
+ * than three answers; their uris aren't in the ring, so playing one
+ * exercises the "gone" failure path deliberately. */
+const MOCK_SEARCH_EXTRAS = [
+  { title: "Happy Ending", artist: "Kep1er", album: "LOVESTRUCK!" },
+  { title: "About Love", artist: "Red Velvet", album: "Perfect Velvet" },
+  { title: "Euphoria", artist: "keshi", album: "Requiem" },
+];
 
 function mockQueueTrack(t: { title: string; artist: string; album: string }) {
   return {
@@ -154,6 +186,33 @@ function mockQueueTrack(t: { title: string; artist: string; album: string }) {
     ...t,
     duration_ms: MOCK_DURATION,
     art_url: mockArt(),
+  };
+}
+
+const mockSpotifyJumpListeners = new Set<(t: { title: string; artist: string }) => void>();
+
+/** A backend-initiated jump's target (the queue-aware skip) — App arms the
+ * pill's announcement suppression with it, exactly like a frontend play-now. */
+export function onSpotifyJump(cb: (t: { title: string; artist: string }) => void): () => void {
+  if (IN_TAURI) {
+    const un = listen<{ title: string; artist: string }>("spotify-jump", (e) => cb(e.payload));
+    return () => {
+      un.then((f) => f());
+    };
+  }
+  mockSpotifyJumpListeners.add(cb);
+  return () => {
+    mockSpotifyJumpListeners.delete(cb);
+  };
+}
+
+/** The backend jump fell back to a plain skip — the armed suppression must
+ * clear so that legitimate track change announces. */
+export function onSpotifyJumpCancel(cb: () => void): () => void {
+  if (!IN_TAURI) return () => {}; // mock next never takes the fallback path
+  const un = listen("spotify-jump-cancel", () => cb());
+  return () => {
+    un.then((f) => f());
   };
 }
 
@@ -172,7 +231,7 @@ export function onSpotifyStatus(cb: (s: SpotifyStatus) => void): () => void {
       un.then((f) => f());
     };
   }
-  cb({ connected: mockSpotifyConnected });
+  cb(mockStatus());
   mockSpotifyListeners.add(cb);
   return () => {
     mockSpotifyListeners.delete(cb);
@@ -519,8 +578,24 @@ export const commands = {
     }
   },
   next(): void {
-    if (IN_TAURI) void invoke("media_next");
-    else mockSkip(1);
+    if (IN_TAURI) {
+      void invoke("media_next");
+      return;
+    }
+    // Queue-aware like the backend (upnext::try_queue_skip): with a
+    // connected session and a queued front that maps to a ring track, next
+    // lands ON it (mockJumpTo pops the matching front) instead of walking
+    // the ring — so the preview mirrors the real skip semantics.
+    const front = mockUpNext[0];
+    const ringIdx = front
+      ? MOCK_TRACKS.findIndex((t) => mockQueueTrack(t).uri === front.uri)
+      : -1;
+    if (mockSpotifyConnected && ringIdx !== -1) {
+      mockSpotifyJumpListeners.forEach((cb) => cb({ title: front.title, artist: front.artist }));
+      mockJumpTo(ringIdx);
+    } else {
+      mockSkip(1);
+    }
   },
   prev(): void {
     if (IN_TAURI) void invoke("media_prev");
@@ -612,9 +687,11 @@ export const commands = {
       mockUpNextChanged();
     }
   },
-  /** Context-preserving jump (spotify.rs play_now). Statuses: ok | busy |
-   * no_playback | gone | diverged | partial | disconnected | offline. The
-   * caller owns announcement suppression around this. */
+  /** Context-preserving jump (spotify.rs play_now); from silence it starts
+   * playback outright. Statuses: ok | busy | no_device | gone | diverged |
+   * partial | disconnected | offline. The caller owns announcement
+   * suppression around this (backend also arms every realm via
+   * "spotify-jump"). */
   async playNow(uri: string): Promise<string> {
     if (!IN_TAURI) {
       if (!mockSpotifyConnected) return "disconnected";
@@ -660,14 +737,103 @@ export const commands = {
       const delayMs = LYRICS_PARAM && LYRICS_PARAM !== "none" ? Number(LYRICS_PARAM) || 0 : 0;
       if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
       if (LYRICS_PARAM === "none") return LYRICS_MISS;
-      // Mock: a line every 4s across the track so preview exercises karaoke.
-      const lines = Array.from({ length: Math.floor(durationMs / 4000) }, (_, i) => {
-        const t = i * 4;
-        return `[${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}.00]Mock lyric line ${i + 1} — la la la (${title})`;
-      });
+      // Mock: verses on a 4s cadence with real instrumental gaps, so preview
+      // exercises karaoke AND every break-synthesis path (parseLrc): a 12s
+      // intro, a marker-pinned break (the empty stamp at 64s — the mock's
+      // start position of 63s sits right on its doorstep), an UN-marked
+      // 100→124s gap (the estimated-hold path), and a marker-pinned outro.
+      const stamp = (s: number) =>
+        `[${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}.00]`;
+      const lines: string[] = [];
+      let n = 0;
+      const verse = (from: number, to: number) => {
+        for (let s = from; s <= to; s += 4) {
+          lines.push(`${stamp(s)}Mock lyric line ${++n} — la la la (${title})`);
+        }
+      };
+      verse(12, 60);
+      lines.push(`${stamp(64)} `); // vocal-end marker → break 64s→84s
+      verse(84, 100);
+      verse(124, 156); // the un-marked gap before this verse estimates its hold
+      lines.push(`${stamp(160)} `); // vocal-end marker → outro to durationMs
       return { synced: lines.join("\n"), plain: null };
     }
     return lyricsLatestWins(() => invoke("media_lyrics", { artist, title, album, durationMs }));
+  },
+  /** Free-text track search (spotify.rs search_tracks) — the palette's
+   * result list. Debounce + latest-wins live with the caller. */
+  async spotifySearch(query: string, limit = 8): Promise<SearchResult> {
+    if (!IN_TAURI) {
+      if (!mockSpotifyConnected) return { status: "disconnected", tracks: [] };
+      const q = query.trim().toLowerCase();
+      const pool = [...MOCK_TRACKS, ...MOCK_SEARCH_EXTRAS];
+      const tracks = pool
+        .filter(
+          (t) => t.title.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q),
+        )
+        .slice(0, limit)
+        .map(mockQueueTrack);
+      // A breath of latency so the searching state is preview-visible.
+      await new Promise((r) => setTimeout(r, 180));
+      return { status: "ok", tracks };
+    }
+    return invoke<SearchResult>("spotify_search", { query, limit });
+  },
+  /** Dismiss the palette window (Esc / background click / post-play). */
+  paletteHide(): void {
+    if (IN_TAURI) void invoke("palette_hide");
+  },
+  /** Open the fullscreen focus takeover (focus.rs — creates the window,
+   * hides the widget via VisIntent). Mock: no window system — no-op; the
+   * focus UI itself is iterable at /?window=focus. */
+  focusOpen(): void {
+    if (IN_TAURI) void invoke("focus_open");
+  },
+  /** Close the takeover (Esc / collapse). Destroy-on-close; the Destroyed
+   * handler restores the widget to its exact prior intent. */
+  focusClose(): void {
+    if (IN_TAURI) void invoke("focus_close");
+  },
+  /** Fill up-next with Last.fm-similar tracks for the current track
+   * (similar.rs). Statuses: ok:<n> | no_matches | no_data | no_key | busy |
+   * disconnected | offline. Rows land incrementally via "upnext-changed". */
+  async moreLikeThis(title: string, artist: string): Promise<string> {
+    if (!IN_TAURI) {
+      void title;
+      void artist;
+      if (!mockSpotifyConnected) return "disconnected";
+      if (SIMILAR_FORCE) return SIMILAR_FORCE;
+      // Ring tracks not already queued arrive one at a time, mirroring the
+      // backend's per-add emits (the arrival-flash choreography's driver).
+      const current = mockQueueTrack(MOCK_TRACKS[mockTrack]).uri;
+      const candidates = MOCK_TRACKS.map(mockQueueTrack).filter(
+        (t) => t.uri !== current && !mockUpNext.some((q) => q.uri === t.uri),
+      );
+      candidates.forEach((t, i) => {
+        window.setTimeout(() => {
+          // Push-time dedupe, like the backend's per-add uris re-read.
+          if (mockUpNext.some((q) => q.uri === t.uri)) return;
+          mockUpNext.push(t);
+          mockUpNextChanged();
+        }, 300 * (i + 1));
+      });
+      await new Promise((r) => setTimeout(r, 300 * candidates.length + 150));
+      return candidates.length ? `ok:${candidates.length}` : "no_data";
+    }
+    return invoke<string>("more_like_this", { title, artist });
+  },
+  /** Search-resolve a uri for a history row that was never enriched
+   * (pre-enrichment entries, Apple Music listens). Null = no match. */
+  async spotifyResolveUri(title: string, artist: string): Promise<string | null> {
+    if (!IN_TAURI) {
+      if (!mockSpotifyConnected) return null;
+      // Ring tracks resolve to the mock scheme; anything else is a miss so
+      // the "Couldn't find it on Spotify" toast is preview-exercisable.
+      void artist;
+      const hit = MOCK_TRACKS.some((t) => t.title === title);
+      return hit ? `spotify:track:mock-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}` : null;
+    }
+    return invoke<string | null>("spotify_resolve_uri", { title, artist });
   },
 };
 

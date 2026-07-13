@@ -82,6 +82,15 @@ body {
   outline-offset: 2px;
 }
 
+/* The palette's search input is the pane's ONLY focusable element and is
+ * focused programmatically on every summon — the global ring (built for
+ * 28px buttons) pinned on it permanently as a square orange bar (Thien's
+ * live catch, twice). The caret is that input's focus signal. Same
+ * specificity as the global rule, later in the cascade — wins outright. */
+.palette-search:focus-visible {
+  outline: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -166,6 +175,13 @@ body {
  * the track-change doctrine. Reuses caption-in's keyframes. */
 .title-in {
   animation: caption-in 140ms var(--ease-out-tk) both;
+}
+
+/* Focus mode's arrival: the whole room fades in as one plane (200ms,
+ * opacity only — chrome gets no theater; the lyric cascade and the hero's
+ * own bloom are the arrival's only choreography). */
+.room-in {
+  animation: caption-in 200ms var(--ease-out-tk) both;
 }
 
 /* Caption fade for the big-art view's reserved slot ("Finding lyrics…" /

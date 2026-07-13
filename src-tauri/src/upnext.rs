@@ -156,7 +156,7 @@ pub fn tick(app: &AppHandle, np: &NowPlaying) {
     // via the reconcile read on the next genuine change.
     if np.player != "none" && np.status != "none" {
         let key = media::ident_key(&np.app_id, &np.title, &np.artist);
-        let (popped, want_reconcile) = {
+        let (popped, want_reconcile, changed) = {
             let mut inner = lock(&upnext);
             let same = inner.last_track.as_deref() == Some(key.as_str());
             // Same-key replay (repeat-one, or a re-queued copy of the
@@ -171,10 +171,10 @@ pub fn tick(app: &AppHandle, np: &NowPlaying) {
                 inner.last_raw_pos_ms = if np.position_at_ms > 0 { np.position_ms } else { 0 };
             }
             if same && !restarted {
-                (None, false)
+                (None, false, false)
             } else if jump_active {
                 inner.last_track = Some(key);
-                (None, false)
+                (None, false, false)
             } else if restarted {
                 // Repeat-one restarting an UNRELATED track keeps the fed
                 // item armed (it's still waiting in Spotify's queue — a
@@ -188,9 +188,9 @@ pub fn tick(app: &AppHandle, np: &NowPlaying) {
                             .find(|t| t.uri == fed_uri)
                             .is_some_and(|t| matches_track(np, t)) =>
                     {
-                        (Some(pop_fed(&mut inner, &fed_uri)), false)
+                        (Some(pop_fed(&mut inner, &fed_uri)), false, true)
                     }
-                    _ => (None, false),
+                    _ => (None, false, true),
                 }
             } else {
                 inner.last_track = Some(key);
@@ -204,7 +204,7 @@ pub fn tick(app: &AppHandle, np: &NowPlaying) {
                             .find(|t| t.uri == fed_uri)
                             .is_some_and(|t| matches_track(np, t)) =>
                     {
-                        (Some(pop_fed(&mut inner, &fed_uri)), false)
+                        (Some(pop_fed(&mut inner, &fed_uri)), false, true)
                     }
                     // A change to some OTHER track while a fed item is
                     // pending: it usually just means the user jumped around
@@ -213,8 +213,8 @@ pub fn tick(app: &AppHandle, np: &NowPlaying) {
                     // it can also mean the fed item was CONSUMED where we
                     // couldn't see (in-app skip, app downtime) and will
                     // never pop by playing — ask Spotify which it is.
-                    Some(_) => (None, true),
-                    None => (None, false),
+                    Some(_) => (None, true, true),
+                    None => (None, false, true),
                 }
             }
         };
@@ -223,6 +223,13 @@ pub fn tick(app: &AppHandle, np: &NowPlaying) {
         }
         if want_reconcile {
             request_reconcile(app);
+        }
+        // Every settled track change on a connected Spotify session stamps
+        // the new track's uri onto history's fresh candidate (spotify.rs
+        // enrich_now — one in-flight, off-thread). This is what makes
+        // history rows actionable without a later search round-trip.
+        if changed && np.player == "spotify" {
+            spotify::enrich_now(app);
         }
     }
 
@@ -344,6 +351,20 @@ fn mutate(app: &AppHandle, f: impl FnOnce(&mut Inner)) {
     emit_list(app, &list);
 }
 
+/// Current list uris, in order — similar.rs's dedupe read.
+pub fn uris(app: &AppHandle) -> Vec<String> {
+    let upnext = app.state::<UpNext>();
+    let inner = lock(&upnext);
+    inner.list.iter().map(|t| t.uri.clone()).collect()
+}
+
+/// Programmatic append (the more-like-this feeder) — the same emit+persist
+/// mutate path as the frontend's add, one item per call so rows arrive
+/// incrementally.
+pub fn append(app: &AppHandle, item: QueueTrack) {
+    mutate(app, |inner| inner.list.push(item));
+}
+
 /// Remove by uri (first occurrence). Public for play_now's queue-row path.
 pub fn remove(app: &AppHandle, uri: &str) {
     mutate(app, |inner| {
@@ -357,6 +378,87 @@ pub fn remove(app: &AppHandle, uri: &str) {
             inner.fed = None;
         }
     });
+}
+
+/// The frontend arms its own suppression when IT starts a jump; this event
+/// covers backend-initiated jumps (the queue-aware skip) so the pill's
+/// announcement still holds for intermediates and fires once on the target.
+#[derive(serde::Serialize, Clone)]
+struct JumpTarget {
+    title: String,
+    artist: String,
+}
+
+/// Queue-aware skip: a "next" pressed IN PULSE (transport button, the
+/// Ctrl+Alt+N hotkey) lands on the up-next front instead of falling through
+/// to the playlist — the mid-song skip was the one transition the feed-late
+/// model missed (feeding waits for the last ~15s precisely so remove/reorder
+/// keep working; a skip before that window meant Spotify had never been
+/// handed anything). Skips made inside the Spotify app still bypass the
+/// list — nothing can intercept those (matrix finding 11).
+///
+/// Returns true when the press was consumed (jump spawned, or one is
+/// already in flight — never stack skips); false = caller does a plain
+/// next. Cheap sync gates only; all HTTP on the blocking pool.
+pub fn try_queue_skip(app: &AppHandle) -> bool {
+    let upnext = app.state::<UpNext>();
+    let front = {
+        let inner = lock(&upnext);
+        match inner.list.first() {
+            Some(t) => t.clone(),
+            None => return false,
+        }
+    };
+    if !spotify::connected(app) || media::current_player() != "spotify" {
+        return false;
+    }
+    if spotify::jump_active(app) {
+        return true; // a jump is mid-flight — swallow the press
+    }
+    let _ = app.emit(
+        "spotify-jump",
+        JumpTarget { title: front.title.clone(), artist: front.artist.clone() },
+    );
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let upnext = app.state::<UpNext>();
+        // A feed POST may be mid-flight for this exact uri (the press often
+        // lands inside the feeder's <15s window): wait it out (bounded) so
+        // the jump's queue read sees the fed copy instead of appending a
+        // DUPLICATE that would play twice (quick-review catch, 2026-07-11).
+        let wait_until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while upnext.feed_in_flight.load(Ordering::SeqCst) && std::time::Instant::now() < wait_until
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Read the fed marker AFTER the wait — the feed just resolved it.
+        let was_fed = lock(&upnext).fed.as_deref() == Some(front.uri.as_str());
+        match spotify::play_now(&app, &front.uri) {
+            // Landed (verified): pop the front from Pulse's list. A FED
+            // front pops via tick's fed-match instead (racing it here could
+            // eat a duplicate entry) — this handles the unfed mid-song case.
+            "ok" | "partial" => {
+                if !was_fed {
+                    remove(&app, &front.uri);
+                }
+            }
+            // Skips happened but the landing is unconfirmed / another jump
+            // won the guard — do NOT add a plain skip on top. Suppression
+            // rides out its window (the outcome is genuinely uncertain).
+            "diverged" | "busy" => {}
+            // Nothing was skipped (unreachable, no playback, target gone):
+            // the user still asked for NEXT — deliver the plain one so the
+            // press never dead-ends, and CANCEL the armed suppression so
+            // that legitimate skip still announces (the frontend clears its
+            // own arming the same way on a failed play-now).
+            _ => {
+                let _ = app.emit("spotify-jump-cancel", ());
+                media::next();
+                crate::emit_now(&app);
+            }
+        }
+    });
+    true
 }
 
 // ---- commands ----

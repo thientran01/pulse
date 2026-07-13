@@ -1,9 +1,7 @@
-import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useIsPresent, useReducedMotion } from "motion/react";
 import type { MorphName } from "./icons/geometry";
 import { MorphIcon } from "./icons/MorphIcon";
-import { useSeekTick } from "./icons/useSeekTick";
-import { useSkipFlick } from "./icons/useSkipFlick";
 import { useBracketPulse } from "./icons/useBracketPulse";
 import {
   commands,
@@ -12,18 +10,34 @@ import {
   onNowPlaying,
   onPresence,
   onPresenceDebug,
+  onSpotifyJump,
+  onSpotifyJumpCancel,
   type DockCorner,
 } from "./lib/backend";
-import { currentLineIndex, msUntilNextLine, parseLrc, VOCAL_LEAD_MS, type LyricLine } from "./lib/lrc";
+import { VOCAL_LEAD_MS } from "./lib/lrc";
+import { PlayPauseButton, ProgressBar, Transport, useProgressDom } from "./Transport";
+import { LyricsPanel, lyricsKeyOf, useLyrics, type LyricsState } from "./LyricsPanel";
 import { extractAccent } from "./lib/palette";
 import * as posClock from "./lib/posClock";
 import { initReactive } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
+import {
+  armSuppression,
+  clearSuppression,
+  isAnnounceSuppressed,
+  POPOVER_GAP,
+  POPOVER_W,
+  QueuePanel,
+  useSpotifyStatus,
+} from "./Queue";
 import { SeparatorDot, Waveform } from "./Waveform";
-import { IN_TAURI, type NowPlaying, type PresenceDebug, type PresenceState } from "./types";
+import {
+  IN_TAURI,
+  type NowPlaying,
+  type PresenceDebug,
+  type PresenceState,
+} from "./types";
 
-// Keep in sync with SEEK_STEP_MS in src-tauri/src/lib.rs (global hotkeys).
-const SEEK_STEP_MS = 10_000;
 
 type Mode = "pill" | "card" | "expanded";
 
@@ -47,43 +61,6 @@ const MODE_SIZES: Record<Mode, [number, number]> = {
  * first-frame artifact). */
 const WINDOW_MAX: [number, number] = MODE_SIZES.expanded;
 
-
-function fmt(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-}
-
-/** Current lyric line by SCHEDULING, not sampling: one timeout armed for the
- * next line boundary, recomputed on every kernel anchor event (seek, pause,
- * track change, accepted push). On fire the index is re-derived from the
- * clock — never blind-incremented — so throttled webview timers can only
- * delay a transition, never derail it. Transitions land with timer precision
- * instead of on a 250ms sampling grid. */
-function useLyricIndex(lines: LyricLine[], leadMs: number): number {
-  const [idx, setIdx] = useState(() => currentLineIndex(lines, posClock.now(), leadMs));
-  useEffect(() => {
-    let timer: number | undefined;
-    const sync = () => {
-      window.clearTimeout(timer);
-      timer = undefined;
-      const pos = posClock.now();
-      const i = currentLineIndex(lines, pos, leadMs);
-      setIdx(i); // same value → React bails
-      if (!posClock.isPlaying()) return; // clock frozen — anchor event re-arms
-      const delay = msUntilNextLine(lines, i, pos, leadMs);
-      if (delay === null) return; // last line — nothing left to schedule
-      // Cap long waits and re-verify on fire, against timer throttling.
-      timer = window.setTimeout(sync, Math.min(delay, 30_000));
-    };
-    sync();
-    const unsubscribe = posClock.subscribe(sync);
-    return () => {
-      unsubscribe();
-      window.clearTimeout(timer);
-    };
-  }, [lines, leadMs]);
-  return idx;
-}
 
 /** Fields that change what the React tree shows — position fields excluded,
  * they live in posClock and would otherwise re-render the whole app per emit. */
@@ -171,316 +148,9 @@ function useHistoryThumb(artId: string | null): void {
   }, [artId]);
 }
 
-type LyricsState =
-  | { status: "loading" | "none" }
-  | { status: "synced"; lines: LyricLine[]; key: string };
-
-/** The track identity a lyric fetch is keyed on. Consumers compare a synced
- * state's stamped key against the CURRENT track's key before rendering —
- * useLyrics flips to "loading" one render after a track change, and that
- * one-render gap would otherwise pair the new track's header with the old
- * track's lines (and freeze that ghost into an exit animation). */
-function lyricsKeyOf(np: NowPlaying | null): string | null {
-  return np && np.player !== "none" && np.title && np.duration_ms > 0
-    ? `${np.artist}|${np.title}|${np.album}|${np.duration_ms}`
-    : null;
-}
-
-/** Fetch + parse synced lyrics per track; "none" is a definitive miss. */
-function useLyrics(np: NowPlaying | null): LyricsState {
-  const [state, setState] = useState<LyricsState>({ status: "none" });
-  const lastKey = useRef<string | null>(null);
-  const key = lyricsKeyOf(np);
-  useEffect(() => {
-    if (!key || !np) {
-      lastKey.current = null;
-      setState({ status: "none" });
-      return;
-    }
-    if (key === lastKey.current) return;
-    lastKey.current = key;
-    setState({ status: "loading" });
-    let alive = true;
-    void commands.lyrics(np.artist, np.title, np.album, np.duration_ms).then((l) => {
-      if (!alive || lastKey.current !== key) return;
-      // Cap far beyond any real song (~100 lines) — a pathological LRC file
-      // shouldn't turn into thousands of DOM nodes.
-      const lines = l.synced ? parseLrc(l.synced).slice(0, 600) : [];
-      setState(lines.length > 0 ? { status: "synced", lines, key } : { status: "none" });
-    });
-    return () => {
-      alive = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
-  return state;
-}
-
-/** Browsing hands control back three ways, fastest first: the "Now" chip
- * (instant), scrolling back toward the live line into the re-latch band
- * (instant), or wheel idle (this timeout — the fallback, not the only path,
- * so it can sit tighter than the old 3500ms). */
-const BROWSE_RESUME_MS = 2000;
-/** Fraction of the viewport height around the live offset that counts as
- * "back at now": a wheel tick that lands inside this band while moving
- * TOWARD the live line re-latches auto-follow immediately. Toward-only, so
- * the first tick of a browse (inside the band but moving away) still opens
- * a browse instead of being swallowed. Also the chip's visibility gate —
- * inside the band the live line is on screen and a chip would be noise. */
-const RELATCH_BAND = 0.5;
-
-/** Arrival cascade (index.css `.lyrics-entering`): rows radiate outward from
- * the current line. The step is per-row stagger spacing (like the settle
- * ladder's beat constants, it lives off the DUR scale deliberately — it's
- * spacing, not a duration); distance caps so far rows arrive together
- * instead of trailing forever. */
-const CASCADE_STEP_MS = 30;
-const CASCADE_CAP = 10;
-/** Head start so the art view's exhale clears before rows land. */
-const CASCADE_BASE_MS = 90; // DUR[1]
-/** base + cap*step + row animation (200ms) + slack; also bounds the anchor
- * marker's ignite — keep in sync with the 600ms transition-delay in
- * index.css. The class is removed only AFTER every row animation has
- * finished — ripping it off mid-cascade would snap fill-mode-held rows to
- * full opacity in one frame. */
-const ENTRANCE_DONE_MS = 800;
-
-/** One lyric line. Memoized so a line advance reconciles the two rows whose
- * `current` flipped instead of the whole list; clicks are delegated to the
- * list container via data-line, so rows carry no per-render closures. */
-const LyricLineRow = memo(function LyricLineRow({
-  text,
-  index,
-  current,
-  seekable,
-  cascadeDelayMs,
-  anchor,
-}: {
-  text: string;
-  index: number;
-  current: boolean;
-  seekable: boolean;
-  /** Stable per mount — distance from the line that was current when the
-   * panel mounted. Inert until the container carries .lyrics-entering. */
-  cascadeDelayMs: number;
-  /** The mount anchor: the ONLY row whose marker is held back for the
-   * closing ignite beat. Scoping the hold here (not to whatever row is
-   * current) means a mid-entrance line advance ignites the new row's marker
-   * instantly — no JS disarm, no engine-dependent delay retargeting. */
-  anchor: boolean;
-}) {
-  const Tag = seekable ? "button" : "div";
-  return (
-    <Tag
-      {...(seekable
-        ? {
-            type: "button" as const,
-            "data-line": index,
-            "aria-label": `Seek to ${text}`,
-            // Out of the tab order — dozens of lines would otherwise sit
-            // between the header and transport; keyboard seek lives on
-            // the progress slider.
-            tabIndex: -1,
-          }
-        : {})}
-      data-cascade
-      {...(anchor ? { "data-anchor": true } : {})}
-      style={{ "--cascade-delay": `${cascadeDelayMs}ms` } as React.CSSProperties}
-      className={`relative rounded-md px-3 py-1 text-left text-base leading-normal transition-colors duration-3 ease-out-tk ${
-        current ? "font-medium text-fg" : "text-muted/80"
-      } ${seekable ? "cursor-pointer hover:bg-fg/5" : ""}`}
-    >
-      {/* Accent lives on the marker, never the text (contrast floor is 3:1). */}
-      <span
-        aria-hidden
-        data-marker
-        // background-color joins opacity: an art-change retint must sweep the
-        // marker like every accent-painted surface (220ms EASE.out, the
-        // progress fills' retint timing) instead of snapping it.
-        className={`absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-accent [transition:opacity_200ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)] ${
-          current ? "opacity-100" : "opacity-0"
-        }`}
-      />
-      {text}
-    </Tag>
-  );
-});
-
-function LyricsPanel({
-  lines,
-  seekable,
-  leadMs,
-  entrance = false,
-}: {
-  lines: LyricLine[];
-  seekable: boolean;
-  leadMs: number;
-  /** True when this mount is a real within-expanded arrival (the user was
-   * watching the big-art fallback) — plays the anchor-outward cascade and
-   * holds the accent marker back as the closing beat. */
-  entrance?: boolean;
-}) {
-  const idx = useLyricIndex(lines, leadMs);
-  const viewportRef = useRef<HTMLDivElement>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-  const [autoOffset, setAutoOffset] = useState(0);
-  // Wheel-scrolling pauses auto-follow; it resumes via the "Now" chip,
-  // scrolling back into the re-latch band, or a short idle (see RELATCH_BAND
-  // / BROWSE_RESUME_MS).
-  const [manualOffset, setManualOffset] = useState<number | null>(null);
-  const resumeTimer = useRef<number | undefined>(undefined);
-
-  // The anchor line at mount — cascade delays radiate from it, stable across
-  // re-renders so a mid-entrance line advance can't reshuffle delays. The
-  // entrance ends by timeout only (after every row animation has finished);
-  // the marker-hold is scoped to the anchor row via data-anchor, so nothing
-  // needs disarming when the song advances mid-cascade.
-  const entranceIdx = useRef(idx);
-  const [entering, setEntering] = useState(entrance);
-  useEffect(() => {
-    if (!entering) return;
-    const t = window.setTimeout(() => setEntering(false), ENTRANCE_DONE_MS);
-    return () => window.clearTimeout(t);
-  }, [entering]);
-
-  // The mount anchor must not animate: the offsetTop/clientHeight reads in
-  // the layout effect force a reflow at translateY(0) BEFORE the offset
-  // lands, which arms the transform transition and slides the whole list
-  // ~hundreds of px on mount. Transition class only after the first paint.
-  const [anchored, setAnchored] = useState(false);
-  useEffect(() => setAnchored(true), []);
-
-  const maxOffset = (): number => {
-    const viewport = viewportRef.current;
-    const list = listRef.current;
-    if (!viewport || !list) return 0;
-    return Math.max(list.scrollHeight - viewport.clientHeight, 0);
-  };
-
-  // Anchor the current line 40% from the top via a compositor-friendly
-  // translate. Rounded — fractional offsets put text off the pixel grid.
-  useLayoutEffect(() => {
-    const viewport = viewportRef.current;
-    const list = listRef.current;
-    if (!viewport || !list) return;
-    const line = list.children[Math.max(idx, 0)] as HTMLElement | undefined;
-    if (!line) return;
-    const anchor = viewport.clientHeight * 0.4;
-    const raw = idx < 0 ? 0 : line.offsetTop + line.offsetHeight / 2 - anchor;
-    setAutoOffset(Math.round(Math.min(Math.max(raw, 0), maxOffset())));
-  }, [idx, lines]);
-
-  useEffect(() => () => window.clearTimeout(resumeTimer.current), []);
-
-  // Track change swaps `lines` — drop any in-progress browse so the new
-  // track doesn't render scrolled to the old track's arbitrary offset.
-  useEffect(() => {
-    setManualOffset(null);
-    window.clearTimeout(resumeTimer.current);
-  }, [lines]);
-
-  const browsing = manualOffset !== null;
-  const offset = manualOffset ?? autoOffset;
-  const band = (viewportRef.current?.clientHeight ?? 0) * RELATCH_BAND;
-  // Where "now" sits relative to the browse — drives the chip's edge/arrow.
-  const nowBelow = browsing && autoOffset > (manualOffset as number);
-
-  const relatch = () => {
-    setManualOffset(null);
-    window.clearTimeout(resumeTimer.current);
-  };
-
-  const onWheel = (e: React.WheelEvent) => {
-    const prev = manualOffset ?? autoOffset;
-    const next = Math.round(Math.min(Math.max(prev + e.deltaY, 0), maxOffset()));
-    // Magnetic re-latch: arriving inside the band while closing on the live
-    // line IS the resume gesture — no idle wait. (When not browsing, prev is
-    // autoOffset and the distance can only grow, so this never traps the
-    // opening tick.)
-    if (Math.abs(next - autoOffset) < Math.abs(prev - autoOffset) && Math.abs(next - autoOffset) <= band) {
-      relatch();
-      return;
-    }
-    setManualOffset(next);
-    window.clearTimeout(resumeTimer.current);
-    resumeTimer.current = window.setTimeout(() => setManualOffset(null), BROWSE_RESUME_MS);
-  };
-
-  return (
-    <div
-      ref={viewportRef}
-      onWheel={onWheel}
-      className="relative min-h-0 flex-1 overflow-hidden [mask-image:linear-gradient(transparent,black_28px,black_calc(100%-28px),transparent)]"
-      aria-label="Lyrics"
-    >
-      <div
-        ref={listRef}
-        onClick={(e) => {
-          if (!seekable) return;
-          const row = (e.target as HTMLElement).closest("[data-line]");
-          const line = row ? lines[Number(row.getAttribute("data-line"))] : undefined;
-          if (!line) return;
-          // Land the lead ahead of the line start: the highlight maps position
-          // p to the line whose t ≤ p + lead, so seeking to t itself flips the
-          // highlight to the successor whenever the gap to it is under the
-          // lead. [t - lead, next.t - lead) is the only interval guaranteed to
-          // highlight the clicked line — and the runway into the vocal is what
-          // a click-to-sing-along wants anyway. (The 0-clamp voids the
-          // guarantee for lines inside the first lead-width of the track —
-          // there is no earlier position to seek to; a neighboring intro line
-          // may highlight instead.)
-          commands.seekAbs(Math.max(line.t - leadMs, 0));
-          relatch(); // hand control back to auto-follow
-        }}
-        className={`flex flex-col gap-1 py-4 will-change-transform ${
-          browsing || !anchored ? "" : "[transition:transform_220ms_var(--ease-in-out-tk)]"
-        } ${entering ? "lyrics-entering" : ""}`}
-        style={{ transform: `translateY(${-offset}px)` }}
-      >
-        {lines.map((line, i) => (
-          <LyricLineRow
-            key={`${line.t}-${i}`}
-            text={line.text}
-            index={i}
-            current={i === idx}
-            seekable={seekable}
-            anchor={i === Math.max(entranceIdx.current, 0)}
-            cascadeDelayMs={
-              CASCADE_BASE_MS +
-              Math.min(Math.abs(i - Math.max(entranceIdx.current, 0)), CASCADE_CAP) * CASCADE_STEP_MS
-            }
-          />
-        ))}
-      </div>
-      {/* Return-to-now chip — neutral chrome (accent stays on the line
-       * marker), on the edge the live line sits past, outside the re-latch
-       * band only (inside it the line is on screen and a wheel-back
-       * re-latches anyway). 32px offsets clear the 28px mask fade. Exits
-       * plain with the browse, per the house transition rule. */}
-      {browsing && Math.abs((manualOffset as number) - autoOffset) > band && (
-        <button
-          type="button"
-          aria-label="Now — back to the current line"
-          onClick={relatch}
-          className={`absolute left-1/2 z-10 flex -translate-x-1/2 items-center rounded-full border border-border/10 bg-surface-2/90 p-1.5 leading-none text-muted [transition:color_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] [animation:caption-in_140ms_var(--ease-out-tk)_both] hover:text-fg active:scale-95 ${
-            nowBelow ? "bottom-8" : "top-8"
-          }`}
-        >
-          <svg
-            width="9"
-            height="9"
-            viewBox="0 0 10 10"
-            fill="none"
-            aria-hidden
-            className={nowBelow ? "" : "rotate-180"}
-          >
-            <path d="M2 3.5 5 6.5 8 3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </button>
-      )}
-    </div>
-  );
-}
+// LyricsState / lyricsKeyOf / useLyrics / useLyricIndex / LyricsPanel moved
+// to src/LyricsPanel.tsx (2026-07-11) so the focus window's realm imports
+// the lyric surface without importing the whole widget.
 
 /** Retint the accent layer from the current cover; house accent when absent. */
 function useArtAccent(artUrl: string | null): void {
@@ -501,49 +171,6 @@ function useArtAccent(artUrl: string | null): void {
     };
   }, [artUrl]);
 }
-
-function IconButton({
-  label,
-  onClick,
-  onPointerDown,
-  disabled,
-  size = "md",
-  children,
-}: {
-  label: string;
-  onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
-  onPointerDown?: (e: React.PointerEvent<HTMLButtonElement>) => void;
-  disabled?: boolean;
-  size?: "xs" | "sm" | "md";
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      title={label}
-      disabled={disabled}
-      onClick={onClick}
-      onPointerDown={onPointerDown}
-      // Press scale rides DUR[1] (ANIMATIONS_FROM_ZERO §6 — press feedback is
-      // 90ms) while hover bg and the disabled fade keep DUR[2]. Tailwind v4's
-      // scale-95 compiles to the native `scale` property, so that's the one
-      // the shorthand names.
-      className={`grid place-items-center rounded-md text-fg [transition:background-color_140ms_var(--ease-out-tk),opacity_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 active:scale-95 disabled:pointer-events-none disabled:opacity-40 ${
-        size === "xs" ? "h-6 w-6" : size === "sm" ? "h-7 w-7" : "h-8 w-8"
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
-
-const PLAYER_NAMES: Record<NowPlaying["player"], string> = {
-  apple_music: "Apple Music",
-  spotify: "Spotify",
-  other: "Media",
-  none: "",
-};
 
 /** Hover hold before the full-text tooltip shows — reading intent, not a
  * flyby. Native `title` waits about this long; this is the styled stand-in. */
@@ -807,10 +434,23 @@ const CORNER_SEAT: Record<DockCorner, string> = {
  * leaves on the clicked button, pinning the chrome open after the cursor
  * left (Thien, 2026-07-10). Mouse clicks don't set :focus-visible; Tab does.
  */
-function ModeCluster({ mode, onStep }: { mode: Mode; onStep: (d: -1 | 1) => void }) {
+function ModeCluster({
+  mode,
+  onStep,
+  queueOpen,
+}: {
+  mode: Mode;
+  onStep: (d: -1 | 1) => void;
+  queueOpen: boolean;
+}) {
   return (
     <div
-      className="pointer-events-none absolute bottom-[4px] right-[7px] z-20 flex items-center gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-data-[hot]/widget:pointer-events-auto group-data-[hot]/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100"
+      // The cluster stays revealed while the queue UI is open — the corner
+      // chrome holds as one band while the popover/surface is up, so the
+      // mode ladder stays reachable without re-earning the hover.
+      className={`pointer-events-none absolute bottom-[4px] right-[7px] z-20 flex items-center gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-data-[hot]/widget:pointer-events-auto group-data-[hot]/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100 ${
+        queueOpen ? "pointer-events-auto opacity-100" : ""
+      }`}
       // Swallow mousedown: pointer-events-none makes a DISABLED button
       // transparent to hit-testing, so without this a press on it (or the
       // 4px gap between the buttons) would fall through to the root drag
@@ -825,13 +465,79 @@ function ModeCluster({ mode, onStep }: { mode: Mode; onStep: (d: -1 | 1) => void
         disabled={mode === "pill"}
         onClick={() => onStep(-1)}
       />
+      {/* The ladder's fourth rung: from expanded, the expand verb keeps
+          going — into the fullscreen focus window (focus.rs). Focus is a
+          TRANSIENT window, not a mode: MODE_ORDER/pulse.mode never learn
+          about it, so a relaunch can never boot into it; Esc/collapse in
+          the focus window steps back here. */}
       <ModeButton
         to="expand"
-        label={mode === "pill" ? "Expand to card" : "Expand to lyrics"}
+        label={
+          mode === "pill"
+            ? "Expand to card"
+            : mode === "card"
+              ? "Expand to lyrics"
+              : "Expand to focus"
+        }
         slot="mode-primary"
-        disabled={mode === "expanded"}
-        onClick={() => onStep(1)}
+        onClick={() => {
+          if (mode === "expanded") commands.focusOpen();
+          else onStep(1);
+        }}
       />
+    </div>
+  );
+}
+
+/** The 11a queue toggle: opens the popover in pill/card, the queue surface
+ * in expanded — one open/closed bit, the garment follows the mode. Active
+ * wash while open, like the expanded view toggle's lyrics state. One
+ * component, two seats (QueueSeat bottom-left in card/expanded, the pill's
+ * hover scrim beside play/pause) so the affordance never drifts. */
+function QueueButton({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-label={open ? "Close queue" : "Open queue"}
+      title={open ? "Close queue" : "Open queue"}
+      aria-pressed={open}
+      onClick={onToggle}
+      className={`grid h-7 w-7 place-items-center rounded-md text-fg [transition:background-color_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 active:scale-95 ${
+        open ? "bg-fg/10" : ""
+      }`}
+    >
+      <MorphIcon name="queue" size={13} />
+    </button>
+  );
+}
+
+/**
+ * The queue seat: bottom-left corner, card + expanded only. Evicted from the
+ * bracket cluster (2026-07-11): the brackets are CONTAINER verbs — three
+ * seats crowded the corner and the pill's scrim seat was never re-derived
+ * against the wider cluster (a 23px queue-over-play/pause overlap) — while
+ * queue is a CONTENT surface, so it takes the corner the cluster's grammar
+ * leaves free. Both garments are 380 wide, so docked either bottom corner
+ * the seat holds its screen pixels across the card⇄expanded glide — the
+ * same fixed-point continuity the brackets get on the right. The pill has
+ * no free corner (bottom-left IS the album art, and a control overlaid on
+ * artwork loses to the contained-icon doctrine), so its queue seat rides
+ * the hover scrim beside play/pause instead — see the pill branch.
+ * Same contract as ModeCluster: shell coordinates on the 25px control
+ * centerline (bottom-[4px], mirrored left-[7px]), hidden at rest with the
+ * hover/focus-visible reveal, pinned open while the queue UI it opened is
+ * open (it hosts the control that closes it), mousedown swallowed so a
+ * press never falls through to the root drag handler.
+ */
+function QueueSeat({ queueOpen, onToggle }: { queueOpen: boolean; onToggle: () => void }) {
+  return (
+    <div
+      className={`pointer-events-none absolute bottom-[4px] left-[7px] z-20 opacity-0 transition-opacity duration-2 ease-out-tk group-data-[hot]/widget:pointer-events-auto group-data-[hot]/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100 ${
+        queueOpen ? "pointer-events-auto opacity-100" : ""
+      }`}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <QueueButton open={queueOpen} onToggle={onToggle} />
     </div>
   );
 }
@@ -890,233 +596,6 @@ function ViewToggle({
       >
         <MorphIcon name={glyph} size={13} slot="view-toggle" dur={DUR[3]} ease={EASE.inOut} />
       </button>
-    </div>
-  );
-}
-
-/** The marquee morph, fired optimistically on pointerdown — the morph IS the
- * press response (SMTC command bools lie; the next emit is the
- * reconciliation). Diff-suppressed emits mean a silently failed command never
- * sends a correcting payload, so a timeout falls back to the prop. */
-function PlayPauseButton({
-  playing,
-  iconSize = 18,
-  size = "md",
-}: {
-  playing: boolean;
-  iconSize?: number;
-  size?: "xs" | "sm" | "md";
-}) {
-  const [optimistic, setOptimistic] = useState<boolean | null>(null);
-  useEffect(() => setOptimistic(null), [playing]);
-  useEffect(() => {
-    if (optimistic === null) return;
-    const t = window.setTimeout(() => setOptimistic(null), 2000);
-    return () => window.clearTimeout(t);
-  }, [optimistic]);
-  const shown = optimistic ?? playing;
-  return (
-    <IconButton
-      size={size}
-      label={shown ? "Pause" : "Play"}
-      // Primary button only — a right/middle click or an aborted press never
-      // produces the click that fires the command, and the icon would sit
-      // wrong until the 2s fallback.
-      onPointerDown={(e) => e.button === 0 && setOptimistic(!shown)}
-      onClick={(e) => {
-        // Keyboard activation (e.detail === 0) never fires pointerdown —
-        // give Enter/Space the same optimistic morph pointer users get.
-        if (e.detail === 0) setOptimistic(!shown);
-        commands.playPause();
-      }}
-    >
-      <MorphIcon name={shown ? "pause" : "play"} size={iconSize} dur={DUR[2]} ease={EASE.out} />
-    </IconButton>
-  );
-}
-
-function SeekButton({
-  dir,
-  seekable,
-  player,
-  size,
-}: {
-  dir: -1 | 1;
-  seekable: boolean;
-  player: NowPlaying["player"];
-  size?: "xs" | "sm" | "md";
-}) {
-  const { scope, tick } = useSeekTick(dir);
-  return (
-    <IconButton
-      size={size}
-      label={
-        seekable
-          ? dir < 0
-            ? "Back 10 seconds"
-            : "Forward 10 seconds"
-          : `Seeking not supported by ${PLAYER_NAMES[player]}`
-      }
-      disabled={!seekable}
-      onPointerDown={(e) => e.button === 0 && void tick()}
-      onClick={(e) => {
-        if (e.detail === 0) void tick(); // keyboard gets the tick too
-        commands.seekRel(dir * SEEK_STEP_MS);
-      }}
-    >
-      <span ref={scope} className="grid place-items-center will-change-transform">
-        <MorphIcon name={dir < 0 ? "seekBack" : "seekFwd"} size={17} />
-      </span>
-    </IconButton>
-  );
-}
-
-/** rAF driver shared by the progress surfaces: writes the fill's scaleX every
- * ~90ms (every frame while scrubbing) and the elapsed label + slider aria only
- * on integer-second changes — position never enters React state (the Waveform
- * pattern). Paused frames cost one compare; a hidden window stops rAF cold.
- * React never renders the rAF-owned transform/aria/label, so re-renders can't
- * reset them to stale values. */
-function useProgressDom(
-  durationMs: number,
-  active: boolean,
-  bar: React.RefObject<HTMLDivElement | null>,
-  fill: React.RefObject<HTMLDivElement | null>,
-  time?: React.RefObject<HTMLSpanElement | null>,
-  drag?: React.RefObject<number | null>,
-): void {
-  useLayoutEffect(() => {
-    let raf = 0;
-    let last = 0;
-    let lastFrac = -1;
-    let lastSec = -1;
-    const write = () => {
-      const dragFrac = drag?.current ?? null;
-      const pos = dragFrac !== null ? dragFrac * durationMs : posClock.now();
-      const frac = durationMs > 0 ? Math.min(pos / durationMs, 1) : 0;
-      if (fill.current && Math.abs(frac - lastFrac) > 0.0004) {
-        lastFrac = frac;
-        fill.current.style.transform = `scaleX(${frac})`;
-      }
-      const sec = Math.floor(pos / 1000);
-      if (sec !== lastSec) {
-        lastSec = sec;
-        if (time?.current) time.current.textContent = fmt(pos);
-        bar.current?.setAttribute("aria-valuenow", String(Math.round(pos)));
-        bar.current?.setAttribute("aria-valuetext", `${fmt(pos)} of ${fmt(durationMs)}`);
-      }
-    };
-    write(); // before first paint — the fill has NO baseline style (see JSX)
-    if (!active) {
-      // Frozen clock: no loop at all (the pre-PR paused cost was zero, keep
-      // it zero). Kernel notifications repaint paused seeks/scrubs.
-      return posClock.subscribe(write);
-    }
-    const loop = (t: number) => {
-      raf = requestAnimationFrame(loop);
-      // ~10fps is plenty for playback; every frame while scrubbing.
-      if (drag?.current == null && t - last < 90) return;
-      last = t;
-      write();
-    };
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  }, [durationMs, active, bar, fill, time, drag]);
-}
-
-function ProgressBar({ np }: { np: NowPlaying }) {
-  const barRef = useRef<HTMLDivElement>(null);
-  const fillRef = useRef<HTMLDivElement>(null);
-  const timeRef = useRef<HTMLSpanElement>(null);
-  // While dragging, the bar tracks the pointer; the seek commits on release.
-  // Mirrored into a ref so the rAF loop reads it without effect churn.
-  const [dragFrac, setDragFrac] = useState<number | null>(null);
-  const dragRef = useRef<number | null>(null);
-  dragRef.current = dragFrac;
-  const seekable = np.can_seek && np.duration_ms > 0;
-  useProgressDom(
-    np.duration_ms,
-    np.status === "playing" || dragFrac !== null,
-    barRef,
-    fillRef,
-    timeRef,
-    dragRef,
-  );
-
-  const fracFromPointer = (clientX: number): number => {
-    const r = barRef.current!.getBoundingClientRect();
-    return Math.min(Math.max((clientX - r.left) / r.width, 0), 1);
-  };
-
-  return (
-    <div className="flex items-center gap-2">
-      {/* No JSX children: the rAF driver owns this text (a rendered child
-          would let drag re-renders clobber the drag-preview time). The
-          pre-paint write() populates it at mount. */}
-      {/* Hug width: the elapsed label's left edge sits flush on the album
-          cover's left edge. tabular-nums keeps the width stable within a
-          digit count, so the track edge only moves at e.g. 9:59→10:00. */}
-      <span ref={timeRef} className="text-[11px] leading-4 tabular-nums text-muted" />
-      <div
-        ref={barRef}
-        role={seekable ? "slider" : "progressbar"}
-        aria-label="Track position"
-        aria-valuemin={0}
-        aria-valuemax={np.duration_ms}
-        tabIndex={seekable ? 0 : -1}
-        onKeyDown={(e) => {
-          if (!seekable) return;
-          if (e.key === "ArrowLeft") commands.seekRel(-5000);
-          if (e.key === "ArrowRight") commands.seekRel(5000);
-          if (e.key === "Home") commands.seekAbs(0);
-          if (e.key === "End") commands.seekAbs(np.duration_ms);
-        }}
-        onPointerDown={(e) => {
-          if (!seekable || !barRef.current) return;
-          try {
-            e.currentTarget.setPointerCapture(e.pointerId);
-          } catch {
-            // Pointer already gone (e.g. released between events) — a plain
-            // click-to-seek still commits via onPointerUp.
-          }
-          setDragFrac(fracFromPointer(e.clientX));
-        }}
-        onPointerMove={(e) => {
-          if (dragFrac === null || !barRef.current) return;
-          setDragFrac(fracFromPointer(e.clientX));
-        }}
-        onPointerUp={() => {
-          if (dragFrac === null) return;
-          commands.seekAbs(Math.round(dragFrac * np.duration_ms));
-          setDragFrac(null);
-        }}
-        onPointerCancel={() => setDragFrac(null)}
-        className={`group relative h-3 flex-1 touch-none ${seekable ? "cursor-pointer" : ""}`}
-      >
-        <div
-          className={`absolute inset-x-0 top-1/2 -translate-y-1/2 overflow-hidden rounded-full bg-fg/10 transition-[height] duration-2 ease-out-tk ${
-            dragFrac !== null ? "h-[5px]" : seekable ? "h-[3px] group-hover:h-[5px]" : "h-[3px]"
-          }`}
-        >
-          {/* Fill scales on the compositor instead of animating width (layout).
-              The rAF driver's pre-paint write() styles this before the first
-              frame, so it needs NO baseline — and must have none: a Tailwind
-              scale-x-0 class compiles to the native CSS `scale` property in
-              v4, which MULTIPLIES with the driver's inline transform and
-              pinned this fill at zero width forever (found live 2026-07-08);
-              an inline style baseline would let drag re-renders clobber the
-              driver's writes (the PR-3 label lesson). */}
-          <div
-            ref={fillRef}
-            className={`h-full w-full origin-left rounded-full bg-accent will-change-transform ${
-              dragFrac === null
-                ? "[transition:transform_90ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]"
-                : "[transition:background-color_220ms_var(--ease-out-tk)]"
-            }`}
-          />
-        </div>
-      </div>
-      <span className="text-[11px] leading-4 tabular-nums text-muted">{fmt(np.duration_ms)}</span>
     </div>
   );
 }
@@ -1184,64 +663,6 @@ function Art({ url, size, radiusPx }: { url: string | null; size: number; radius
   );
 }
 
-/** Prev/next with the pass-through flick (useSkipFlick): a masked strip of
- * three glyph copies — the live one plus ghosts parked at ±width, which the
- * hook's wrap-on-mash frame-identity depends on. The mask is the glyph's own
- * 16px box, so the wipe happens inside the button and never brushes the
- * neighboring seek button. */
-function SkipButton({ dir, size }: { dir: -1 | 1; size?: "xs" | "sm" | "md" }) {
-  const { scope, tick } = useSkipFlick(dir, 16);
-  const glyph = dir < 0 ? "prev" : "next";
-  return (
-    <IconButton
-      size={size}
-      label={dir < 0 ? "Previous track" : "Next track"}
-      onPointerDown={(e) => e.button === 0 && void tick()}
-      onClick={(e) => {
-        if (e.detail === 0) void tick(); // keyboard gets the flick too
-        (dir < 0 ? commands.prev : commands.next)();
-      }}
-    >
-      <span className="grid h-4 w-4 place-items-center overflow-hidden">
-        <span ref={scope} className="relative grid place-items-center will-change-transform">
-          <MorphIcon name={glyph} size={16} />
-          <span aria-hidden className="absolute right-full top-0 grid">
-            <MorphIcon name={glyph} size={16} />
-          </span>
-          <span aria-hidden className="absolute left-full top-0 grid">
-            <MorphIcon name={glyph} size={16} />
-          </span>
-        </span>
-      </span>
-    </IconButton>
-  );
-}
-
-/** compact = the card's bottom row: 24px buttons on an 8px gap. Expanded
- * keeps the 32px/4px transport — both center in a full-width bottom row. */
-function Transport({
-  np,
-  seekable,
-  playing,
-  compact = false,
-}: {
-  np: NowPlaying;
-  seekable: boolean;
-  playing: boolean;
-  compact?: boolean;
-}) {
-  const size = compact ? "xs" : "md";
-  return (
-    <div className={`flex items-center ${compact ? "gap-2" : "gap-1"}`}>
-      <SkipButton size={size} dir={-1} />
-      <SeekButton size={size} dir={-1} seekable={seekable} player={np.player} />
-      <PlayPauseButton size={size} playing={playing} />
-      <SeekButton size={size} dir={1} seekable={seekable} player={np.player} />
-      <SkipButton size={size} dir={1} />
-    </div>
-  );
-}
-
 /** How soon after entering expanded a lyrics resolve still counts as "already
  * there": inside this window the swap renders plain (no arrival cascade), so
  * the inner choreography never stacks on the mode morph's tail. */
@@ -1251,10 +672,6 @@ const SNAP_WINDOW_MS = 300;
  * shouldn't sit under the metadata forever. The reserved slot keeps its
  * height, so the fade moves nothing. */
 const NO_LYRICS_CAPTION_MS = 4000;
-/** Entrance delay on the entering view so the exit visibly leads — the
- * overlap reads as one gesture (off the DUR scale deliberately: it's an
- * offset between beats, not a duration). */
-const EXIT_LEAD_MS = 40;
 
 /**
  * Expanded mode: big-art fallback while lyrics fetch, karaoke view once they
@@ -1277,12 +694,21 @@ function ExpandedView({
   lyrics,
   seekable,
   playing,
+  queueOpen,
+  onCloseQueue,
+  spotifyConnected,
 }: {
   np: NowPlaying;
   artUrl: string | null;
   lyrics: LyricsState;
   seekable: boolean;
   playing: boolean;
+  /** The 11a queue surface, layered over whichever of art/lyrics shows.
+   * Chrome (progress/transport/toggles) lives outside the surface and
+   * never moves during the swap. */
+  queueOpen: boolean;
+  onCloseQueue: () => void;
+  spotifyConnected: boolean;
 }) {
   const reducedMotion = useReducedMotion();
   // Key-stamped gate: never render the new track's header over the old
@@ -1343,129 +769,158 @@ function ExpandedView({
     return () => window.clearTimeout(t);
   }, [lyrics.status, trackKey]);
 
-  const swap = {
-    initial: reducedMotion ? {} : { opacity: 0 },
-    animate: { opacity: 1, filter: "blur(0px)" },
-    transition: {
-      duration: reducedMotion ? 0 : DUR[3] / 1000,
-      delay: reducedMotion ? 0 : EXIT_LEAD_MS / 1000,
-      ease: [...EASE.out] as [number, number, number, number],
-    },
-  };
-  const exitFast = {
-    duration: reducedMotion ? 0 : DUR[2] / 1000,
-    ease: [...EASE.out] as [number, number, number, number],
-  };
+  // Which of the three peer views owns the surface. They crossfade IN PLACE
+  // under a fixed header — switching content, never a panel over a panel.
+  const active: "lyrics" | "album" | "queue" = queueOpen
+    ? "queue"
+    : showLyrics
+      ? "lyrics"
+      : "album";
+  // The header is shown for lyrics + queue (identical markup, so crossing
+  // between them never moves it); the album view is the one headerless
+  // surface (its big cover is the identity), so the header fades only there.
+  const headerShown = active !== "album";
+
+  // Peer-layer visibility: opaque, same footprint, OPACITY-ONLY crossfade —
+  // in 200ms / out 140ms EASE.out, visibility deferred past the fade so a
+  // hidden layer neither eats clicks nor ghosts. No scale/transform: a scale
+  // exhale reads as a panel opening and lets the layer behind peek at the
+  // edges (both were live bugs, 2026-07-12). `inert` drops the inactive
+  // layers from hit-testing and the a11y tree. (prefers-reduced-motion is
+  // handled by the global transition kill in index.css.)
+  const layer = (on: boolean): string =>
+    on
+      ? "opacity-100 [transition:opacity_200ms_var(--ease-out-tk)]"
+      : "invisible opacity-0 [transition:opacity_140ms_var(--ease-out-tk),visibility_0s_140ms]";
 
   return (
     // pb-0.5 (+ the shell's 1px border) seats the h-8 transport row's center
     // on the 25px control centerline (see ModeCluster) — 2px less than the
     // card's pb-1 because this transport row is 4px taller.
     <div className="relative flex h-full flex-col gap-2 px-3 pb-0.5 pt-3">
+      {/* The content surface: one box, three peer views (lyrics · album ·
+          queue) crossfading IN PLACE beneath a fixed header — only which
+          layer is opaque changes, so a swap reads as switching content, never
+          a panel sliding over (the queue used to be a scale-overlay: it read
+          as a panel opening AND let the view behind peek at the edges). */}
       <div className="relative min-h-0 flex-1">
-        <AnimatePresence initial={false}>
-          {showLyrics ? (
-            <motion.div
-              // Keyed per TRACK: a fast resolve landing inside the previous
-              // lyrics view's 140ms exit window would otherwise re-adopt the
-              // exiting fiber — stale LyricsPanel state (entrance, anchored
-              // transition) would animate a slide to the new track's offset.
-              key={`lyrics:${lyrics.key}`}
-              {...swap}
-              // pointerEvents dies at exit start — a stray click during the
-              // reverse fade must not seek the NEW track to a dead line.
-              exit={{ opacity: 0, pointerEvents: "none", transition: exitFast }}
-              className="absolute inset-0 flex flex-col gap-2"
-            >
-              {/* pr-8 clears the hover-revealed ViewToggle seat — a long
-                  title/artist must not run under the incoming button. */}
-              <div className="flex items-center gap-2.5 pr-8">
-                <Art url={artUrl} size={44} radiusPx={6} />
-                <div className="min-w-0 flex-1">
-                  {/* The living instance rides the TITLE, matching the card
-                      and the pill — the capsules are a now-playing pulse and
-                      belong to the song, one grammar across views (Thien,
-                      2026-07-10). Flex row, not inline flow: a long title
-                      truncates in its own box while the waveform keeps its
-                      seat right after the clipped text — inline, it rode the
-                      string's full width into the clip edge. ml-1 on top of
-                      the waveform's mx-1.5 = the same 10px gap as the card. */}
-                  <div className="flex min-w-0 items-center">
-                    <TruncateTip text={np.title} className="text-[15px] font-medium text-fg" />
-                    <span className="ml-1 flex shrink-0 items-center">
-                      <Waveform size="md" trailing />
-                    </span>
-                  </div>
-                  <TruncateTip text={np.artist} className="text-[13px] text-muted" />
-                </div>
-              </div>
-              <LyricsPanel
-                lines={lyrics.lines}
-                seekable={seekable}
-                leadMs={VOCAL_LEAD_MS[np.player]}
-                entrance={celebrate}
-              />
-            </motion.div>
-          ) : (
-            <motion.div
-              key="art"
-              {...swap}
-              // The art dissolves IN PLACE — the house exit language (blur +
-              // opacity, zero transforms; the art never moves, even to leave).
-              exit={{
-                opacity: 0,
-                filter: reducedMotion ? "blur(0px)" : "blur(1.5px)",
-                transition: exitFast,
-              }}
-              className="absolute inset-0 flex flex-col items-center justify-center gap-3"
-            >
-              <Art url={artUrl} size={190} radiusPx={12} />
-              <div className="min-w-0 self-stretch text-center">
-                <p className="truncate text-sm font-medium text-fg">{np.title}</p>
-                <p className="truncate text-xs text-muted">
-                  {np.artist}
-                  {np.album && <SeparatorDot />}
-                  {np.album}
-                </p>
-                {/* Height-reserved caption slot: the caption fading in must
-                    not re-center the column and shift the art (it did — every
-                    lyrics miss nudged the 190px cover ~7px). "Finding
-                    lyrics…" waits 400ms so fast fetches never flash it, and
-                    turns the eventual arrival into an answered question. The
-                    miss caption fades back out once read (captionExpired) —
-                    the disabled toggle seat keeps carrying the answer;
-                    aria-hidden goes with it, since opacity 0 alone would
-                    leave AT announcing a caption sighted users can't see. */}
-                <p className="mt-0.5 h-[15px] text-[10px] text-muted">
-                  {lyrics.status !== "synced" && (
-                    <span
-                      key={lyrics.status}
-                      aria-hidden={captionExpired || undefined}
-                      className={`inline-block ${
-                        captionExpired
-                          ? "animate-[caption-out_260ms_var(--ease-out-tk)_both]"
-                          : `animate-[caption-in_200ms_var(--ease-out-tk)_both] ${
-                              lyrics.status === "loading" ? "[animation-delay:400ms]" : ""
-                            }`
-                      }`}
-                    >
-                      {lyrics.status === "loading" ? "Finding lyrics…" : "No synced lyrics"}
-                    </span>
-                  )}
-                </p>
-              </div>
-              {/* The living separator at hero size, filling the dead zone
-                  between the metadata and the transport. The metadata line
-                  above keeps a static middot so the reactive surface isn't
-                  on screen twice. mt-3 centers it in that dead zone: the
-                  fixed 380x440 window plus this centered column puts half
-                  the margin back below, landing ~24px on both sides. */}
-              <div className="mt-3">
-                <Waveform size="lg" />
-              </div>
-            </motion.div>
+        {/* Fixed now-playing header — ABSOLUTE, so it never reflows the bodies
+            (a flex-flow header shifted the album column ~50px on every swap:
+            the "content starts ~20px down then jumps up" bug). Carries the one
+            living md waveform. Shown for lyrics + queue (headerShown holds
+            across that swap, so it doesn't even fade); fades only for the
+            album view. pr-8 clears the hover-revealed ViewToggle seat. */}
+        <div
+          inert={!headerShown}
+          className={`absolute inset-x-0 top-0 z-10 flex items-center gap-2.5 pr-8 ${layer(headerShown)}`}
+        >
+          <Art url={artUrl} size={44} radiusPx={6} />
+          <div className="min-w-0 flex-1">
+            {/* The living instance rides the TITLE, matching the card and the
+                pill — the capsules are a now-playing pulse and belong to the
+                song (Thien, 2026-07-10). Flex row, not inline flow: a long
+                title truncates in its own box while the waveform keeps its
+                seat right after the clipped text. ml-1 over the waveform's
+                mx-1.5 = the same 10px gap as the card. */}
+            <div className="flex min-w-0 items-center">
+              <TruncateTip text={np.title} className="text-[15px] font-medium text-fg" />
+              {/* Mounted only while the header shows — one living Waveform per
+                  state (doctrine: one reactive surface per view). In the album
+                  view the lg hero is that surface; leaving both always-mounted
+                  ran two rAF/bands loops at once. lastAlive carries the bloom
+                  state across this mount/unmount, so the album toggle doesn't
+                  re-bloom the capsules from the dot. */}
+              {headerShown && (
+                <span className="ml-1 flex shrink-0 items-center">
+                  <Waveform size="md" trailing />
+                </span>
+              )}
+            </div>
+            <TruncateTip text={np.artist} className="text-[13px] text-muted" />
+          </div>
+        </div>
+
+        {/* Lyrics view — pt-[52px] clears the fixed header. Keyed per track so
+            a change re-anchors fresh instead of sliding the old offset. */}
+        <div
+          inert={active !== "lyrics"}
+          className={`absolute inset-0 flex flex-col bg-surface pt-[52px] ${layer(active === "lyrics")}`}
+        >
+          {lyricsLive && (
+            <LyricsPanel
+              key={lyrics.key}
+              lines={lyrics.lines}
+              seekable={seekable}
+              leadMs={VOCAL_LEAD_MS[np.player]}
+              entrance={celebrate}
+            />
           )}
-        </AnimatePresence>
+        </div>
+
+        {/* Album view — big cover centered in the full box (headerless, no pt);
+            the identity when lyrics are off or missing. Absolute inset-0, so it
+            never reflows regardless of the header's presence. */}
+        <div
+          inert={active !== "album"}
+          className={`absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface ${layer(active === "album")}`}
+        >
+          <Art url={artUrl} size={190} radiusPx={12} />
+          <div className="min-w-0 self-stretch text-center">
+            <p className="truncate text-sm font-medium text-fg">{np.title}</p>
+            <p className="truncate text-xs text-muted">
+              {np.artist}
+              {np.album && <SeparatorDot />}
+              {np.album}
+            </p>
+            {/* Height-reserved caption slot: the caption fading in must not
+                re-center the column and shift the art (it did — every lyrics
+                miss nudged the 190px cover ~7px). "Finding lyrics…" waits
+                400ms so fast fetches never flash it; the miss caption fades
+                back out once read (captionExpired), aria-hidden going with it
+                so AT doesn't announce a caption sighted users can't see. */}
+            <p className="mt-0.5 h-[15px] text-[10px] text-muted">
+              {lyrics.status !== "synced" && (
+                <span
+                  key={lyrics.status}
+                  aria-hidden={captionExpired || undefined}
+                  className={`inline-block ${
+                    captionExpired
+                      ? "animate-[caption-out_260ms_var(--ease-out-tk)_both]"
+                      : `animate-[caption-in_200ms_var(--ease-out-tk)_both] ${
+                          lyrics.status === "loading" ? "[animation-delay:400ms]" : ""
+                        }`
+                  }`}
+                >
+                  {lyrics.status === "loading" ? "Finding lyrics…" : "No synced lyrics"}
+                </span>
+              )}
+            </p>
+          </div>
+          {/* The living separator at hero size, filling the dead zone between
+              the metadata and the transport. The metadata line keeps a static
+              middot so the reactive surface isn't on screen twice. Mounted
+              only while the album view is active — one living Waveform per
+              state (the header's md carries lyrics + queue); lastAlive bridges
+              the mount so the toggle doesn't re-bloom it from the dot. */}
+          {active === "album" && (
+            <div className="mt-3">
+              <Waveform size="lg" />
+            </div>
+          )}
+        </div>
+
+        {/* Queue view — the same fixed header sits above it; the list is the
+            body. Was an always-mounted scale-overlay (that read as a panel
+            opening, and the .98 exhale let the view behind peek at the edges);
+            now a peer layer that crossfades like the others, still always
+            mounted so scroll position and the history feed survive the swap. */}
+        <div
+          inert={active !== "queue"}
+          onMouseDown={(e) => e.stopPropagation()}
+          className={`absolute inset-0 flex flex-col bg-surface pt-[52px] ${layer(active === "queue")}`}
+        >
+          <QueuePanel np={np} connected={spotifyConnected} open={queueOpen} />
+        </div>
       </div>
       {/* Hoisted chrome, like progress/transport below: the toggle keeps its
           seat while the content it switches crossfades under it. Glyph and
@@ -1473,20 +928,47 @@ function ExpandedView({
           miss states key on status === "none" (not !== "synced"): during a
           track change there's a one-render gap where the OLD track's synced
           state hasn't flipped to loading yet (see lyricsKeyOf), and mapping
-          it to micOff would kick a spurious slash morph on every skip. */}
+          it to micOff would kick a spurious slash morph on every skip.
+          11a: the note seat is the ONLY lyrics entry — from the queue
+          surface it EXITS to lyrics (or art when none are synced). */}
       <ViewToggle
-        glyph={lyricsLive ? (showLyrics ? "note" : "mic") : lyrics.status === "none" ? "micOff" : "mic"}
-        label={
-          lyricsLive
-            ? showLyrics
-              ? "Show album cover"
-              : "Show lyrics"
-            : lyrics.status === "none"
-              ? "No synced lyrics"
-              : "Finding lyrics…"
+        glyph={
+          queueOpen
+            ? lyricsLive
+              ? "mic"
+              : "note"
+            : lyricsLive
+              ? showLyrics
+                ? "note"
+                : "mic"
+              : lyrics.status === "none"
+                ? "micOff"
+                : "mic"
         }
-        disabled={!lyricsLive}
-        onToggle={toggleView}
+        label={
+          queueOpen
+            ? lyricsLive
+              ? "Show lyrics"
+              : "Show album cover"
+            : lyricsLive
+              ? showLyrics
+                ? "Show album cover"
+                : "Show lyrics"
+              : lyrics.status === "none"
+                ? "No synced lyrics"
+                : "Finding lyrics…"
+        }
+        disabled={!queueOpen && !lyricsLive}
+        onToggle={() => {
+          if (queueOpen) {
+            // Exit the queue surface toward lyrics (the note seat's promise);
+            // with none synced the art base is what's underneath anyway.
+            if (lyricsLive && view !== "lyrics") toggleView();
+            onCloseQueue();
+            return;
+          }
+          toggleView();
+        }}
       />
       {/* Hoisted chrome: one seat for both states. Progress sits ABOVE the
           transport (handoff order) so the transport is the very-bottom row —
@@ -1573,16 +1055,20 @@ let lastPillKey: string | null = null;
  * the pill re-creates the DOM with the same key — no beat). */
 function TrackFadeSpan({
   k,
+  suppress = false,
   className,
   children,
 }: {
   k: string | null;
+  /** A play_now jump's intermediate flicker — real remount, no announcement
+   * (the target's own mount animates normally; see isAnnounceSuppressed). */
+  suppress?: boolean;
   className?: string;
   children: React.ReactNode;
 }) {
   // Captured once at mount, BEFORE the commit effect below records the new
   // key — exactly "was this mount a change".
-  const [animate] = useState(() => k !== null && lastPillKey !== null && k !== lastPillKey);
+  const [animate] = useState(() => !suppress && k !== null && lastPillKey !== null && k !== lastPillKey);
   useEffect(() => {
     lastPillKey = k;
   }, [k]);
@@ -1618,6 +1104,27 @@ function App() {
   const playing = np?.status === "playing";
   // AM can't seek over SMTC (support matrix) — buttons gate on capability.
   const seekable = !!np?.can_seek;
+
+  // The queue UI (11a): ONE open/closed bit; the garment follows the mode
+  // (popover over pill/card, content surface inside expanded), so state is
+  // shared across the ladder and never reset by resizing — the continuity
+  // rule for free. Closed when no session (the cluster that opens it is
+  // hidden then too).
+  const [queueOpen, setQueueOpen] = useState(false);
+  useEffect(() => {
+    if (nothing) setQueueOpen(false);
+  }, [nothing]);
+  const spotify = useSpotifyStatus();
+  const spotifyConnected = spotify.connected;
+  // Jump-intermediate suppression for the pill's announcement layer.
+  const announceSuppressed = isAnnounceSuppressed(np);
+  // Backend-initiated jumps (the queue-aware skip: transport next /
+  // Ctrl+Alt+N landing on the up-next front) arm the same suppression the
+  // frontend's own play-now does — one announcement, on the target — and
+  // clear it when the backend fell back to a plain skip (that legitimate
+  // change must announce).
+  useEffect(() => onSpotifyJump(armSuppression), []);
+  useEffect(() => onSpotifyJumpCancel(clearSuppression), []);
 
   // Which work-area corner the window docks to (dock.rs owns the derivation;
   // bottom-right until it reports). ModeContent pins the content plane there.
@@ -1740,8 +1247,21 @@ function App() {
   // dead zone would not be. hitCommanded keeps interrupted shrinks honest
   // (the winCommanded lesson from the snap era).
   const hitCommanded = useRef<[number, number] | null>(null);
+  // The popover extends the interactive footprint past the mode box — the
+  // hit rect must union it while open or its clicks fall through to the
+  // desktop (the worst failure class in this app). Height derived from the
+  // real 440px window: shell inset (6) + gap (12) + popover + inset (6).
+  const popoverVisible = queueOpen && mode !== "expanded" && !nothing;
   useEffect(() => {
-    const [w1, h1] = MODE_SIZES[mode];
+    const [mw, mh] = MODE_SIZES[mode];
+    const popH = Math.min(330, WINDOW_MAX[1] - mh - POPOVER_GAP);
+    // Popover extent from the docked corner: the 6px near-side inset + its
+    // box (NOT the full 12px both-sides gutter — a fatter rect would let the
+    // widget capture a 6px band of desktop past the popover's far edge).
+    const w1 = popoverVisible ? Math.max(mw, POPOVER_W + SHELL_GUTTER_PX / 2) : mw;
+    const h1 = popoverVisible
+      ? Math.min(WINDOW_MAX[1], mh + SHELL_GUTTER_PX / 2 + popH)
+      : mh;
     const [cw, ch] = hitCommanded.current ?? [w1, h1];
     const uw = Math.max(w1, cw);
     const uh = Math.max(h1, ch);
@@ -1758,7 +1278,7 @@ function App() {
       );
     }
     return () => window.clearTimeout(timer);
-  }, [mode, reducedMotion]);
+  }, [mode, reducedMotion, popoverVisible]);
 
   const morph = {
     // Opacity ONLY — no scale. The shell's size glide is the mode swap's
@@ -1894,13 +1414,25 @@ function App() {
                   ladder — collapse, gray re-multiply, accent igniting last
                   in the NEW album's color. */}
               <p className="min-w-0 flex-1 truncate text-xs font-medium text-fg">
-                <TrackFadeSpan key={`t:${lyricsKeyOf(np)}`} k={lyricsKeyOf(np)}>
+                <TrackFadeSpan
+                  key={`t:${lyricsKeyOf(np)}`}
+                  k={lyricsKeyOf(np)}
+                  suppress={announceSuppressed}
+                >
                   {np.title}
                 </TrackFadeSpan>
-                <Waveform trailing={!np.artist} announceKey={lyricsKeyOf(np) ?? undefined} />
+                {/* A play_now jump's intermediates don't announce — the
+                    separator would run five drain/ignite ladders for tracks
+                    the user only skipped through; the TARGET's arrival
+                    announces once, normally (isAnnounceSuppressed). */}
+                <Waveform
+                  trailing={!np.artist}
+                  announceKey={announceSuppressed ? undefined : (lyricsKeyOf(np) ?? undefined)}
+                />
                 <TrackFadeSpan
                   key={`a:${lyricsKeyOf(np)}`}
                   k={lyricsKeyOf(np)}
+                  suppress={announceSuppressed}
                   className="font-normal text-muted"
                 >
                   {np.artist}
@@ -1908,26 +1440,44 @@ function App() {
               </p>
               <PillTime np={np} />
             </div>
-            {/* Scrim + play/pause, revealed on hover. Absolute over the row so
-                nothing reflows; the gradient lets the artist text fade UNDER
-                the incoming control. 180px wide, play/pause ending 76px from
-                the shell right edge — an 8px gap before the corner cluster.
-                Stops 2px above the bottom so the progress hairline stays lit.
-                Also reveals on keyboard focus (has-[:focus-visible], not
-                focus-within — see ModeCluster; play/pause stays tabbable the
-                whole time, and a mouse click's residual focus must not pin
-                the scrim open, quick-review catch 2026-07-08 / Thien
-                2026-07-10). */}
+            {/* Scrim + [queue][play/pause], revealed on hover. Absolute over
+                the row so nothing reflows; the gradient lets the artist text
+                fade UNDER the incoming controls. 200px wide with the solid
+                stop at 30%, so the surface fill is fully opaque from 140px
+                in — PAST the queue seat's far edge (136): both buttons sit
+                on solid ground and the ramp (140→200) stays a real fade.
+                Re-derived twice 2026-07-11: the old 76px play/pause seat was
+                computed against a two-bracket cluster (11a's third cluster
+                seat overlapped it by 23px), and the old 180px/45% gradient
+                was tuned for ONE button — its opaque zone ended at 99px,
+                short of the queue seat (quick-review catch). Play/pause ends
+                76px from the shell right edge — 9px before the two-bracket
+                cluster's reach (7 + 28 + 4 + 28 = 67) — and the queue seat
+                sits gap-1 to its left, ending 108px in: the pill has no
+                free corner for QueueSeat (bottom-left IS the album art), so
+                queue joins the grammar the pill already owns, everything in
+                the right-edge reveal, spaced on the cluster's own 4px
+                rhythm. Stops 2px above the bottom so the progress hairline
+                stays lit. Also reveals on keyboard focus
+                (has-[:focus-visible], not focus-within — see ModeCluster;
+                play/pause stays tabbable the whole time, and a mouse click's
+                residual focus must not pin the scrim open, quick-review
+                catch 2026-07-08 / Thien 2026-07-10), and pins open while the
+                pill's queue popover is up — it hosts the control that
+                closes it. */}
             <div
-              className="pointer-events-none absolute bottom-0.5 right-0 top-0 flex w-[180px] items-center justify-end pr-[76px] opacity-0 transition-opacity duration-2 ease-out-tk group-data-[hot]/widget:pointer-events-auto group-data-[hot]/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100"
-              style={{ background: "linear-gradient(90deg, transparent, rgb(var(--surface) / 0.96) 45%)" }}
+              className={`pointer-events-none absolute bottom-0.5 right-0 top-0 flex w-[200px] items-center justify-end gap-1 pr-[76px] opacity-0 transition-opacity duration-2 ease-out-tk group-data-[hot]/widget:pointer-events-auto group-data-[hot]/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100 ${
+                queueOpen ? "pointer-events-auto opacity-100" : ""
+              }`}
+              style={{ background: "linear-gradient(90deg, transparent, rgb(var(--surface) / 0.96) 30%)" }}
               // Swallow mousedown, same reason as ModeCluster: pointer-events
-              // only turns on for the 180px scrim, but the button inside it
-              // doesn't fill that box — a press that lands on the gradient
-              // padding instead of the 28px button would otherwise fall
+              // only turns on for the 180px scrim, but the buttons inside it
+              // don't fill that box — a press that lands on the gradient
+              // padding instead of a 28px button would otherwise fall
               // through to the root's onDragStart and move the window.
               onMouseDown={(e) => e.stopPropagation()}
             >
+              <QueueButton open={queueOpen} onToggle={() => setQueueOpen((o) => !o)} />
               <PlayPauseButton size="sm" iconSize={16} playing={playing} />
             </div>
             {/* Non-interactive progress hairline — still announced to AT. */}
@@ -1983,17 +1533,62 @@ function App() {
             lyrics={lyrics}
             seekable={seekable}
             playing={playing}
+            queueOpen={queueOpen}
+            onCloseQueue={() => setQueueOpen(false)}
+            spotifyConnected={spotifyConnected}
           />
         )}
         </ModeContent>
         </motion.div>
       </AnimatePresence>
       {/* Inside the persistent shell but OUTSIDE the content swap: the shell
-          never fades, so the cluster never fades with content — and seated
-          on the shell it tracks the visible box in every dock corner and
-          every mode of the fixed-size window. See ModeCluster. */}
-      {!nothing && <ModeCluster mode={mode} onStep={stepMode} />}
+          never fades, so the corner chrome never fades with content — and
+          seated on the shell it tracks the visible box in every dock corner
+          and every mode of the fixed-size window. See ModeCluster/QueueSeat.
+          The queue seat skips the pill (its queue toggle rides the hover
+          scrim instead — the pill's bottom-left corner is the album art). */}
+      {!nothing && (
+        <>
+          {mode !== "pill" && (
+            <QueueSeat queueOpen={queueOpen} onToggle={() => setQueueOpen((o) => !o)} />
+          )}
+          <ModeCluster mode={mode} onStep={stepMode} queueOpen={queueOpen} />
+        </>
+      )}
       </div>
+      {/* The 11a queue popover — the pill/card garment, floating ABOVE the
+          shell inside the never-resizing window (never inside it: the shell
+          clips). Right-aligned to the docked corner's side; opens away from
+          the shell (above when docked bottom, below when docked top — the
+          prototype only modeled bottom-right). Its `bottom`/`top` ride the
+          mode resize on the shell's own 200ms EASE.inOut so it glides with
+          the garment change; reveal is 140ms opacity with visibility
+          deferred (always mounted — the scroll position and history feed
+          survive closing). Max height re-derived from the REAL 440px window
+          (prototype frame was 520): pill 330, card 296. While open, the hit
+          rect unions this box (see the footprint effect above). */}
+      {!nothing && (
+        <div
+          inert={!popoverVisible}
+          onMouseDown={(e) => e.stopPropagation()}
+          className={`absolute z-30 flex flex-col rounded-xl border border-border/10 bg-surface p-1.5 shadow-xl shadow-black/40 ${
+            corner.endsWith("right") ? "right-1.5" : "left-1.5"
+          } ${
+            popoverVisible
+              ? "visible opacity-100 [transition:opacity_140ms_var(--ease-out-tk),top_200ms_var(--ease-in-out-tk),bottom_200ms_var(--ease-in-out-tk)]"
+              : "invisible opacity-0 [transition:opacity_140ms_var(--ease-out-tk),top_200ms_var(--ease-in-out-tk),bottom_200ms_var(--ease-in-out-tk),visibility_0s_140ms]"
+          }`}
+          style={{
+            width: POPOVER_W,
+            maxHeight: Math.min(330, WINDOW_MAX[1] - MODE_SIZES[mode][1] - POPOVER_GAP),
+            ...(corner.startsWith("bottom")
+              ? { bottom: MODE_SIZES[mode][1] - SHELL_GUTTER_PX + 6 + POPOVER_GAP }
+              : { top: MODE_SIZES[mode][1] - SHELL_GUTTER_PX + 6 + POPOVER_GAP }),
+          }}
+        >
+          <QueuePanel np={np} connected={spotifyConnected} open={popoverVisible} />
+        </div>
+      )}
       {/* Broken-art detector — OUTSIDE the mode-keyed subtree so the data URL
           isn't re-decoded on every mode switch, only per track. */}
       {artUrl && artUrl !== brokenArtUrl && (
