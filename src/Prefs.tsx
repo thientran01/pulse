@@ -32,6 +32,7 @@ import {
   onSpotifyStatus,
   type HotkeyInfo,
 } from "./lib/backend";
+import { chordCaps, tokenCap } from "./lib/chords";
 
 const SECTIONS = ["connectors", "hotkeys", "playback", "general", "about", "data"] as const;
 type Section = (typeof SECTIONS)[number];
@@ -51,30 +52,7 @@ const CAP_STYLE = `
 .prefs-scroll::-webkit-scrollbar-thumb { background: rgb(var(--fg)/0.10); border-radius: 999px; }
 `;
 
-// ---- chord <-> keycap helpers -------------------------------------------
-
-const MOD_LABEL: Record<string, string> = { ctrl: "Ctrl", alt: "Alt", shift: "Shift", super: "Win" };
-const KEY_LABEL: Record<string, string> = {
-  left: "←",
-  right: "→",
-  up: "↑",
-  down: "↓",
-  space: "Space",
-  enter: "Enter",
-};
-
-/** One accelerator token → its keycap glyph. */
-function tokenCap(t: string): string {
-  if (MOD_LABEL[t]) return MOD_LABEL[t];
-  if (KEY_LABEL[t]) return KEY_LABEL[t];
-  if (/^f\d{1,2}$/.test(t)) return t.toUpperCase();
-  return t.length === 1 ? t.toUpperCase() : t;
-}
-
-/** A Tauri accelerator ("ctrl+alt+k") → its keycaps (["Ctrl","Alt","K"]). */
-function chordCaps(chord: string): string[] {
-  return chord ? chord.split("+").map(tokenCap) : [];
-}
+// ---- capture-side key mapping (display helpers moved to lib/chords.ts) ----
 
 const MOD_CODES = new Set([
   "ControlLeft",
