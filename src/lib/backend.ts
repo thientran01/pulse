@@ -645,6 +645,15 @@ export const commands = {
   setHitSize(width: number, height: number): void {
     if (IN_TAURI) void invoke("set_hit_size", { width, height });
   },
+  /** Hide the widget (the right-click menu's "Hide Palette") — a dedicated
+   * hide through the intent path, not a toggle. */
+  hideWidget(): void {
+    if (IN_TAURI) void invoke("hide_widget");
+  },
+  /** Quit the app (the right-click menu's "Quit Palette"). */
+  quitApp(): void {
+    if (IN_TAURI) void invoke("quit_app");
+  },
   playPause(): void {
     if (IN_TAURI) {
       void invoke("media_play_pause");
