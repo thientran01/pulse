@@ -19,9 +19,11 @@ import { MorphIcon } from "./icons/MorphIcon";
 import {
   commands,
   onHistoryAppended,
+  onSettingsChanged,
   onSpotifyStatus,
   onUpNextChanged,
 } from "./lib/backend";
+import { SpotifyConnectButton } from "./SpotifyConnectButton";
 import type { HistoryEntry, NowPlaying, QueueTrack, SpotifyStatus } from "./types";
 
 const HISTORY_PAGE = 30;
@@ -448,6 +450,25 @@ export function QueuePanel({
   const spotifyActive = np?.player === "spotify";
   const queueLive = connected && spotifyActive;
 
+  // more-like-this is HIDDEN without a Last.fm key (not a clickable dead-end
+  // that answers with a toast). Default hidden until the check resolves — a
+  // control that appears is calmer than one that flashes then vanishes — and
+  // re-checked when the key changes (adding one in Prefs un-hides it live).
+  const [hasKey, setHasKey] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    void commands.lastfmHasKey().then((k) => {
+      if (alive) setHasKey(k);
+    });
+    const un = onSettingsChanged(({ key }) => {
+      if (key === "lastfm_api_key") void commands.lastfmHasKey().then(setHasKey);
+    });
+    return () => {
+      alive = false;
+      un();
+    };
+  }, []);
+
   // Quiet chip feedback (sentence case, middots, no exclamation marks).
   // holdMs covers multi-second operations (the more-like-this run): the
   // progress toast outlives the default clear and its completion toast
@@ -731,11 +752,12 @@ export function QueuePanel({
     if (el && el.scrollTop + el.clientHeight > el.scrollHeight - 120) loadMore();
   };
 
-  const gateCaption = !connected
-    ? "Queue works with Spotify — connect from the tray"
-    : !spotifyActive
-      ? "Queue works while Spotify is playing"
-      : null;
+  // Connected-but-inactive still narrates (the list persists across players;
+  // queued rows vanishing on an Apple Music switch would read as data loss).
+  // Disconnected becomes an in-place Connect button (below) — never a "connect
+  // from the tray" dead-end. `gated` = the queue isn't live, either way.
+  const gateProse = connected && !spotifyActive ? "Queue works while Spotify is playing" : null;
+  const gated = !connected || !spotifyActive;
 
   return (
     <div
@@ -755,31 +777,40 @@ export function QueuePanel({
           {toast}
         </span>
         {/* More-like-this: fills the list with Last.fm-similar tracks for
-            the CURRENT track — seated where its output lands. The seat never
-            unmounts (the ViewToggle rule: nothing to hunt for, nothing
-            shifts) — it disables in place when the queue gate is closed or a
-            run is in flight; a missing Last.fm key answers as a toast on
-            click, not a status plumb. */}
-        <button
-          type="button"
-          aria-label={np?.title ? `More like ${np.title}` : "More like this"}
-          title={np?.title ? `More like ${np.title}` : "More like this"}
-          aria-disabled={!queueLive || !np?.title || seeding || undefined}
-          onClick={moreLikeThis}
-          className={`grid h-[26px] w-[26px] shrink-0 place-items-center rounded-md [transition:color_140ms_var(--ease-out-tk),background-color_140ms_var(--ease-out-tk),opacity_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] ${
-            !queueLive || !np?.title || seeding
-              ? "pointer-events-none text-muted opacity-30"
-              : "text-fg hover:bg-fg/10 active:scale-95"
-          }`}
-        >
-          {SparkleGlyph}
-        </button>
+            the CURRENT track — seated where its output lands. HIDDEN without a
+            Last.fm key (an enabled button whose only answer is "add a key" is a
+            dead-end, 1.0 ship-blocker); with a key it disables in place when
+            the queue gate is closed or a run is in flight. */}
+        {hasKey && (
+          <button
+            type="button"
+            aria-label={np?.title ? `More like ${np.title}` : "More like this"}
+            title={np?.title ? `More like ${np.title}` : "More like this"}
+            aria-disabled={!queueLive || !np?.title || seeding || undefined}
+            onClick={moreLikeThis}
+            className={`grid h-[26px] w-[26px] shrink-0 place-items-center rounded-md [transition:color_140ms_var(--ease-out-tk),background-color_140ms_var(--ease-out-tk),opacity_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] ${
+              !queueLive || !np?.title || seeding
+                ? "pointer-events-none text-muted opacity-30"
+                : "text-fg hover:bg-fg/10 active:scale-95"
+            }`}
+          >
+            {SparkleGlyph}
+          </button>
+        )}
       </div>
-      {/* The gate NARRATES instead of hiding: Pulse's list persists across
+      {/* The gate NARRATES instead of hiding: the list persists across
           players/connection, and queued rows vanishing on an Apple Music
           switch would read as data loss. remove/reorder stay live (they're
-          local ops); only feed/play depend on Spotify. */}
-      {gateCaption && <p className="m-0 px-2 pb-1 text-xs text-muted">{gateCaption}</p>}
+          local ops); only feed/play depend on Spotify. Disconnected offers an
+          in-place Connect (the tray is no longer the only path). */}
+      {!connected ? (
+        <div className="flex flex-col items-start gap-1 px-2 pb-1.5 pt-0.5">
+          <SpotifyConnectButton />
+          <p className="m-0 text-[11px] text-muted/70">Up next &amp; playback need Spotify.</p>
+        </div>
+      ) : gateProse ? (
+        <p className="m-0 px-2 pb-1 text-xs text-muted">{gateProse}</p>
+      ) : null}
       <div
         ref={zoneRef}
         role="list"
@@ -788,7 +819,7 @@ export function QueuePanel({
           ghost?.over ? "border-accent/55 bg-accent/5" : "border-transparent"
         }`}
       >
-        {rows.length === 0 && !gateCaption && (
+        {rows.length === 0 && !gated && (
           <p className="m-0 px-2 py-2 text-xs text-muted">
             Queue is empty — press + on a track below or drag one here.
           </p>
