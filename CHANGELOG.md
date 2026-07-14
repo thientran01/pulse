@@ -8,7 +8,9 @@ Installed apps self-update at launch, so most users are always on the latest rel
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- Renamed the app to **Palette**; the `Ctrl+Alt+S` summon-search is now **Search**.
 
 ## [0.7.1] - 2026-07-13
 
