@@ -394,7 +394,7 @@ impl Inner {
         // Fill-to-limit, newest→oldest: skip non-music rows and keep scanning
         // rather than taking a fixed window, so a page short of `limit` means
         // "reached the start" — the exhausted signal both consumers rely on
-        // (Palette RESURFACE scan, Queue loadMore). Deliberately uncapped: the
+        // (Search RESURFACE scan, Queue loadMore). Deliberately uncapped: the
         // cursor advances past the oldest RETURNED row each loadMore, so rows
         // above it are never re-read — total work is O(index) across a full
         // scroll, not per-call. A scan cap would be wrong here: returning
@@ -421,7 +421,7 @@ impl Inner {
     }
 }
 
-/// Music gate for the READ surfaces (palette + queue). Conservative: only a
+/// Music gate for the READ surfaces (search + queue). Conservative: only a
 /// POSITIVE video/image kind is dropped, so a music app that mislabels its
 /// PlaybackType as Unknown is never lost. "" is the pre-feature legacy row
 /// (no media_kind persisted) — those fall back to the player bucket, which
@@ -462,7 +462,7 @@ pub async fn history_page(
 /// in-memory index — and drop any in-flight candidate so it can't re-append
 /// the track the user just erased. Non-destructive to anything else in
 /// app-data (settings, tokens, up-next). Emits "history-cleared" so live feed
-/// surfaces (queue/palette) can reset. Returns false only if app-data was
+/// surfaces (queue/search) can reset. Returns false only if app-data was
 /// never resolved (history disabled this run).
 #[tauri::command]
 pub async fn clear_history(app: AppHandle) -> bool {

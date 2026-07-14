@@ -160,18 +160,18 @@ function pushMockSpotify(connected: boolean): void {
   mockSpotifyListeners.forEach((cb) => cb(mockStatus()));
 }
 
-/** The palette window was just summoned (palette.rs show) — the webview
+/** The search window was just summoned (search.rs show) — the webview
  * refocuses its input and recomputes the resurfacing rows. Mock: never fires
- * (a plain-browser palette is always "shown"). */
-export function onPaletteShown(cb: () => void): () => void {
+ * (a plain-browser search window is always "shown"). */
+export function onSearchShown(cb: () => void): () => void {
   if (!IN_TAURI) return () => {};
-  const un = listen("palette-shown", () => cb());
+  const un = listen("search-shown", () => cb());
   return () => {
     un.then((f) => f());
   };
 }
 
-/** Extra searchable fixtures beyond the ring so the mock palette has more
+/** Extra searchable fixtures beyond the ring so the mock search window has more
  * than three answers; their uris aren't in the ring, so playing one
  * exercises the "gone" failure path deliberately. */
 const MOCK_SEARCH_EXTRAS = [
@@ -270,7 +270,7 @@ export function onUpNextChanged(cb: (list: QueueTrack[]) => void): () => void {
 }
 
 /** Fires when play history is wiped (prefs Data → Clear play history). Live
- * feed surfaces (queue/palette) reset on it. Mock: never fires. */
+ * feed surfaces (queue/search) reset on it. Mock: never fires. */
 export function onHistoryCleared(cb: () => void): () => void {
   if (!IN_TAURI) return () => {};
   const un = listen("history-cleared", () => cb());
@@ -558,7 +558,7 @@ const MOCK_HOTKEYS: HotkeyInfo[] = [
   { id: "next", label: "Next track", chord: "ctrl+alt+n", registered: true },
   { id: "prev", label: "Previous track", chord: "ctrl+alt+p", registered: true },
   { id: "showhide", label: "Show / hide Palette", chord: "ctrl+alt+m", registered: true },
-  { id: "palette", label: "Summon palette", chord: "ctrl+alt+s", registered: true },
+  { id: "search", label: "Summon search", chord: "ctrl+alt+s", registered: true },
 ];
 
 /** Mutable browser-mock settings state so the prefs UI's toggles/segments and
@@ -869,7 +869,7 @@ export const commands = {
     }
     return lyricsLatestWins(() => invoke("media_lyrics", { artist, title, album, durationMs }));
   },
-  /** Free-text track search (spotify.rs search_tracks) — the palette's
+  /** Free-text track search (spotify.rs search_tracks) — the search window's
    * result list. Debounce + latest-wins live with the caller. */
   async spotifySearch(query: string, limit = 8): Promise<SearchResult> {
     if (!IN_TAURI) {
@@ -888,9 +888,9 @@ export const commands = {
     }
     return invoke<SearchResult>("spotify_search", { query, limit });
   },
-  /** Dismiss the palette window (Esc / background click / post-play). */
-  paletteHide(): void {
-    if (IN_TAURI) void invoke("palette_hide");
+  /** Dismiss the search window (Esc / background click / post-play). */
+  searchHide(): void {
+    if (IN_TAURI) void invoke("search_hide");
   },
   /** Open the fullscreen focus takeover (focus.rs — creates the window,
    * hides the widget via VisIntent). Mock: no window system — no-op; the

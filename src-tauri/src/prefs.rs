@@ -1,13 +1,13 @@
 /*
  * The preferences window (Milestone C) — Pulse's third webview, on the proven
- * multi-window pattern (palette.rs pioneered it, focus.rs reuses it). UNLIKE
- * the widget/palette (chromeless, transparent, always-on-top, click-through)
+ * multi-window pattern (search.rs pioneered it, focus.rs reuses it). UNLIKE
+ * the widget/search window (chromeless, transparent, always-on-top, click-through)
  * this is a NORMAL desktop window: opaque, frameless, 720×560, non-resizable,
  * NOT always-on-top, in the taskbar/Alt-Tab. It opens rarely, so it is
- * CREATE-ON-OPEN + DESTROY-ON-CLOSE (focus.rs's lifecycle, not palette's
+ * CREATE-ON-OPEN + DESTROY-ON-CLOSE (focus.rs's lifecycle, not the search window's
  * create-once-hidden — no reason to hold a third resident webview).
  *
- * Multi-window invariants this window inherits (grep anchors, see palette.rs):
+ * Multi-window invariants this window inherits (grep anchors, see search.rs):
  * capabilities/default.json lists "prefs" (a missing label = ZERO IPC,
  * silently); window-state's denylist excludes it (it recenters on the cursor
  * monitor per open, never restores a stale position); dock's Moved forwarding
@@ -70,7 +70,7 @@ pub fn open(app: &AppHandle, section: Option<String>) {
         Ok(win) => {
             // Kill the Win11 accent-colored window border DWM draws around a
             // frameless opaque window (a stray blue hairline). Mirrors
-            // palette.rs's DWMWA_TRANSITIONS_FORCEDISABLED call: get the HWND,
+            // search.rs's DWMWA_TRANSITIONS_FORCEDISABLED call: get the HWND,
             // set the attribute, ignore the HRESULT.
             #[cfg(windows)]
             if let Ok(hwnd) = win.hwnd() {

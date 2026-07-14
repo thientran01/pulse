@@ -14,11 +14,11 @@ It reads and controls any player that speaks the Windows system media API (GSMTC
 - **±10s seek** where the player supports it (Spotify natively; see player support below)
 - **Four-corner docking** with free placement — drag anywhere, a corner magnet snaps it home, and it stays out of the way
 - **Fullscreen focus-mode takeover** — a room-scale now-playing view with lyrics or the visualizer
-- **Summon search palette** (`Ctrl+Alt+S`) — search and play, queue, or resurface tracks from history
+- **Search** (`Ctrl+Alt+S`) — search and play, queue, or resurface tracks from history
 - **Managed up-next queue + play history** — a Palette-kept queue and a full log of everything it displayed
 - **"More like this"** discovery from the current track
 - **Hide on fullscreen** — a courtesy conceal that ducks the widget out of games and fullscreen video, then restores it exactly
-- **Global hotkeys** for transport, seek, show/hide, and the palette
+- **Global hotkeys** for transport, seek, show/hide, and search
 - **Self-updating installer** — installed copies check for updates at launch and update themselves
 
 ## Install
@@ -40,7 +40,7 @@ That's a one-time prompt — SmartScreen won't warn again once the app is instal
 | `Ctrl+Alt+←` / `Ctrl+Alt+→` | Seek −10s / +10s |
 | `Ctrl+Alt+N` / `Ctrl+Alt+P` | Next / previous track |
 | `Ctrl+Alt+M` | Show / hide the widget |
-| `Ctrl+Alt+S` | Summon the search palette |
+| `Ctrl+Alt+S` | Summon search |
 
 Transport commands route to whatever Windows considers the current media session — which it re-points to whichever app played most recently.
 
@@ -61,7 +61,7 @@ The core widget works for **everyone, with zero setup** — now-playing, play/pa
 
 A few power features are Spotify-powered and opt-in. Connect Spotify from the tray to unlock:
 
-- the palette's play-now and queue actions,
+- Search's play-now and queue actions,
 - the managed up-next queue,
 - "more like this" discovery,
 - play-now from history.

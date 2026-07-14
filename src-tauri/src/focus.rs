@@ -6,7 +6,7 @@
  * intent (VisIntent.focus_open composes into effective_visible; the flag is
  * memory-only, so a relaunch can never boot into focus).
  *
- * Create-on-open, destroy-on-close — unlike the palette's create-once
+ * Create-on-open, destroy-on-close — unlike the search window's create-once
  * (summon latency matters there; a deliberate takeover can afford the
  * cold-create, masked by the frontend's arrival fade), and destroy keeps
  * the lifecycle state impossible to corrupt. The label-filtered Destroyed
@@ -17,7 +17,7 @@
  * This is the doctrine-legal reincarnation of what the removed P3
  * ambient-grow was groping toward: the same "bigger surface while I'm
  * around but not driving" want, INVOKED deliberately instead of guessed
- * from idle timers. It inherits the palette's multi-window seams
+ * from idle timers. It inherits the search window's multi-window seams
  * (capabilities label, window-state denylist, Moved guard, per-window
  * reactive votes) and adds the two gates that windows born after "main"
  * need: the media loop's `visible` and the audio capture switch both widen
@@ -54,7 +54,7 @@ pub async fn focus_open(app: AppHandle) {
     )
     .title("Palette Focus")
     .decorations(false)
-    // UNLIKE the widget/palette (chromeless floating surfaces that skip the
+    // UNLIKE the widget/search window (chromeless floating surfaces that skip the
     // taskbar), focus mode is a fullscreen view the user actively works in
     // and Alt+Tabs away from — it MUST stay in the taskbar + Alt+Tab
     // switcher. With skip_taskbar it dropped behind whatever you switched to

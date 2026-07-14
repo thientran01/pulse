@@ -1,16 +1,16 @@
 /*
- * The summon palette — Pulse's FIRST second window (multi-window pioneer;
+ * The summon search — Pulse's FIRST second window (multi-window pioneer;
  * focus mode reuses these seams). Created ONCE, hidden, at setup: WebView2
  * cold-creation costs hundreds of ms, and a summon hotkey that lags is a
  * dead feature. Show = center high on the CURSOR's monitor (the summon's
  * context) + focus; hide = plain hide; blur (lib.rs's Focused(false)
- * handler) and Esc (frontend → palette_hide) both dismiss.
+ * handler) and Esc (frontend → search_hide) both dismiss.
  *
  * Visibility here is deliberately OUTSIDE lib.rs's VisIntent /
  * apply_visibility — that composition owns the MAIN window's intent
- * (manual hide vs conceal); the palette has exactly two states and this
+ * (manual hide vs conceal); the search window has exactly two states and this
  * module is its one show/hide owner (the grep rule's second, window-scoped
- * ledger). The palette never joins the dock/corner system, the hit
+ * ledger). The search window never joins the dock/corner system, the hit
  * watcher, or the presence conceal: it is a normal focusable window that
  * exists only while summoned.
  *
@@ -22,11 +22,11 @@
  */
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
-pub const LABEL: &str = "palette";
+pub const LABEL: &str = "search";
 /// Born at this logical size, never resized (house rule). The webview keeps
 /// a shadow gutter inside it; the visible shell is smaller. Sized between
 /// Raycast and the first cut's 560×420 (Thien's live call, 2026-07-12 —
-/// "too small and hard to read"); the type/row scale in Palette.tsx steps
+/// "too small and hard to read"); the type/row scale in Search.tsx steps
 /// up with it.
 const W: f64 = 680.0;
 const H: f64 = 520.0;
@@ -37,11 +37,11 @@ pub fn init(app: &AppHandle) {
     let result = WebviewWindowBuilder::new(
         app,
         LABEL,
-        // The query routes main.tsx to the Palette root — same param works
+        // The query routes main.tsx to the Search root — same param works
         // in a plain browser for mock iteration.
-        WebviewUrl::App("index.html?window=palette".into()),
+        WebviewUrl::App("index.html?window=search".into()),
     )
-    .title("Pulse Palette")
+    .title("Palette — Search")
     .inner_size(W, H)
     .decorations(false)
     .transparent(true)
@@ -76,7 +76,7 @@ pub fn init(app: &AppHandle) {
             }
         }
         Err(e) => {
-            log::error!("palette: window create failed ({e}) — summon disabled this run");
+            log::error!("search: window create failed ({e}) — summon disabled this run");
         }
     }
 }
@@ -111,7 +111,7 @@ pub fn show(app: &AppHandle) {
     let _ = win.set_focus();
     // The webview re-focuses its input, select-alls the stale query, and
     // recomputes the resurfacing rows on this signal.
-    let _ = app.emit_to(LABEL, "palette-shown", ());
+    let _ = app.emit_to(LABEL, "search-shown", ());
 }
 
 pub fn hide(app: &AppHandle) {
@@ -120,8 +120,8 @@ pub fn hide(app: &AppHandle) {
     }
 }
 
-/// Esc / background click / post-play dismiss, from the palette webview.
+/// Esc / background click / post-play dismiss, from the search webview.
 #[tauri::command]
-pub async fn palette_hide(app: AppHandle) {
+pub async fn search_hide(app: AppHandle) {
     hide(&app);
 }

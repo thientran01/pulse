@@ -18,7 +18,7 @@ window.addEventListener("unhandledrejection", (event) => {
 const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
 
 // Window routing: each webview window carries its identity in the builder
-// URL's query (?window=palette — see src-tauri/src/palette.rs), and the same
+// URL's query (?window=search — see src-tauri/src/search.rs), and the same
 // param works at `npm run dev` in a plain browser so every window's UI is
 // mock-iterable. Default (no param) = the main widget.
 const params = new URLSearchParams(window.location.search);
@@ -47,21 +47,21 @@ if (import.meta.env.DEV && params.has("lab")) {
         </React.StrictMode>,
       );
     });
-} else if (params.get("window") === "palette") {
-  import("./Palette")
-    .then(({ default: Palette }) => {
+} else if (params.get("window") === "search") {
+  import("./Search")
+    .then(({ default: Search }) => {
       root.render(
         <React.StrictMode>
           <ErrorBoundary>
-            <Palette />
+            <Search />
           </ErrorBoundary>
         </React.StrictMode>,
       );
     })
     .catch(() => {
-      // NOT the App fallback — the widget rendering inside the palette
+      // NOT the App fallback — the widget rendering inside the search
       // window would be worse than an honest empty pane.
-      root.render(<p className="p-4 text-sm text-muted">Palette failed to load.</p>);
+      root.render(<p className="p-4 text-sm text-muted">Search failed to load.</p>);
     });
 } else if (params.get("window") === "focus") {
   import("./Focus")

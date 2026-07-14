@@ -6,9 +6,9 @@ mod lastfm;
 mod loopback;
 mod lyrics;
 mod media;
-mod palette;
 mod prefs;
 mod presence;
+mod search;
 mod settings;
 mod similar;
 mod spotify;
@@ -43,8 +43,8 @@ const HK_SEEK_FWD: &str = "ctrl+alt+right";
 const HK_NEXT: &str = "ctrl+alt+n";
 const HK_PREV: &str = "ctrl+alt+p";
 const HK_TOGGLE: &str = "ctrl+alt+m";
-/// S for search/summon — the palette (Thien's pick, 2026-07-11).
-const HK_PALETTE: &str = "ctrl+alt+s";
+/// S for search/summon — the search window (Thien's pick, 2026-07-11).
+const HK_SEARCH: &str = "ctrl+alt+s";
 
 // ---- Global hotkeys: rebindable, HK_* are the DEFAULTS ----
 //
@@ -124,10 +124,10 @@ fn hotkey_defs() -> [HotkeyDef; 7] {
             action: toggle_widget,
         },
         HotkeyDef {
-            id: "palette",
-            label: "Summon palette",
-            default_chord: HK_PALETTE,
-            action: |app| palette::toggle(app),
+            id: "search",
+            label: "Summon search",
+            default_chord: HK_SEARCH,
+            action: |app| search::toggle(app),
         },
     ]
 }
@@ -300,7 +300,7 @@ async fn media_seek_abs(position_ms: i64) -> bool {
 /// Per-window frontend votes on audio reactivity (false under OS
 /// reduced-motion) — the effective value is the OR of live windows' votes,
 /// ANDed into the capture switch. A single shared atomic worked while
-/// "main" was the only webview; with the palette (and focus mode next) each
+/// "main" was the only webview; with the search window (and focus mode next) each
 /// realm's initReactive would clobber the others'. Empty map (pre-vote
 /// startup) defaults true, matching the old atomic's default. The label
 /// comes from the invoking window's IPC context, never a parameter — a
@@ -417,7 +417,7 @@ pub(crate) fn emit_now(app: &AppHandle) -> media::NowPlaying {
 /// Visibility INTENT — the single owner of WHY the MAIN window is shown or
 /// hidden. `is_visible()` stays the OS truth, but every mutation flows
 /// through apply_visibility (the ONLY caller of the main window's
-/// show()/hide() — grep rule; palette.rs is the one other, window-scoped
+/// show()/hide() — grep rule; search.rs is the one other, window-scoped
 /// visibility ledger, for its own label only),
 /// which reconciles the window to:
 ///   effective = !user_hidden && !(concealed && !conceal_snoozed) && !focus_open
@@ -839,11 +839,11 @@ pub fn run() {
         .plugin(
             tauri_plugin_window_state::Builder::new()
                 .with_state_flags(tauri_plugin_window_state::StateFlags::POSITION)
-                // Only "main" persists position. The palette recenters per
-                // summon, focus mode is born fullscreen, and prefs recenters
-                // on the cursor monitor per open — a restored stale position
-                // would be wrong for all three.
-                .with_denylist(&[palette::LABEL, focus::LABEL, prefs::LABEL])
+                // Only "main" persists position. The search window recenters
+                // per summon, focus mode is born fullscreen, and prefs
+                // recenters on the cursor monitor per open — a restored stale
+                // position would be wrong for all three.
+                .with_denylist(&[search::LABEL, focus::LABEL, prefs::LABEL])
                 .build(),
         )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -878,7 +878,7 @@ pub fn run() {
             spotify::spotify_play_now,
             spotify::spotify_resolve_uri,
             spotify::spotify_search,
-            palette::palette_hide,
+            search::search_hide,
             focus::focus_open,
             focus::focus_close,
             prefs::open_prefs,
@@ -913,19 +913,19 @@ pub fn run() {
             match event {
                 // Corner-snap is the MAIN window's behavior only — the
                 // handler fires for every window's moves, and an unguarded
-                // forward would arm the snap on the palette (live-verified
+                // forward would arm the snap on the search window (live-verified
                 // trap from the multi-window planning pass).
                 tauri::WindowEvent::Moved(_) if window.label() == "main" => {
                     dock::on_moved(window);
                 }
-                // Blur dismisses the palette — the OS focus event is the
+                // Blur dismisses the search window — the OS focus event is the
                 // trustworthy signal (webview-side blur can lie during
                 // devtools/IME churn).
-                tauri::WindowEvent::Focused(false) if window.label() == palette::LABEL => {
-                    palette::hide(window.app_handle());
+                tauri::WindowEvent::Focused(false) if window.label() == search::LABEL => {
+                    search::hide(window.app_handle());
                 }
                 // A dead window's reactive vote must not wedge the capture
-                // gate (the palette is create-once so this mostly serves
+                // gate (the search window is create-once so this mostly serves
                 // focus mode's create/destroy lifecycle). Focus mode's
                 // destroy is ALSO its close path — Esc, the collapse
                 // control, and Alt-F4 all converge here, where the widget
@@ -1184,9 +1184,9 @@ pub fn run() {
             let audio_switch = Arc::new(AtomicBool::new(false));
             audio::spawn(app.handle().clone(), audio_switch.clone());
             let ui_reactive = app.state::<UiReactive>().0.clone();
-            // The palette window: create-once-hidden so Ctrl+Alt+S is
+            // The search window: create-once-hidden so Ctrl+Alt+S is
             // instant (WebView2 cold-create costs hundreds of ms).
-            palette::init(app.handle());
+            search::init(app.handle());
 
             // Media loop → "now-playing" events: a heartbeat poll plus GSMTC
             // change events that cut the wait short, so track changes,
