@@ -174,7 +174,18 @@ fn resolve_chord(app: &AppHandle, id: &str, default: &str) -> String {
 /// open prefs window reflects the new table (and any registration failure).
 pub(crate) fn register_all(app: &AppHandle) {
     let gs = app.global_shortcut();
-    let _ = gs.unregister_all();
+    // Unregister the PREVIOUS set one-by-one — deliberately NOT
+    // gs.unregister_all(). In tauri-plugin-global-shortcut 2.3.2,
+    // unregister_all() locks its internal `shortcuts` mutex and holds it
+    // ACROSS the main-thread hop, and that same mutex is locked on the main
+    // thread during hotkey dispatch — so calling it from an async command's
+    // worker (rebind/reset) can deadlock against a concurrent key press.
+    // Per-shortcut unregister() and on_shortcut() both hop to the main thread
+    // BEFORE locking, so they are safe from any thread. On the setup call the
+    // snapshot is empty (nothing registered yet), so this loop no-ops.
+    for prev in hotkey_snapshot(app) {
+        let _ = gs.unregister(prev.chord.as_str());
+    }
     let mut infos = Vec::with_capacity(7);
     for def in hotkey_defs() {
         let chord = resolve_chord(app, def.id, def.default_chord);

@@ -269,6 +269,16 @@ export function onUpNextChanged(cb: (list: QueueTrack[]) => void): () => void {
   };
 }
 
+/** Fires when play history is wiped (prefs Data → Clear play history). Live
+ * feed surfaces (queue/palette) reset on it. Mock: never fires. */
+export function onHistoryCleared(cb: () => void): () => void {
+  if (!IN_TAURI) return () => {};
+  const un = listen("history-cleared", () => cb());
+  return () => {
+    un.then((f) => f());
+  };
+}
+
 /** Fires once per finalized listen (a track change past the listen floor). */
 export function onHistoryAppended(cb: (e: HistoryEntry) => void): () => void {
   if (IN_TAURI) {
