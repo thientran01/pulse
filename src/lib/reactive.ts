@@ -19,11 +19,23 @@ const subscribers = new Set<BandsCb>();
 let unsub: (() => void) | null = null;
 let initialized = false;
 const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+// The prefs "Audio-reactive separator" toggle (settings.json
+// "reactive_separator", default on). Composes with reduced motion by AND: the
+// separator blooms only when BOTH allow it. App.tsx seeds this from prefsSeed
+// and keeps it live via the "settings-changed" event.
+let enabledSetting = true;
+
+/** The separator may bloom only when reduced motion is off AND the user hasn't
+ * turned it off in prefs. Drives both the visual subscription and the backend
+ * capture gate (no audio work for a suppressed separator). */
+function reactiveOn(): boolean {
+  return !mq.matches && enabledSetting;
+}
 
 function apply(): void {
   // Also stops backend capture — no audio work for suppressed visuals.
-  commands.setReactiveEnabled(!mq.matches);
-  if (mq.matches) {
+  commands.setReactiveEnabled(reactiveOn());
+  if (!reactiveOn()) {
     unsub?.();
     unsub = null;
     // One final zero payload so subscribers decay to rest instead of freezing.
@@ -33,6 +45,15 @@ function apply(): void {
       for (const cb of subscribers) cb(b);
     });
   }
+}
+
+/** Apply the persisted "reactive_separator" preference. Idempotent — a
+ * no-change call is a cheap early return, so re-seeding on mount / echoing a
+ * settings-changed event costs nothing. */
+export function setReactiveEnabledSetting(on: boolean): void {
+  if (enabledSetting === on) return;
+  enabledSetting = on;
+  apply();
 }
 
 /** Assert the reduced-motion vote to the backend even before any reactive

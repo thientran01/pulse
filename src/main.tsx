@@ -77,6 +77,22 @@ if (import.meta.env.DEV && params.has("lab")) {
     .catch(() => {
       root.render(<p className="p-4 text-sm text-muted">Focus failed to load.</p>);
     });
+} else if (params.get("window") === "prefs") {
+  import("./Prefs")
+    .then(({ default: Prefs }) => {
+      root.render(
+        <React.StrictMode>
+          <ErrorBoundary>
+            <Prefs />
+          </ErrorBoundary>
+        </React.StrictMode>,
+      );
+    })
+    .catch(() => {
+      // NOT the App fallback — the widget inside the prefs window would be
+      // worse than an honest empty pane.
+      root.render(<p className="p-4 text-sm text-muted">Preferences failed to load.</p>);
+    });
 } else {
   root.render(
     <React.StrictMode>

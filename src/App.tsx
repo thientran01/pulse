@@ -10,6 +10,7 @@ import {
   onNowPlaying,
   onPresence,
   onPresenceDebug,
+  onSettingsChanged,
   onSpotifyJump,
   onSpotifyJumpCancel,
   type DockCorner,
@@ -19,7 +20,7 @@ import { PlayPauseButton, ProgressBar, Transport, useProgressDom } from "./Trans
 import { LyricsPanel, lyricsKeyOf, useLyrics, type LyricsState } from "./LyricsPanel";
 import { extractAccent } from "./lib/palette";
 import * as posClock from "./lib/posClock";
-import { initReactive } from "./lib/reactive";
+import { initReactive, setReactiveEnabledSetting } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
 import {
   armSuppression,
@@ -1097,8 +1098,25 @@ function App() {
   useArtAccent(shownArt);
   useHistoryThumb(np?.art_id ?? null);
   const lyrics = useLyrics(np);
-  // Assert the reduced-motion capture vote even before any separator mounts.
-  useEffect(() => initReactive(), []);
+  // Assert the reduced-motion capture vote even before any separator mounts,
+  // then compose the persisted "Audio-reactive separator" preference on top:
+  // seed it once from prefsSeed and keep it live via "settings-changed" (a
+  // prefs toggle emits it). reactive.ts ANDs it with reduced motion and gates
+  // both the visual subscription and backend audio capture.
+  useEffect(() => {
+    initReactive();
+    let alive = true;
+    void commands.prefsSeed().then((s) => {
+      if (alive) setReactiveEnabledSetting(s.reactive_separator);
+    });
+    const un = onSettingsChanged(({ key, value }) => {
+      if (key === "reactive_separator") setReactiveEnabledSetting(Boolean(value));
+    });
+    return () => {
+      alive = false;
+      un();
+    };
+  }, []);
 
   const nothing = !np || np.player === "none";
   const playing = np?.status === "playing";

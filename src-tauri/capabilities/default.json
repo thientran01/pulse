@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the app's windows (a label missing here gets ZERO IPC, silently)",
-  "windows": ["main", "palette", "focus"],
+  "windows": ["main", "palette", "focus", "prefs"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",

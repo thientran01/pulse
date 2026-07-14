@@ -7,6 +7,7 @@ mod loopback;
 mod lyrics;
 mod media;
 mod palette;
+mod prefs;
 mod presence;
 mod settings;
 mod similar;
@@ -44,6 +45,207 @@ const HK_PREV: &str = "ctrl+alt+p";
 const HK_TOGGLE: &str = "ctrl+alt+m";
 /// S for search/summon — the palette (Thien's pick, 2026-07-11).
 const HK_PALETTE: &str = "ctrl+alt+s";
+
+// ---- Global hotkeys: rebindable, HK_* are the DEFAULTS ----
+//
+// Overrides persist in settings.json under "hotkeys": { <id>: <accelerator> }
+// (e.g. "playpause": "ctrl+alt+k"). resolve_chord reads the override at
+// registration; the prefs Hotkeys UI rebinds by unregister-all + register-all
+// (register_all), which also captures each shortcut's OS-registration result
+// so the UI can surface the silent failure (a reserved chord like
+// Ctrl+Alt+Left) as a persistent "not registered" note instead of an eprintln.
+
+/// One rebindable action: identity, human label (UI source of truth), the
+/// default accelerator, and what it does. Actions are non-capturing so they
+/// coerce to `fn` pointers stored per-registration.
+struct HotkeyDef {
+    id: &'static str,
+    label: &'static str,
+    default_chord: &'static str,
+    action: fn(&AppHandle),
+}
+
+/// The seven actions, in the order the prefs Hotkeys list renders them.
+fn hotkey_defs() -> [HotkeyDef; 7] {
+    [
+        HotkeyDef {
+            id: "playpause",
+            label: "Play / pause",
+            default_chord: HK_PLAY_PAUSE,
+            action: |app| {
+                media::play_pause();
+                emit_now(app);
+            },
+        },
+        // Seek hotkeys: no post-seek emit (it would carry the pre-seek
+        // position, snapping the UI back — the seek-command rule). The jump
+        // distance reads the persisted "seek_amount" setting live.
+        HotkeyDef {
+            id: "seekback",
+            label: "Seek backward",
+            default_chord: HK_SEEK_BACK,
+            action: |app| {
+                media::seek_rel_ms(-seek_step_ms(app));
+            },
+        },
+        HotkeyDef {
+            id: "seekfwd",
+            label: "Seek forward",
+            default_chord: HK_SEEK_FWD,
+            action: |app| {
+                media::seek_rel_ms(seek_step_ms(app));
+            },
+        },
+        // Queue-aware like the media_next command — lands on the up-next front.
+        HotkeyDef {
+            id: "next",
+            label: "Next track",
+            default_chord: HK_NEXT,
+            action: |app| {
+                if !upnext::try_queue_skip(app) {
+                    media::next();
+                    emit_now(app);
+                }
+            },
+        },
+        HotkeyDef {
+            id: "prev",
+            label: "Previous track",
+            default_chord: HK_PREV,
+            action: |app| {
+                media::prev();
+                emit_now(app);
+            },
+        },
+        HotkeyDef {
+            id: "showhide",
+            label: "Show / hide Pulse",
+            default_chord: HK_TOGGLE,
+            action: toggle_widget,
+        },
+        HotkeyDef {
+            id: "palette",
+            label: "Summon palette",
+            default_chord: HK_PALETTE,
+            action: |app| palette::toggle(app),
+        },
+    ]
+}
+
+/// One row of the resolved hotkey table — the prefs seed + "hotkeys-changed"
+/// payload. `registered` is the OS-registration truth (false = the chord was
+/// rejected, usually a system-reserved combo).
+#[derive(Serialize, Clone)]
+pub(crate) struct HotkeyInfo {
+    pub id: String,
+    pub label: String,
+    pub chord: String,
+    pub registered: bool,
+}
+
+/// The live resolved table, rebuilt on every register_all.
+#[derive(Default)]
+struct HotkeyState(Mutex<Vec<HotkeyInfo>>);
+
+/// The seek jump in ms — the persisted "seek_amount" (seconds) or the
+/// SEEK_STEP_MS default. Clamped to a sane range.
+fn seek_step_ms(app: &AppHandle) -> i64 {
+    let default_s = SEEK_STEP_MS / 1000;
+    let s = settings::get_value(app, "seek_amount")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(default_s);
+    s.clamp(1, 600) * 1000
+}
+
+/// The effective accelerator for an id: a persisted override, else the default.
+fn resolve_chord(app: &AppHandle, id: &str, default: &str) -> String {
+    settings::get_value(app, "hotkeys")
+        .as_ref()
+        .and_then(|v| v.get(id))
+        .and_then(|c| c.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| default.to_string())
+}
+
+/// Unregister everything and register the resolved chords fresh — the ONE
+/// registration path (setup, a rebind, a reset). Records each shortcut's
+/// OS-registration result into HotkeyState and emits "hotkeys-changed" so an
+/// open prefs window reflects the new table (and any registration failure).
+pub(crate) fn register_all(app: &AppHandle) {
+    let gs = app.global_shortcut();
+    // Unregister the PREVIOUS set one-by-one — deliberately NOT
+    // gs.unregister_all(). In tauri-plugin-global-shortcut 2.3.2,
+    // unregister_all() locks its internal `shortcuts` mutex and holds it
+    // ACROSS the main-thread hop, and that same mutex is locked on the main
+    // thread during hotkey dispatch — so calling it from an async command's
+    // worker (rebind/reset) can deadlock against a concurrent key press.
+    // Per-shortcut unregister() and on_shortcut() both hop to the main thread
+    // BEFORE locking, so they are safe from any thread. On the setup call the
+    // snapshot is empty (nothing registered yet), so this loop no-ops.
+    for prev in hotkey_snapshot(app) {
+        let _ = gs.unregister(prev.chord.as_str());
+    }
+    let mut infos = Vec::with_capacity(7);
+    for def in hotkey_defs() {
+        let chord = resolve_chord(app, def.id, def.default_chord);
+        let action = def.action;
+        let result = gs.on_shortcut(chord.as_str(), move |app, _s, event| {
+            if event.state() == ShortcutState::Pressed {
+                action(app);
+            }
+        });
+        let registered = result.is_ok();
+        if let Err(e) = result {
+            log::warn!("hotkey {} ({chord}) failed to register: {e}", def.id);
+        }
+        infos.push(HotkeyInfo {
+            id: def.id.to_string(),
+            label: def.label.to_string(),
+            chord,
+            registered,
+        });
+    }
+    {
+        let state = app.state::<HotkeyState>();
+        *state.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = infos.clone();
+    }
+    let _ = app.emit("hotkeys-changed", &infos);
+}
+
+/// The current resolved table (prefs seed reads it).
+pub(crate) fn hotkey_snapshot(app: &AppHandle) -> Vec<HotkeyInfo> {
+    app.state::<HotkeyState>()
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// Persist one override and re-register live. Duplicate-chord prevention lives
+/// in the UI (it blocks the commit and never calls this); an unknown id is a
+/// no-op. Returns the fresh table.
+#[tauri::command]
+async fn rebind_hotkey(app: AppHandle, id: String, chord: String) -> Vec<HotkeyInfo> {
+    if !hotkey_defs().iter().any(|d| d.id == id) {
+        return hotkey_snapshot(&app);
+    }
+    let mut obj = settings::get_value(&app, "hotkeys")
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    obj.insert(id, serde_json::Value::String(chord));
+    settings::set_value(&app, "hotkeys", serde_json::Value::Object(obj));
+    register_all(&app);
+    hotkey_snapshot(&app)
+}
+
+/// Clear all overrides and re-register the defaults. Returns the fresh table.
+#[tauri::command]
+async fn reset_hotkeys(app: AppHandle) -> Vec<HotkeyInfo> {
+    settings::set_value(&app, "hotkeys", serde_json::Value::Object(Default::default()));
+    register_all(&app);
+    hotkey_snapshot(&app)
+}
 
 // Every command that touches GSMTC (or the network) is `async` — NOT for
 // concurrency, but to move it OFF the main thread. Tauri runs sync commands
@@ -331,6 +533,94 @@ fn save_companion(app: &AppHandle, on: bool) {
     settings::set_value(app, "companion", serde_json::Value::Bool(on));
 }
 
+/// Clones of the tray's two check items, so the prefs window and the tray stay
+/// mirrored: a toggle from either surface re-checks the tray item and emits
+/// "settings-changed" for the other. Populated at setup.
+#[derive(Default)]
+struct TrayHandles {
+    autostart: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
+    companion: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
+}
+
+/// Set the tray autostart check item (menu writes hop to the main thread).
+fn sync_tray_autostart(app: &AppHandle, on: bool) {
+    let item = app
+        .state::<TrayHandles>()
+        .autostart
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(item) = item {
+        let _ = app.run_on_main_thread(move || {
+            let _ = item.set_checked(on);
+        });
+    }
+}
+
+fn sync_tray_companion(app: &AppHandle, on: bool) {
+    let item = app
+        .state::<TrayHandles>()
+        .companion
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(item) = item {
+        let _ = app.run_on_main_thread(move || {
+            let _ = item.set_checked(on);
+        });
+    }
+}
+
+/// Apply the fullscreen-conceal switch from ANY surface (tray click, prefs
+/// toggle): store intent, persist, mirror the tray, notify listeners, and
+/// release a live conceal immediately when turned off (the user is asking the
+/// widget to stop acting — don't wait for the next presence tick).
+fn set_companion(app: &AppHandle, on: bool) {
+    let vis = app.state::<VisIntent>();
+    vis.companion.store(on, Ordering::Relaxed);
+    save_companion(app, on);
+    sync_tray_companion(app, on);
+    let _ = app.emit(
+        "settings-changed",
+        serde_json::json!({ "key": "companion", "value": on }),
+    );
+    if !on && vis.concealed.swap(false, Ordering::Relaxed) {
+        vis.conceal_snoozed.store(false, Ordering::Relaxed);
+        apply_visibility(app);
+    }
+}
+
+/// Apply start-at-login from any surface. The plugin writes the HKCU Run key;
+/// we re-read the registry truth so a failed toggle never leaves a lying
+/// checkmark. Returns nothing here — the command wrapper reports the truth.
+fn set_autostart(app: &AppHandle, on: bool) {
+    let al = app.autolaunch();
+    let result = if on { al.enable() } else { al.disable() };
+    if let Err(e) = result {
+        log::warn!("autostart toggle failed: {e}");
+    }
+    let actual = al.is_enabled().unwrap_or(on);
+    sync_tray_autostart(app, actual);
+    let _ = app.emit(
+        "settings-changed",
+        serde_json::json!({ "key": "start_at_login", "value": actual }),
+    );
+}
+
+/// Prefs "Start at login" toggle — mirrors the tray. Returns the registry's
+/// actual state so the UI reflects a failed toggle honestly.
+#[tauri::command]
+async fn set_start_at_login(app: AppHandle, enabled: bool) -> bool {
+    set_autostart(&app, enabled);
+    app.autolaunch().is_enabled().unwrap_or(enabled)
+}
+
+/// Prefs "Hide on fullscreen" toggle — mirrors the tray.
+#[tauri::command]
+async fn set_hide_on_fullscreen(app: AppHandle, enabled: bool) {
+    set_companion(&app, enabled);
+}
+
 /// Frontend-initiated connect (the queue UI's gate state, PR 4) — same flow
 /// and tray narration as the tray click (spotify.rs holds the narrator).
 #[tauri::command]
@@ -438,6 +728,51 @@ fn spawn_update_check(app: &AppHandle, feedback: Option<tauri::menu::MenuItem<ta
     });
 }
 
+/// Prefs "Check for updates" — the same flow as the tray entry, but reporting
+/// to the UI via a returned status string instead of a tray label. Shares the
+/// UPDATE_IN_FLIGHT guard so a tray check and a prefs check can't race two
+/// installs. On an installed update the process is replaced and this never
+/// returns; otherwise: "uptodate" | "dev" | "busy" | "failed".
+#[tauri::command]
+async fn check_for_updates(app: AppHandle) -> String {
+    use tauri_plugin_updater::UpdaterExt;
+    if UPDATE_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return "busy".to_string();
+    }
+    let result: Result<UpdateOutcome, String> = async {
+        let updater = app.updater().map_err(|e| e.to_string())?;
+        match updater.check().await.map_err(|e| e.to_string())? {
+            Some(update) => {
+                if cfg!(debug_assertions) {
+                    return Ok(UpdateOutcome::DevAvailable);
+                }
+                update
+                    .download_and_install(|_, _| {}, || {})
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(UpdateOutcome::Installed)
+            }
+            None => Ok(UpdateOutcome::UpToDate),
+        }
+    }
+    .await;
+    UPDATE_IN_FLIGHT.store(false, Ordering::SeqCst);
+    match result {
+        // Windows: the passive NSIS installer replaces this process; restart()
+        // is the documented relaunch guarantee. Never returns.
+        Ok(UpdateOutcome::Installed) => app.restart(),
+        Ok(UpdateOutcome::UpToDate) => "uptodate".to_string(),
+        Ok(UpdateOutcome::DevAvailable) => "dev".to_string(),
+        Err(e) => {
+            log::warn!("prefs update check failed: {e}");
+            "failed".to_string()
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -505,9 +840,10 @@ pub fn run() {
             tauri_plugin_window_state::Builder::new()
                 .with_state_flags(tauri_plugin_window_state::StateFlags::POSITION)
                 // Only "main" persists position. The palette recenters per
-                // summon and focus mode is born fullscreen — a restored
-                // stale position would be wrong for both.
-                .with_denylist(&[palette::LABEL, focus::LABEL])
+                // summon, focus mode is born fullscreen, and prefs recenters
+                // on the cursor monitor per open — a restored stale position
+                // would be wrong for all three.
+                .with_denylist(&[palette::LABEL, focus::LABEL, prefs::LABEL])
                 .build(),
         )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -520,6 +856,8 @@ pub fn run() {
         .manage(dock::Dock::default())
         .manage(presence::Presence::default())
         .manage(VisIntent::default())
+        .manage(HotkeyState::default())
+        .manage(TrayHandles::default())
         .invoke_handler(tauri::generate_handler![
             media_play_pause,
             media_next,
@@ -543,6 +881,22 @@ pub fn run() {
             palette::palette_hide,
             focus::focus_open,
             focus::focus_close,
+            prefs::open_prefs,
+            prefs::close_prefs,
+            prefs::prefs_seed,
+            prefs::set_setting,
+            prefs::test_lastfm_key,
+            prefs::lastfm_has_key,
+            prefs::open_logs,
+            prefs::open_data_folder,
+            prefs::open_repo,
+            rebind_hotkey,
+            reset_hotkeys,
+            set_start_at_login,
+            set_hide_on_fullscreen,
+            check_for_updates,
+            spotify::spotify_display_name,
+            history::clear_history,
             upnext::upnext_list,
             upnext::upnext_add,
             upnext::upnext_remove,
@@ -621,6 +975,13 @@ pub fn run() {
             // positions persisted on a now-disconnected monitor; this is the
             // belt-and-braces path for a chromeless, taskbar-less window.
             let reset = MenuItem::with_id(app, "reset", "Reset position", true, None::<&str>)?;
+            // Preferences window (prefs.rs) — the reliable entry for returning
+            // users (the right-click context menu is the other, in a later
+            // phase). "Shortcuts / Help" jumps straight to the Hotkeys section.
+            let prefs_item =
+                MenuItem::with_id(app, "prefs", "Preferences…", true, None::<&str>)?;
+            let shortcuts_item =
+                MenuItem::with_id(app, "shortcuts", "Shortcuts / Help", true, None::<&str>)?;
             // Opt-in launch-at-login, default off. The plugin writes the HKCU
             // Run key with the CURRENT exe's path — enabling from a dev build
             // registers the dev exe until re-toggled from the installed app.
@@ -692,6 +1053,8 @@ pub fn run() {
                 &[
                     &show_hide,
                     &reset,
+                    &prefs_item,
+                    &shortcuts_item,
                     &autostart,
                     &companion,
                     &spotify_item,
@@ -707,6 +1070,8 @@ pub fn run() {
                 &[
                     &show_hide,
                     &reset,
+                    &prefs_item,
+                    &shortcuts_item,
                     &autostart,
                     &companion,
                     &spotify_item,
@@ -715,8 +1080,14 @@ pub fn run() {
                     &quit,
                 ],
             )?;
-            let autostart_item = autostart.clone();
-            let companion_item = companion.clone();
+            // Store the two check items so prefs toggles can mirror the tray.
+            {
+                let th = app.state::<TrayHandles>();
+                *th.autostart.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(autostart.clone());
+                *th.companion.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(companion.clone());
+            }
             let update_item = update_check.clone();
             TrayIconBuilder::with_id("pulse-tray")
                 .icon(app.default_window_icon().unwrap().clone())
@@ -726,36 +1097,18 @@ pub fn run() {
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "toggle" => toggle_widget(app),
                     "reset" => dock::reset_position(app),
+                    "prefs" => prefs::open(app, None),
+                    "shortcuts" => prefs::open(app, Some("hotkeys".to_string())),
+                    // Toggle from the registry's actual state, through the
+                    // shared helper so the tray checkmark + prefs mirror stay
+                    // in sync (the check item does NOT auto-toggle itself).
                     "autostart" => {
-                        let al = app.autolaunch();
-                        let result = if al.is_enabled().unwrap_or(false) {
-                            al.disable()
-                        } else {
-                            al.enable()
-                        };
-                        if let Err(e) = result {
-                            log::warn!("autostart toggle failed: {e}");
-                        }
-                        // The menu item flips itself on click; re-sync it to
-                        // the registry's actual state so a failed toggle
-                        // doesn't leave the checkmark lying.
-                        let _ = autostart_item.set_checked(al.is_enabled().unwrap_or(false));
+                        let on = !app.autolaunch().is_enabled().unwrap_or(false);
+                        set_autostart(app, on);
                     }
                     "companion" => {
-                        let vis = app.state::<VisIntent>();
-                        let on = !vis.companion.load(Ordering::Relaxed);
-                        vis.companion.store(on, Ordering::Relaxed);
-                        save_companion(app, on);
-                        // Re-sync like autostart: the item flips itself on
-                        // click; assert the state we actually hold.
-                        let _ = companion_item.set_checked(on);
-                        // Turning it off releases an active conceal NOW, not
-                        // on the next presence tick — the user is asking the
-                        // widget to stop acting.
-                        if !on && vis.concealed.swap(false, Ordering::Relaxed) {
-                            vis.conceal_snoozed.store(false, Ordering::Relaxed);
-                            apply_visibility(app);
-                        }
+                        let on = !app.state::<VisIntent>().companion.load(Ordering::Relaxed);
+                        set_companion(app, on);
                     }
                     "spotify" => {
                         if spotify::connected(app) {
@@ -805,46 +1158,12 @@ pub fn run() {
             // Docking: restore the persisted fullscreen seat.
             dock::init(app.handle());
 
-            // Global hotkeys, each with its own action.
-            type Action = fn(&AppHandle);
-            let hotkeys: [(&str, Action); 7] = [
-                (HK_PALETTE, |app| palette::toggle(app)),
-                (HK_PLAY_PAUSE, |app| {
-                    media::play_pause();
-                    emit_now(app);
-                }),
-                // Seek hotkeys: no post-seek emit for the same reason as the
-                // seek commands — it would carry the pre-seek position.
-                (HK_SEEK_BACK, |_app| {
-                    media::seek_rel_ms(-SEEK_STEP_MS);
-                }),
-                (HK_SEEK_FWD, |_app| {
-                    media::seek_rel_ms(SEEK_STEP_MS);
-                }),
-                // Queue-aware like the media_next command — same one gesture,
-                // same landing.
-                (HK_NEXT, |app| {
-                    if !upnext::try_queue_skip(app) {
-                        media::next();
-                        emit_now(app);
-                    }
-                }),
-                (HK_PREV, |app| {
-                    media::prev();
-                    emit_now(app);
-                }),
-                (HK_TOGGLE, toggle_widget),
-            ];
-            for (hk, action) in hotkeys {
-                let result = app.global_shortcut().on_shortcut(hk, move |app, _s, event| {
-                    if event.state() == ShortcutState::Pressed {
-                        action(app);
-                    }
-                });
-                if let Err(e) = result {
-                    log::warn!("hotkey {hk} failed to register: {e}");
-                }
-            }
+            // Global hotkeys — resolve persisted overrides and register the
+            // seven actions (hotkey_defs). register_all records each
+            // shortcut's OS-registration result so the prefs Hotkeys UI can
+            // surface a reserved-combo failure instead of a silent eprintln,
+            // and the prefs rebind/reset commands re-run this exact path.
+            register_all(app.handle());
 
             // Self-update: one silent check at launch against the latest
             // GitHub release, release builds only (a dev build "updating"
