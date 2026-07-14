@@ -29,7 +29,10 @@
 }
 
 @theme {
-  --font-sans: "Inter Variable", "Segoe UI Variable Display", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  /* Fallbacks fire only if Inter Variable fails to load. "Segoe UI" (present on
+     Win10+11, always a normal weight) — NOT "Segoe UI Variable Display", whose
+     large-optical-size cut renders thin/spindly at UI text sizes. */
+  --font-sans: "Inter Variable", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
   --color-*: initial;
   --color-surface: rgb(var(--surface));
   --color-surface-2: rgb(var(--surface-2));
