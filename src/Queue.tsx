@@ -202,8 +202,8 @@ async function playTrackNow(t: { uri: string; title: string; artist: string }): 
 // ---- rows ----
 
 /** Cover thumb (remote url straight into an img; note glyph fallback) —
- * 26px in the queue rows; the palette passes its own size (same grammar,
- * bigger room). Exported for the palette's result rows. */
+ * 26px in the queue rows; the search window passes its own size (same grammar,
+ * bigger room). Exported for the search window's result rows. */
 export function RowThumb({ url, size = 26 }: { url: string | null; size?: number }) {
   return (
     <span

@@ -853,7 +853,7 @@ pub fn play_now(app: &AppHandle, uri: &str) -> &'static str {
 /// Start playback of `uri` from SILENCE. play_now's never-PUT-play-uris rule
 /// exists to protect a live playlist context — from no_playback there is no
 /// context to kill, and the bare-uris PUT on the best available device is
-/// exactly right (the palette's headline case: summon, type, play, with
+/// exactly right (the search window's headline case: summon, type, play, with
 /// nothing running). "ok" | "no_device" | "disconnected" | "offline".
 fn start_playback(app: &AppHandle, uri: &str) -> &'static str {
     let devices = match api_call(app, "GET", "https://api.spotify.com/v1/me/player/devices") {
@@ -907,7 +907,7 @@ fn jump(app: &AppHandle, target: &str) -> &'static str {
     match q.status.as_str() {
         "ok" => {}
         // Nothing playing = nothing to jump within — start from silence
-        // instead (see start_playback; this is the palette's core promise).
+        // instead (see start_playback; this is the search window's core promise).
         "no_playback" => return start_playback(app, target),
         "disconnected" => return "disconnected",
         _ => return "offline",
@@ -942,7 +942,7 @@ fn jump(app: &AppHandle, target: &str) -> &'static str {
         };
 
     // Arm the pill's announcement suppression in EVERY realm before skipping.
-    // The queue UI arms its own realm frontend-side, but a palette-initiated
+    // The queue UI arms its own realm frontend-side, but a search-initiated
     // play runs in a different webview — the pill's realm only hears about
     // it through this event (same payload as upnext's queue-aware skip).
     let _ = app.emit(
@@ -1052,7 +1052,7 @@ pub fn enrich_now(app: &AppHandle) {
     });
 }
 
-/// Raw ranked track search — the palette's list and the fielded resolvers'
+/// Raw ranked track search — the search window's list and the fielded resolvers'
 /// substrate. Ok(empty) = the API answered with no hits.
 pub fn search_tracks(
     app: &AppHandle,
@@ -1187,7 +1187,7 @@ pub struct SearchResult {
     pub tracks: Vec<QueueTrack>,
 }
 
-/// Free-text track search for the palette. Ok + empty list = a real "no
+/// Free-text track search for the search window. Ok + empty list = a real "no
 /// hits" answer.
 #[tauri::command]
 pub async fn spotify_search(app: AppHandle, query: String, limit: Option<u32>) -> SearchResult {

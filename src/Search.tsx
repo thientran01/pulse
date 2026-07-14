@@ -1,6 +1,6 @@
 /*
- * The summon palette (design "A1"): a Raycast-style floating search pane in
- * its OWN webview window (src-tauri/src/palette.rs — created hidden at
+ * The summon search (design "A1"): a Raycast-style floating search pane in
+ * its OWN webview window (src-tauri/src/search.rs — created hidden at
  * setup, shown by Ctrl+Alt+S). One verb: get to a song in under a second.
  * Type → debounced Spotify search; Enter plays now (the context-preserving
  * jump; from silence it starts playback outright); Shift+Enter queues to
@@ -9,18 +9,18 @@
  *
  * The empty state answers "what do you want to hear?" with two or three
  * resurfacing rows computed from the local play history on each summon —
- * default content, not a feature surface. The palette deliberately never
+ * default content, not a feature surface. The search deliberately never
  * grows past this: verbs live on rows, not on the chrome.
  *
  * Realm notes (this is the codebase's first second window): this module
  * runs in its own JS realm — its own backend listeners, its own
  * initReactive vote (the per-window vote map in lib.rs), no posClock (the
- * palette never renders position). Announcement suppression for a play
+ * search window never renders position). Announcement suppression for a play
  * lives in the MAIN realm, armed by the backend's "spotify-jump" emit —
  * never armed from here.
  */
 import { useEffect, useRef, useState } from "react";
-import { commands, onPaletteShown } from "./lib/backend";
+import { commands, onSearchShown } from "./lib/backend";
 import { initReactive } from "./lib/reactive";
 import { RowThumb, useSpotifyStatus } from "./Queue";
 import type { HistoryEntry, QueueTrack } from "./types";
@@ -32,7 +32,7 @@ const RESURFACE_PAGES = 3;
 /** A pick must have been genuinely listened to (cumulative). */
 const RESURFACE_MIN_MS = 60_000;
 
-interface PaletteRow {
+interface SearchRow {
   key: string;
   title: string;
   artist: string;
@@ -46,16 +46,16 @@ interface PaletteRow {
   reason?: string;
 }
 
-function searchRow(t: QueueTrack): PaletteRow {
+function searchRow(t: QueueTrack): SearchRow {
   return { key: t.uri, title: t.title, artist: t.artist, artUrl: t.art_url, track: t, uri: t.uri };
 }
 
 /** Resolve-on-demand cache for resurfaced rows (the Queue.tsx uriCache
- * pattern) — successes only: the palette window lives for the whole app
+ * pattern) — successes only: the search window lives for the whole app
  * session, and caching a transient miss would permanently dead-row a pick.
  * Actions are user-paced, so an occasional re-miss can't storm. */
 const uriCache = new Map<string, string>();
-async function resolveUri(row: PaletteRow): Promise<string | null> {
+async function resolveUri(row: SearchRow): Promise<string | null> {
   if (row.uri) return row.uri;
   const hit = uriCache.get(row.key);
   if (hit) return hit;
@@ -70,7 +70,7 @@ async function resolveUri(row: PaletteRow): Promise<string | null> {
  * log is young, and absolute thresholds would answer nothing for months.
  * DETERMINISTIC within a day: the old per-summon random wildcard made the
  * list shuffle on every open, which read as flakiness, not curation. */
-async function computeResurfaced(): Promise<PaletteRow[]> {
+async function computeResurfaced(): Promise<SearchRow[]> {
   const entries: HistoryEntry[] = [];
   let before: number | null = null;
   for (let i = 0; i < RESURFACE_PAGES; i++) {
@@ -129,7 +129,7 @@ async function computeResurfaced(): Promise<PaletteRow[]> {
     const daySeed = Math.floor(now / day);
     picks.push({ agg: rest[daySeed % rest.length], reason: "Today's pick" });
   }
-  const rows: PaletteRow[] = [];
+  const rows: SearchRow[] = [];
   for (const p of picks.slice(0, 3)) {
     rows.push({
       key: p.agg.key,
@@ -166,12 +166,12 @@ const PlayGlyph = (
   </svg>
 );
 
-export default function Palette() {
+export default function Search() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<QueueTrack[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [searchStatus, setSearchStatus] = useState<"ok" | "disconnected" | "offline">("ok");
-  const [resurfaced, setResurfaced] = useState<PaletteRow[]>([]);
+  const [resurfaced, setResurfaced] = useState<SearchRow[]>([]);
   const [selected, setSelected] = useState(0);
   const [note, setNote] = useState<string | null>(null);
   const [flashKeys, setFlashKeys] = useState<ReadonlySet<string>>(new Set());
@@ -182,12 +182,12 @@ export default function Palette() {
   const flashTimers = useRef(new Map<string, number>());
   const busy = useRef(false);
   // Hover only steals the selection on a REAL pointer move (>3px): the
-  // palette spawns near the cursor, and a hand resting on the mouse must
+  // search window spawns near the cursor, and a hand resting on the mouse must
   // not snap keyboard navigation back to whatever row it happens to cover
   // (quick-review catch).
   const lastMouse = useRef<{ x: number; y: number } | null>(null);
 
-  // The per-window reactive vote (lib.rs vote map) — the palette renders no
+  // The per-window reactive vote (lib.rs vote map) — the search window renders no
   // reactive surface, but a realm that never votes would leave the previous
   // default standing for it.
   useEffect(() => initReactive(), []);
@@ -248,7 +248,7 @@ export default function Palette() {
   // Summon signal: refocus, select-all the stale query, fresh resurfacing.
   useEffect(
     () =>
-      onPaletteShown(() => {
+      onSearchShown(() => {
         inputRef.current?.focus();
         inputRef.current?.select();
         setNote(null);
@@ -270,10 +270,10 @@ export default function Palette() {
     setSelected(0);
   }, [hasQuery]);
 
-  const rows: PaletteRow[] = hasQuery ? (results ?? []).map(searchRow) : resurfaced;
+  const rows: SearchRow[] = hasQuery ? (results ?? []).map(searchRow) : resurfaced;
   const sel = Math.min(selected, Math.max(rows.length - 1, 0));
 
-  const playRow = async (row: PaletteRow) => {
+  const playRow = async (row: SearchRow) => {
     if (busy.current) return;
     busy.current = true;
     try {
@@ -291,14 +291,14 @@ export default function Palette() {
       // rare post-dismiss failure is deliberately silent.
       setQuery("");
       setNote(null);
-      commands.paletteHide();
+      commands.searchHide();
       void commands.playNow(uri);
     } finally {
       busy.current = false;
     }
   };
 
-  const queueRow = async (row: PaletteRow) => {
+  const queueRow = async (row: SearchRow) => {
     // Same one-write-at-a-time gate as playRow: a held Shift+Enter
     // key-repeats, and upnext_add has no dedupe (quick-review catch).
     if (busy.current) return;
@@ -335,7 +335,7 @@ export default function Palette() {
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
       e.preventDefault();
-      commands.paletteHide();
+      commands.searchHide();
     } else if (e.key === "ArrowDown") {
       // Step from the CLAMPED position — the raw state can sit past a
       // shrunken list, where stepping it would strand the highlight.
@@ -358,7 +358,7 @@ export default function Palette() {
     <div
       className="flex h-screen w-screen flex-col p-3"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) commands.paletteHide();
+        if (e.target === e.currentTarget) commands.searchHide();
       }}
       onKeyDown={onKeyDown}
     >
@@ -366,7 +366,7 @@ export default function Palette() {
           elevation; it also stays inside the 12px gutter, the transparent-
           window clip budget the card shadow once overflowed. */}
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border/10 bg-surface shadow-xl shadow-black/40">
-        {/* Search row — the palette's one verb. */}
+        {/* Search row — the search's one verb. */}
         <div className="flex items-center gap-3 border-b border-border/10 px-5 py-4">
           <span className={searching ? "text-fg" : "text-muted"}>
             <SearchGlyph />
@@ -379,8 +379,8 @@ export default function Palette() {
             aria-label="Search Spotify"
             role="combobox"
             aria-expanded={rows.length > 0}
-            aria-controls="palette-list"
-            aria-activedescendant={rows[sel] ? `palette-opt-${sel}` : undefined}
+            aria-controls="search-list"
+            aria-activedescendant={rows[sel] ? `search-opt-${sel}` : undefined}
             spellCheck={false}
             autoCorrect="off"
             autoComplete="off"
@@ -389,7 +389,7 @@ export default function Palette() {
             // full-width input it rendered as a square orange bar (Thien's
             // live feedback). The caret is this input's focus signal; it is
             // the pane's only focusable element.
-            className="palette-search min-w-0 flex-1 bg-transparent text-[18px] text-fg outline-none placeholder:text-muted focus-visible:[outline:none]"
+            className="search-input min-w-0 flex-1 bg-transparent text-[18px] text-fg outline-none placeholder:text-muted focus-visible:[outline:none]"
           />
           <span className="shrink-0 text-[11px] text-muted/60">
             ↵ play · ⇧↵ queue
@@ -418,14 +418,14 @@ export default function Palette() {
                 <p className="m-0 px-2.5 py-2.5 text-[13px] text-muted">No matches on Spotify</p>
               )}
               <div
-                id="palette-list"
+                id="search-list"
                 role="listbox"
                 aria-label={hasQuery ? "Search results" : "From your history"}
               >
                 {rows.map((row, i) => (
                   <div
                     key={row.key}
-                    id={`palette-opt-${i}`}
+                    id={`search-opt-${i}`}
                     role="option"
                     aria-selected={i === sel}
                     onMouseMove={(e) => {
@@ -488,7 +488,7 @@ export default function Palette() {
           )}
         </div>
 
-        {/* Quiet feedback line — the palette's toast. */}
+        {/* Quiet feedback line — the search's toast. */}
         <p aria-live="polite" className="m-0 min-h-[30px] truncate border-t border-border/10 px-5 py-1.5 text-[12px] leading-[18px] text-muted">
           {note}
         </p>
