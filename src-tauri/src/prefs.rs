@@ -68,6 +68,24 @@ pub fn open(app: &AppHandle, section: Option<String>) {
         .build();
     match result {
         Ok(win) => {
+            // Kill the Win11 accent-colored window border DWM draws around a
+            // frameless opaque window (a stray blue hairline). Mirrors
+            // palette.rs's DWMWA_TRANSITIONS_FORCEDISABLED call: get the HWND,
+            // set the attribute, ignore the HRESULT.
+            #[cfg(windows)]
+            if let Ok(hwnd) = win.hwnd() {
+                use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
+                // DWMWA_COLOR_NONE — "no border color" (removes the accent line).
+                const COLOR_NONE: u32 = 0xFFFF_FFFE;
+                let _ = unsafe {
+                    DwmSetWindowAttribute(
+                        windows::Win32::Foundation::HWND(hwnd.0),
+                        DWMWA_BORDER_COLOR,
+                        std::ptr::from_ref(&COLOR_NONE).cast(),
+                        std::mem::size_of::<u32>() as u32,
+                    )
+                };
+            }
             center_on_cursor(app, &win);
             if win.show().is_err() {
                 log::error!("prefs: show failed — aborting open");

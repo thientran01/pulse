@@ -692,7 +692,10 @@ export default function Prefs() {
 
       hotkeys: (
         <>
-          <div className="flex items-end justify-between">
+          {/* pr-10 keeps "Reset to defaults" clear of the detail pane's
+              floating × (absolute top-right); it's the only section header
+              with a right-aligned action. */}
+          <div className="flex items-end justify-between pr-10">
             <p className="text-[18px] font-semibold text-fg">Hotkeys</p>
             <button
               type="button"
@@ -957,8 +960,18 @@ export default function Prefs() {
 
       {/* DETAIL */}
       <div className="prefs-scroll relative min-w-0 flex-1 overflow-y-auto">
-        <CloseX onClick={closePrefs} />
         <div className="px-[30px] pb-10 pt-[26px]">{detail[section]}</div>
+        {/* Drag handle — a thin strip over the detail pane's empty top padding
+            (the frameless window's title-bar grab area). Painted after the
+            content so it sits above that padding, but the × (z-10) stays on
+            top and every section control lives below it, so nothing
+            interactive is captured. */}
+        <div
+          data-tauri-drag-region
+          aria-hidden
+          className="absolute inset-x-0 top-0 h-6"
+        />
+        <CloseX onClick={closePrefs} />
       </div>
 
       {/* TOAST */}
