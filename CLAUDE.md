@@ -1,4 +1,4 @@
-# Pulse
+# Palette
 
 A Raycast/Linear-grade mini music player for Windows. Always-on-top widget that reads and controls whatever is playing (Apple Music, Spotify, browsers) through the Windows system media API (GSMTC), with synced lyrics, album-art adaptive accents, audio-reactive visuals, and ±10s seek. Built because Apple Music's miniplayer minimizes on every click and feels dead. Personal project; portfolio /lab candidate.
 
@@ -72,7 +72,7 @@ src-tauri/src/
                 waits UPGRADE_GRACE (3s, usually ~0: the search raced alongside)
                 for the search to offer the upgrade; script preference stays
                 BELOW synced-ness (hangul plain-only never beats romanized synced)
-  history.rs    play-history: logs every track Pulse displays (player-agnostic —
+  history.rs    play-history: logs every track Palette displays (player-agnostic —
                 GSMTC has no history API) to append-only app-data/history.jsonl,
                 no cap, paginated via an in-memory line index (history_page +
                 "history-appended" seed/event pair). Fed from the media loop:
@@ -113,7 +113,7 @@ src-tauri/src/
                 skipped over; never `PUT play uris` INTO a live context,
                 which kills it — the ONE carve-out is start_playback: from
                 no_playback there is no context to kill, so the bare-uris
-                PUT on the best non-restricted device is how the palette
+                PUT on the best non-restricted device is how Search
                 plays from silence, landing verified the same way;
                 play_now's no_playback status is therefore no_device
                 now). History enrichment: every settled track
@@ -123,8 +123,8 @@ src-tauri/src/
                 actionable; un-enriched rows (older entries, AM listens)
                 resolve on demand via spotify_resolve_uri (search, cached
                 per key frontend-side)
-  upnext.rs     Pulse-managed up-next: Spotify's API can't remove/reorder
-                queue items, so Pulse keeps its OWN ordered list
+  upnext.rs     Palette-managed up-next: Spotify's API can't remove/reorder
+                queue items, so Palette keeps its OWN ordered list
                 (app-data/upnext.json, "upnext-changed" + upnext_list seed;
                 add/remove/move are local ops) and FEEDS Spotify one track
                 when <15s of the current track remains (coarse raw-pair
@@ -136,9 +136,9 @@ src-tauri/src/
                 re-queued current track behave); a change that BYPASSES a
                 pending fed item keeps it armed and fires one reconcile
                 read (still queued at Spotify → keep waiting; consumed
-                where Pulse couldn't see → drop + unmark, feeder moves on)
+                where Palette couldn't see → drop + unmark, feeder moves on)
                 — the fed marker never floats free of ground truth. A next
-                pressed IN PULSE (transport / Ctrl+Alt+N) is QUEUE-AWARE:
+                pressed IN PALETTE (transport / Ctrl+Alt+N) is QUEUE-AWARE:
                 upnext::try_queue_skip runs the play_now jump on the front
                 (falling back to plain GSMTC next when it can't act), so a
                 mid-song skip lands on the queued item instead of the
@@ -147,11 +147,11 @@ src-tauri/src/
                 suppression for it. Fed-pop
                 bookkeeping and HISTORY ingestion both suspend while a
                 play_now jump flickers through intermediates. Honest limits
-                (matrix finding 11): chain holds only while Pulse runs +
+                (matrix finding 11): chain holds only while Palette runs +
                 Spotify connected; skips inside the Spotify app bypass the
                 list; removing a fed front leaks that one track to
                 Spotify's queue
-  palette.rs    the summon palette's window — Pulse's FIRST second webview
+  search.rs     the summon Search's window — Palette's FIRST second webview
                 (multi-window pioneer; focus mode reuses the seams). Created
                 ONCE hidden at setup (WebView2 cold-create costs ~100s of
                 ms; a laggy summon is dead), 560×420 born-at-size, shown by
@@ -159,12 +159,12 @@ src-tauri/src/
                 blur (lib.rs Focused(false) handler) / Esc / background
                 click. Its show/hide ledger is deliberately OUTSIDE
                 VisIntent/apply_visibility (that owns the MAIN window's
-                intent composition; palette.rs is the one other,
+                intent composition; search.rs is the one other,
                 label-scoped owner). Multi-window invariants added with it:
                 capabilities/default.json must list every window label (a
                 missing label = ZERO IPC, silently); window-state denylists
-                palette+focus; dock's Moved forwarding is label-guarded to
-                "main" (unguarded, corner-snap armed on palette moves);
+                search+focus; dock's Moved forwarding is label-guarded to
+                "main" (unguarded, corner-snap armed on search moves);
                 UiReactive is a per-window-label vote map OR'd (votes drop
                 on Destroyed); window identity rides the builder URL's
                 ?window= param, routed in src/main.tsx — the same param
@@ -217,7 +217,7 @@ src-tauri/src/
                 was loudest (reported live 2026-07-12). Device-wide cpal
                 loopback survives as the fallback when the AUMID→PID join
                 misses (unknown player, pre-2004 Win10), with a 5s upgrade
-                retry. Capture runs ONLY while a Pulse window is visible
+                retry. Capture runs ONLY while a Palette window is visible
                 (main OR focus) AND playing (dropped otherwise)
   loopback.rs   process-scoped WASAPI loopback: joins the GSMTC AUMID to a
                 PID via the render-session list (packaged apps by
@@ -245,7 +245,7 @@ src/            React widget: pill ↔ card ↔ expanded modes; lib/posClock.ts 
                 player; /?nothing forces the no-session resting state;
                 /?spotify=off forces the queue gate, ?jump=partial the jump
                 failure caption
-src/Queue.tsx   the 11a queue & history UI: Pulse's up-next list + the
+src/Queue.tsx   the 11a queue & history UI: Palette's up-next list + the
                 "Earlier" history feed, TWO garments off ONE queueOpen bit —
                 a 312px popover floating above the pill/card (corner-aware:
                 opens away from the docked side; rides the mode resize on
@@ -309,7 +309,7 @@ Design rule: chrome stays neutral (house semantic tokens); the album-art palette
 - `Ctrl+Alt+←/→` seek ∓10s (current session; the hotkey always fires the SMTC call — Apple Music silently ignores it, only the UI buttons are capability-gated)
 - `Ctrl+Alt+N/P` next/previous track (next is queue-aware: lands on the up-next front when one exists)
 - `Ctrl+Alt+M` show/hide the widget
-- `Ctrl+Alt+S` summon the search palette (src/Palette.tsx — Enter plays now,
+- `Ctrl+Alt+S` summon Search (src/Search.tsx — Enter plays now,
   from silence it starts playback outright; Shift+Enter queues to up-next and
   stays open; Esc/blur dismiss; empty state = resurfacing rows from history)
 
@@ -323,7 +323,7 @@ being controlled.
 ## Commands
 
 - `npm run tauri dev` — run the app (requires Rust MSVC toolchain + VS Build Tools, both installed)
-- `npm run tauri build` — release build → NSIS per-user installer at `src-tauri/target/release/bundle/nsis/Pulse_<version>_x64-setup.exe` (unsigned; SmartScreen warns on other machines). Needs `TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/pulse.key)"` in the env now that updater artifacts are signed — without it the bundler errors after compiling (the `_PATH` variant does NOT work despite `tauri signer generate`'s help text — measured 2026-07-08).
+- `npm run tauri build` — release build → NSIS per-user installer at `src-tauri/target/release/bundle/nsis/Palette_<version>_x64-setup.exe` (unsigned; SmartScreen warns on other machines). Needs `TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/pulse.key)"` in the env now that updater artifacts are signed — without it the bundler errors after compiling (the `_PATH` variant does NOT work despite `tauri signer generate`'s help text — measured 2026-07-08).
 - `npm run dev` — frontend only (no Tauri window, limited use)
 
 Installed app: single-instance (relaunching surfaces the running widget), tray has an opt-in "Start at login" toggle (tauri-plugin-autostart, HKCU Run key — registers the current exe's path, so toggling from a dev build points it at the dev exe) and a "Hide on fullscreen" check item (the conceal switch, persisted to app-data settings.json under the legacy `companion` key; dev builds add "Simulate fullscreen (10s)" for conceal testing). Tray "Connect Spotify" ⇄ "Disconnect Spotify" runs the Web API OAuth (spotify.rs — label doubles as connection state and flow narration). Tray "Check for updates" runs the update flow on demand (label narrates Checking…/Installing…/Up to date). App icon source: five living-separator capsules on a dark rounded square; regenerate the set with `npx tauri icon <1024px.png>`.
