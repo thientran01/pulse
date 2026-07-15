@@ -134,12 +134,14 @@ function IdentityStack({
   const align = centered ? "items-center text-center" : "items-start text-left";
   return (
     // Width caps: 560px design size, 46vh so the square art leaves room for
-    // the stack on normal monitors, and 100vh-590px as the short-monitor
-    // guard — 590px ≈ the stack's fixed parts (metadata + caption ≈ 180) +
-    // the horizon band (≈ 180) + the console band (≈ 230), so on short
-    // screens the art cedes height instead of the centered column
-    // overflowing into the horizon (nothing clips between them).
-    <div className={`flex w-[min(560px,46vh,calc(100vh_-_590px))] flex-col ${align}`}>
+    // the stack on normal monitors, and 100vh-660px as the short-monitor
+    // guard. The art is CENTERED in the upper room (the seats' pt-[146px]
+    // trick), so the fit condition is artCenter + art/2 + metadata(146) ≤
+    // room height (≈ 86vh - 212 with the horizon + console bands) — the
+    // guard linearizes that to 100vh-660px (conservative below ~1220px
+    // heights, inert above), so the art cedes size instead of the metadata
+    // running into the horizon (nothing clips between them).
+    <div className={`flex w-[min(560px,46vh,calc(100vh_-_660px))] flex-col ${align}`}>
       <div className="grid aspect-square w-full place-items-center overflow-hidden rounded-3xl bg-surface-2 text-muted">
         {artUrl ? (
           <img src={artUrl} alt="" className="h-full w-full object-cover" draggable={false} />
@@ -300,10 +302,15 @@ export default function Focus() {
                   }}
                   className="absolute inset-0 flex items-stretch gap-[7%] px-[10%]"
                 >
-                  {/* Vertically centered with a small upward bias so the
-                      art's optical center lands near the lyric anchor (the
-                      current line sits at 46% height, not 50%). */}
-                  <div className="flex min-h-0 shrink-0 flex-col justify-center pb-[6vh]">
+                  {/* The ART centers, not the stack: pt matches the
+                      metadata+caption block below the art (mt-8 32 + title
+                      50 + artist 32 + caption 32 = 146px), so justify-center
+                      lands the album's halfway point on the room's center —
+                      centering the whole stack sat the art ~115px high, the
+                      metadata dragging it up (Thien, 2026-07-14). Keep in
+                      sync with IdentityStack's text block and the art-cap
+                      guard budget. */}
+                  <div className="flex min-h-0 shrink-0 flex-col justify-center pt-[146px]">
                     <IdentityStack np={np} artUrl={artUrl} caption={caption} centered={false} />
                   </div>
                   <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col pb-4">
@@ -328,10 +335,10 @@ export default function Focus() {
                   }}
                   className="absolute inset-0 flex items-center justify-center"
                 >
-                  {/* pb keeps the fallback's art on the lyrics view's
-                      optical line, so the lyrics⇄fallback crossfade holds
-                      the art still-ish. */}
-                  <div className="pb-[6vh]">
+                  {/* Same pt trick as the lyrics seat (art centers, not the
+                      stack), so the lyrics⇄fallback crossfade holds the art
+                      still on the vertical axis. */}
+                  <div className="pt-[146px]">
                     <IdentityStack np={np} artUrl={artUrl} caption={caption} centered />
                   </div>
                 </motion.div>
@@ -343,7 +350,10 @@ export default function Focus() {
               floating over the upper room's right side on the popover shell
               recipe. Always mounted (scroll + feed survive toggling), the
               expanded-surface visibility grammar. Bottom inset clears the
-              horizon band (120px box) + console. */}
+              CONSOLE — the only band it horizontally overlaps (the 420px
+              horizon is centered and never reaches under this right-docked
+              popover); the extra ~120px is breathing room, not a horizon
+              budget. */}
           <div
             inert={!queueOpen}
             className={`absolute right-6 top-16 z-20 flex w-[380px] flex-col rounded-xl border border-border/10 bg-surface p-1.5 shadow-xl shadow-black/40 ${

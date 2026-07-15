@@ -194,17 +194,20 @@ const SCALE = {
   focus: {
     row: "px-6 py-3 text-[44px] leading-[1.27] tracking-[-0.01em]",
     marker: "h-9 w-[5px]",
-    anchor: 0.46,
-    // One visible line trimmed vs the Soundboard original (160/280 →
-    // 200/320, ~half a row deeper each edge) for a little more white
-    // space — Thien's 2026-07-14 live verdict walked back PR #102's much
-    // deeper cut (260/380 read too sparse). The knob if it wants
-    // more/less. The min() guards keep the stops from crossing on short
-    // viewports (fixed 200+320 needs a 520px column; 25%+35% ≤ 60%
-    // always orders) — the ramps scale instead of inverting there.
-    mask: "[mask-image:linear-gradient(transparent,black_min(200px,25%),black_calc(100%-min(320px,35%)),transparent)]",
-    chipTop: "top-52",
-    chipBottom: "bottom-80",
+    // 0.5: the current line rides the album's midline — the art centers in
+    // the upper room (Focus's pt-[146px] seats, Thien 2026-07-14), and the
+    // marker pairs with it. Forward context leans on tier-1's brightness
+    // (the next line reads through the ramp's start).
+    anchor: 0.5,
+    // Two visible lines cut per side vs the first live cut (200/320 →
+    // 360/440): at fullscreen the lyric ghosts climbed nearly to the
+    // window's top edge and ~12 lines read at once (Thien, 2026-07-14 live
+    // — "way too many lyrics"). The knob if it wants more/less. The min()
+    // guards keep the stops from crossing on short viewports (35%+42% ≤
+    // 77% always orders) — the ramps scale instead of inverting there.
+    mask: "[mask-image:linear-gradient(transparent,black_min(360px,35%),black_calc(100%-min(440px,42%)),transparent)]",
+    chipTop: "top-84",
+    chipBottom: "bottom-110",
     // Break-row dots scaled up for the room — bigger dots on a wider gap so
     // the countdown reads at fullscreen distance (the feel knob for the
     // focus break row, 2026-07-13).
