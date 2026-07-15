@@ -19,7 +19,10 @@ use tauri::{AppHandle, Manager};
 static WRITE_GATE: Mutex<()> = Mutex::new(());
 
 fn path(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_data_dir().ok().map(|d| d.join("settings.json"))
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|d| d.join("settings.json"))
 }
 
 fn read_root(app: &AppHandle) -> Value {
@@ -39,11 +42,15 @@ pub fn get_string(app: &AppHandle, key: &str) -> Option<String> {
 }
 
 pub fn get_bool(app: &AppHandle, key: &str, default: bool) -> bool {
-    get_value(app, key).and_then(|v| v.as_bool()).unwrap_or(default)
+    get_value(app, key)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(default)
 }
 
 pub fn set_value(app: &AppHandle, key: &str, value: Value) {
-    let _gate = WRITE_GATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gate = WRITE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let Some(p) = path(app) else { return };
     let mut root = read_root(app);
     root.as_object_mut()
@@ -68,7 +75,10 @@ pub fn set_value(app: &AppHandle, key: &str, value: Value) {
 /// is simply overwritten on the next write.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "target path has no parent dir")
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "target path has no parent dir",
+        )
     })?;
     std::fs::create_dir_all(dir)?;
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("pulse");

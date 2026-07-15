@@ -96,13 +96,6 @@ export interface QueueTrack {
   art_url: string | null;
 }
 
-export interface SpotifyQueueResult {
-  status: "ok" | "disconnected" | "no_playback" | "offline";
-  currently_playing: QueueTrack | null;
-  /** ~20 items max; Spotify mixes user-queued and autoplay with no marker. */
-  queue: QueueTrack[];
-}
-
 /** Free-text track search (the search window). Ok + empty = a real no-hits answer. */
 export interface SearchResult {
   status: "ok" | "disconnected" | "offline";

@@ -79,7 +79,9 @@ fn unix_ms() -> i64 {
 }
 
 fn lock(u: &UpNext) -> std::sync::MutexGuard<'_, Inner> {
-    u.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    u.inner
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn store_path(dir: &Path) -> PathBuf {
@@ -88,7 +90,11 @@ fn store_path(dir: &Path) -> PathBuf {
 
 fn persist(inner: &Inner) {
     let Some(dir) = &inner.dir else { return };
-    let p = Persisted { v: 1, fed: inner.fed.clone(), list: inner.list.clone() };
+    let p = Persisted {
+        v: 1,
+        fed: inner.fed.clone(),
+        list: inner.list.clone(),
+    };
     if let Ok(json) = serde_json::to_string(&p) {
         // Atomic replace: a crash mid-write must not blank the list to default.
         if let Err(e) = crate::settings::write_atomic(&store_path(dir), json.as_bytes()) {
@@ -168,7 +174,11 @@ pub fn tick(app: &AppHandle, np: &NowPlaying) {
                 && np.position_ms < RESTART_NEAR_START_MS
                 && inner.last_raw_pos_ms > bar;
             if np.position_at_ms > 0 || !same {
-                inner.last_raw_pos_ms = if np.position_at_ms > 0 { np.position_ms } else { 0 };
+                inner.last_raw_pos_ms = if np.position_at_ms > 0 {
+                    np.position_ms
+                } else {
+                    0
+                };
             }
             if same && !restarted {
                 (None, false, false)
@@ -284,7 +294,10 @@ pub fn tick(app: &AppHandle, np: &NowPlaying) {
                 inner.fed = Some(front.uri);
                 persist(&inner);
             } else {
-                log::warn!("upnext: front changed mid-feed — {} leaked to Spotify's queue", front.uri);
+                log::warn!(
+                    "upnext: front changed mid-feed — {} leaked to Spotify's queue",
+                    front.uri
+                );
             }
         }
         upnext.feed_in_flight.store(false, Ordering::SeqCst);
@@ -312,19 +325,25 @@ fn request_reconcile(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         reconcile_fed(&app);
-        app.state::<UpNext>().reconcile_in_flight.store(false, Ordering::SeqCst);
+        app.state::<UpNext>()
+            .reconcile_in_flight
+            .store(false, Ordering::SeqCst);
     });
 }
 
 fn reconcile_fed(app: &AppHandle) {
     let upnext = app.state::<UpNext>();
-    let Some(fed_uri) = lock(&upnext).fed.clone() else { return };
+    let Some(fed_uri) = lock(&upnext).fed.clone() else {
+        return;
+    };
     let q = spotify::queue_fresh(app);
     if q.status != "ok" {
         return; // can't tell right now — keep waiting, a later change retries
     }
     let still_there = q.queue.iter().any(|t| t.uri == fed_uri)
-        || q.currently_playing.as_ref().is_some_and(|t| t.uri == fed_uri);
+        || q.currently_playing
+            .as_ref()
+            .is_some_and(|t| t.uri == fed_uri);
     if still_there {
         return;
     }
@@ -417,7 +436,10 @@ pub fn try_queue_skip(app: &AppHandle) -> bool {
     }
     let _ = app.emit(
         "spotify-jump",
-        JumpTarget { title: front.title.clone(), artist: front.artist.clone() },
+        JumpTarget {
+            title: front.title.clone(),
+            artist: front.artist.clone(),
+        },
     );
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {

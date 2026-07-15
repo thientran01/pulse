@@ -82,7 +82,9 @@ pub fn init(app: &AppHandle) {
 }
 
 pub fn toggle(app: &AppHandle) {
-    let Some(win) = app.get_webview_window(LABEL) else { return };
+    let Some(win) = app.get_webview_window(LABEL) else {
+        return;
+    };
     if win.is_visible().unwrap_or(false) {
         hide(app);
     } else {
@@ -91,7 +93,9 @@ pub fn toggle(app: &AppHandle) {
 }
 
 pub fn show(app: &AppHandle) {
-    let Some(win) = app.get_webview_window(LABEL) else { return };
+    let Some(win) = app.get_webview_window(LABEL) else {
+        return;
+    };
     // Launcher seat: horizontally centered, upper third — on the monitor the
     // cursor is on. Physical pixels throughout; any failure falls back to a
     // plain center().

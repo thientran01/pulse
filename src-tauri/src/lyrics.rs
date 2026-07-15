@@ -61,7 +61,10 @@ impl Lyrics {
 
     /// The transport-failure sentinel returned to the frontend (never cached).
     fn offline() -> Self {
-        Self { offline: true, ..Self::default() }
+        Self {
+            offline: true,
+            ..Self::default()
+        }
     }
 }
 
@@ -85,12 +88,22 @@ impl LrclibRecord {
 
     /// True when the record carries no usable lyric text.
     fn is_empty_record(&self) -> bool {
-        self.synced_lyrics.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true)
-            && self.plain_lyrics.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true)
+        self.synced_lyrics
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+            && self
+                .plain_lyrics
+                .as_deref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true)
     }
 
     fn has_synced(&self) -> bool {
-        self.synced_lyrics.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+        self.synced_lyrics
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
     }
 
     /// True when the synced text carries the song's original script rather
@@ -151,7 +164,9 @@ fn norm_title(title: &str) -> String {
     s.trim().to_string()
 }
 
-fn classify(result: Result<ureq::Response, ureq::Error>) -> Result<Option<ureq::Response>, Offline> {
+fn classify(
+    result: Result<ureq::Response, ureq::Error>,
+) -> Result<Option<ureq::Response>, Offline> {
     match result {
         Ok(resp) => Ok(Some(resp)),
         Err(ureq::Error::Status(_, _)) => Ok(None), // served error (404 etc) — try fallbacks
@@ -250,7 +265,9 @@ pub fn fetch(cache_dir: &Path, artist: &str, title: &str, album: &str, duration_
         }
     }
     {
-        let misses = session_misses().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let misses = session_misses()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if misses.contains(&key) {
             return Lyrics::default();
         }
@@ -381,7 +398,9 @@ mod tests {
         assert!(rec(Some(HANGUL), None, 166.0).has_original_script());
         assert!(!rec(Some(ROMAJI), None, 166.0).has_original_script());
         // Accented Latin is NOT "original script" — no false positive.
-        assert!(!rec(Some("[00:01.00] Soñar más allá, corazón"), None, 166.0).has_original_script());
+        assert!(
+            !rec(Some("[00:01.00] Soñar más allá, corazón"), None, 166.0).has_original_script()
+        );
         // Plain-only hangul doesn't count: the preference rides synced text.
         assert!(!rec(None, Some(HANGUL), 166.0).has_original_script());
     }
@@ -434,7 +453,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let got = fetch(&dir, "NMIXX", "KNOW ABOUT ME", "", 165_000);
         let synced = got.synced.expect("expected synced lyrics");
-        let hangul = synced.chars().filter(|&c| matches!(u32::from(c), 0xAC00..=0xD7A3)).count();
-        assert!(hangul > 100, "expected hangul lyrics, got: {}", &synced[..synced.len().min(200)]);
+        let hangul = synced
+            .chars()
+            .filter(|&c| matches!(u32::from(c), 0xAC00..=0xD7A3))
+            .count();
+        assert!(
+            hangul > 100,
+            "expected hangul lyrics, got: {}",
+            &synced[..synced.len().min(200)]
+        );
     }
 }

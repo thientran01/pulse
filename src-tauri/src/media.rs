@@ -13,10 +13,6 @@ use std::sync::mpsc::Sender;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use windows::Foundation::TypedEventHandler;
-use windows_future::{
-    AsyncOperationCompletedHandler, AsyncOperationWithProgressCompletedHandler, IAsyncOperation,
-    IAsyncOperationWithProgress,
-};
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession as Session,
     GlobalSystemMediaTransportControlsSessionManager as Manager,
@@ -24,6 +20,10 @@ use windows::Media::Control::{
 };
 use windows::Media::MediaPlaybackType;
 use windows::Storage::Streams::{Buffer, DataReader, InputStreamOptions};
+use windows_future::{
+    AsyncOperationCompletedHandler, AsyncOperationWithProgressCompletedHandler, IAsyncOperation,
+    IAsyncOperationWithProgress,
+};
 
 const TICKS_PER_MS: i64 = 10_000; // WinRT TimeSpan tick = 100ns
 /// Offset between the Windows FILETIME epoch (1601) and the unix epoch, in ms.
@@ -99,7 +99,10 @@ pub fn art_url(cache: &ArtCache, art_id: &str) -> Option<String> {
 }
 
 fn lock_art(cache: &ArtCache) -> std::sync::MutexGuard<'_, Option<ArtEntry>> {
-    cache.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    cache
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn now_ms() -> i64 {
@@ -264,10 +267,12 @@ where
     set_stage(stage);
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     let hooked = op
-        .SetCompleted(&AsyncOperationWithProgressCompletedHandler::new(move |_, _| {
-            let _ = tx.send(());
-            Ok(())
-        }))
+        .SetCompleted(&AsyncOperationWithProgressCompletedHandler::new(
+            move |_, _| {
+                let _ = tx.send(());
+                Ok(())
+            },
+        ))
         .is_ok();
     let out = if hooked && rx.recv_timeout(Duration::from_millis(timeout_ms)).is_ok() {
         op.GetResults().ok()
@@ -310,7 +315,9 @@ pub fn simulate_wedge(ms: i64) {
 static MANAGER: Mutex<Option<Manager>> = Mutex::new(None);
 
 fn manager() -> Option<Manager> {
-    let mut cached = MANAGER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut cached = MANAGER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if cached.is_none() {
         *cached = Manager::RequestAsync()
             .ok()
@@ -333,7 +340,9 @@ pub fn current_session() -> Option<Session> {
         // otherwise the app would stay dark until restart.
         Err(e) => {
             if !e.code().is_ok() {
-                *MANAGER.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                *MANAGER
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             }
             None
         }
@@ -370,7 +379,11 @@ impl SessionWatch {
                 Ok(())
             }))
             .ok()?;
-        Some(Self { manager, tx, watched: None })
+        Some(Self {
+            manager,
+            tx,
+            watched: None,
+        })
     }
 
     /// Attach change handlers to the CURRENT session if it isn't the watched
@@ -560,29 +573,34 @@ fn base_snapshot(session: &Session) -> (NowPlaying, bool) {
         .and_then(|op| wait_op(op, OP_TIMEOUT_MS, Stage::MediaProps));
     // Property getters marshal off the fetched proxy too — same stage.
     set_stage(Stage::MediaProps);
-    let (mut title, mut artist, mut album, media_kind, has_thumb) =
-        match props {
-            Some(p) => (
-                p.Title().map(|h| h.to_string()).unwrap_or_default(),
-                p.Artist().map(|h| h.to_string()).unwrap_or_default(),
-                p.AlbumTitle().map(|h| h.to_string()).unwrap_or_default(),
-                // MediaPlaybackType — the signal history uses to drop video
-                // (Netflix/anime/browser) from music-only surfaces. Nullable:
-                // a null IReference, read error, or Unknown(0) all fall to
-                // "unknown" (kept — never lose a real listen). Match the
-                // numeric tuple like playback_info's PlaybackStatus(4).
-                match p.PlaybackType().ok().and_then(|r| r.Value().ok()) {
-                    Some(MediaPlaybackType(1)) => "music",
-                    Some(MediaPlaybackType(2)) => "video",
-                    Some(MediaPlaybackType(3)) => "image",
-                    _ => "unknown",
-                }
-                .to_string(),
-                p.Thumbnail().is_ok(),
-            ),
-            // Non-empty here too, so "" stays the pre-feature legacy sentinel.
-            None => (String::new(), String::new(), String::new(), "unknown".into(), false),
-        };
+    let (mut title, mut artist, mut album, media_kind, has_thumb) = match props {
+        Some(p) => (
+            p.Title().map(|h| h.to_string()).unwrap_or_default(),
+            p.Artist().map(|h| h.to_string()).unwrap_or_default(),
+            p.AlbumTitle().map(|h| h.to_string()).unwrap_or_default(),
+            // MediaPlaybackType — the signal history uses to drop video
+            // (Netflix/anime/browser) from music-only surfaces. Nullable:
+            // a null IReference, read error, or Unknown(0) all fall to
+            // "unknown" (kept — never lose a real listen). Match the
+            // numeric tuple like playback_info's PlaybackStatus(4).
+            match p.PlaybackType().ok().and_then(|r| r.Value().ok()) {
+                Some(MediaPlaybackType(1)) => "music",
+                Some(MediaPlaybackType(2)) => "video",
+                Some(MediaPlaybackType(3)) => "image",
+                _ => "unknown",
+            }
+            .to_string(),
+            p.Thumbnail().is_ok(),
+        ),
+        // Non-empty here too, so "" stays the pre-feature legacy sentinel.
+        None => (
+            String::new(),
+            String::new(),
+            String::new(),
+            "unknown".into(),
+            false,
+        ),
+    };
     set_stage(Stage::Idle);
     // Apple Music packs "artist — album" into the artist field (matrix quirk #5).
     if player == "apple_music" && album.is_empty() {
@@ -656,10 +674,15 @@ pub fn snapshot(art_cache: &ArtCache) -> NowPlaying {
         // shares this mutex. Sample the cached state, drop the lock, then read.
         let cached: Option<(u32, bool, Option<u64>, i64, bool)> = {
             let cache = lock_art(art_cache);
-            cache
-                .as_ref()
-                .filter(|e| e.key == key)
-                .map(|e| (e.rev, e.url.is_some(), e.fingerprint, e.first_seen_ms, e.settled))
+            cache.as_ref().filter(|e| e.key == key).map(|e| {
+                (
+                    e.rev,
+                    e.url.is_some(),
+                    e.fingerprint,
+                    e.first_seen_ms,
+                    e.settled,
+                )
+            })
         };
         match cached {
             // Stable hit: past the probe window or confirmed settled.

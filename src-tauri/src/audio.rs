@@ -83,7 +83,10 @@ pub(crate) struct Ring {
 
 impl Ring {
     pub(crate) fn new() -> Self {
-        Ring { buf: vec![0.0; FFT_SIZE], pos: 0 }
+        Ring {
+            buf: vec![0.0; FFT_SIZE],
+            pos: 0,
+        }
     }
     pub(crate) fn push_frame(&mut self, frame_mean: f32) {
         self.buf[self.pos] = frame_mean;
@@ -105,14 +108,19 @@ impl Ring {
 static TARGET_AUMID: Mutex<String> = Mutex::new(String::new());
 
 pub fn set_target(aumid: &str) {
-    let mut t = TARGET_AUMID.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut t = TARGET_AUMID
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if *t != aumid {
         aumid.clone_into(&mut t);
     }
 }
 
 fn target_aumid() -> String {
-    TARGET_AUMID.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    TARGET_AUMID
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 fn open_loopback(
@@ -125,7 +133,10 @@ fn open_loopback(
     // cpal panics INSIDE the audio callback on a type mismatch — degrade to
     // "no visuals" instead for the rare non-F32 shared-mode mix format.
     if config.sample_format() != cpal::SampleFormat::F32 {
-        log::warn!("audio loopback: unsupported sample format {:?}", config.sample_format());
+        log::warn!(
+            "audio loopback: unsupported sample format {:?}",
+            config.sample_format()
+        );
         return None;
     }
     let sample_rate = config.sample_rate().0 as f32;
@@ -279,7 +290,9 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                     active = Some((Capture::Process(cap, aumid), rate, ring));
                 } else if let Some((stream, rate)) = open_loopback(ring.clone(), frames.clone()) {
                     if !aumid.is_empty() {
-                        log::warn!("audio: no process-loopback join for {aumid:?} — device-mix fallback");
+                        log::warn!(
+                            "audio: no process-loopback join for {aumid:?} — device-mix fallback"
+                        );
                     }
                     last_upgrade = std::time::Instant::now();
                     active = Some((Capture::Device(stream), rate, ring));
@@ -329,7 +342,9 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                             last_progress = std::time::Instant::now();
                         }
                         if last_progress.elapsed() > Duration::from_secs(2) {
-                            log::warn!("audio loopback stalled — reopening against current default device");
+                            log::warn!(
+                                "audio loopback stalled — reopening against current default device"
+                            );
                             Act::Reopen
                         } else if last_upgrade.elapsed() > UPGRADE_RETRY {
                             last_upgrade = std::time::Instant::now();
@@ -392,11 +407,14 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
 
             // Process-path staleness reads as SILENCE (zero samples), so the
             // bars fall instead of freezing on the last-heard spectrum.
-            let stale = matches!(cap, Capture::Process(p, _) if p.ms_since_data() > SILENCE_AFTER_MS);
+            let stale =
+                matches!(cap, Capture::Process(p, _) if p.ms_since_data() > SILENCE_AFTER_MS);
             let samples = if stale {
                 vec![0.0; FFT_SIZE]
             } else {
-                let ring = ring.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let ring = ring
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 ring.snapshot()
             };
             for (i, s) in samples.iter().enumerate() {
@@ -413,7 +431,11 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
             let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
             rms_ref = (rms_ref * RMS_DECAY).max(rms).max(1e-4);
             let dyn_target = (rms / rms_ref).clamp(0.0, 1.0).sqrt();
-            let dk = if dyn_target > smoothed_dyn { ATTACK } else { DYN_RELEASE };
+            let dk = if dyn_target > smoothed_dyn {
+                ATTACK
+            } else {
+                DYN_RELEASE
+            };
             smoothed_dyn += (dyn_target - smoothed_dyn) * dk;
             let dyn_scale = DYN_FLOOR + (1.0 - DYN_FLOOR) * smoothed_dyn;
 
@@ -421,7 +443,11 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
             for i in 0..3 {
                 gain_ref[i] = (gain_ref[i] * GAIN_DECAY).max(raw[i]).max(1e-4);
                 let target = (raw[i] / gain_ref[i]).clamp(0.0, 1.0);
-                let k = if target > smoothed[i] { ATTACK } else { RELEASE };
+                let k = if target > smoothed[i] {
+                    ATTACK
+                } else {
+                    RELEASE
+                };
                 smoothed[i] += (target - smoothed[i]) * k;
                 norm[i] = smoothed[i];
             }
@@ -430,7 +456,11 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                 let raw_e = range_energy(&scratch, *rate, spec_edges[i], spec_edges[i + 1]);
                 gain_spec[i] = (gain_spec[i] * GAIN_DECAY).max(raw_e).max(1e-4);
                 let target = (raw_e / gain_spec[i]).clamp(0.0, 1.0);
-                let k = if target > smoothed_spec[i] { ATTACK } else { RELEASE };
+                let k = if target > smoothed_spec[i] {
+                    ATTACK
+                } else {
+                    RELEASE
+                };
                 smoothed_spec[i] += (target - smoothed_spec[i]) * k;
                 spectrum[i] = smoothed_spec[i];
             }

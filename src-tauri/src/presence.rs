@@ -21,8 +21,9 @@
  * so observability never pollutes the settled stream's diff suppression.
  *
  * Own thread at a 1s cadence (house pattern: one watcher thread per concern).
- * NOT the dock hit watcher: that loop is cursor-cadenced (8-40ms) and skips
- * hidden windows — exactly when presence must keep sensing.
+ * NOT the dock hit watcher: that loop is cursor-cadenced (8-40ms) while
+ * visible and parks entirely while hidden — exactly when presence must keep
+ * sensing.
  */
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
@@ -36,8 +37,7 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Shell::SHQueryUserNotificationState;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -114,12 +114,17 @@ impl Presence {
     /// Dev-only conceal test affordance (tray item, debug builds).
     #[cfg(debug_assertions)]
     pub fn simulate_fullscreen(&self, for_dur: Duration) {
-        *self.sim_fs_until.lock().unwrap_or_else(PoisonError::into_inner) =
-            Some(std::time::Instant::now() + for_dur);
+        *self
+            .sim_fs_until
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(std::time::Instant::now() + for_dur);
     }
 
     fn sim_fs_active(&self) -> bool {
-        let mut until = self.sim_fs_until.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut until = self
+            .sim_fs_until
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         match *until {
             Some(t) if std::time::Instant::now() < t => true,
             Some(_) => {
@@ -232,7 +237,7 @@ fn sample(widget_hwnd: Option<HWND>, own_pid: u32) -> Option<PresenceDebug> {
         // Unknown widget monitor → assume shared: better a false conceal
         // candidate (hysteresis + matrix will tell) than a fullscreen game
         // ignored because the widget handle wasn't resolvable for a tick.
-        let on_widget_monitor = widget_mon.map_or(true, |wm| wm.0 == fg_mon.0);
+        let on_widget_monitor = widget_mon.is_none_or(|wm| wm.0 == fg_mon.0);
 
         let mut mi = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
@@ -341,8 +346,7 @@ pub fn spawn(app: AppHandle) {
             }
             // The simulation drives the monitor-scoped verdict too, so the
             // dev tray item exercises the seat swap alongside the conceal.
-            let fs_mon_raw =
-                sim || (dbg.rect_verdict == "fullscreen" && dbg.on_widget_monitor);
+            let fs_mon_raw = sim || (dbg.rect_verdict == "fullscreen" && dbg.on_widget_monitor);
 
             settle(dbg.fs_raw, &mut fs_settled, &mut disagree_ms);
             settle(fs_mon_raw, &mut fs_mon_settled, &mut mon_disagree_ms);

@@ -11,7 +11,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { MorphIcon } from "./icons/MorphIcon";
 import { useSeekTick } from "./icons/useSeekTick";
 import { useSkipFlick } from "./icons/useSkipFlick";
-import { commands } from "./lib/backend";
+import { commands, onSeekNudge } from "./lib/backend";
 import * as posClock from "./lib/posClock";
 import { DUR, EASE } from "./lib/tokens";
 import type { NowPlaying } from "./types";
@@ -130,6 +130,25 @@ export function SeekButton({
   size?: ButtonSize;
 }) {
   const { scope, tick } = useSeekTick(dir);
+  // Hotkey seeks spin the glyph exactly like a click (PR #21 follow-up).
+  // tick is re-created per render, so the subscription reads it through a
+  // ref instead of re-listening across the IPC every render. Gated on
+  // seekable: the hotkey fires the SMTC call regardless, but for a player
+  // that ignores it (Apple Music) a spin would claim a seek that never
+  // happened — the disabled button stays still. seekable is also read
+  // through a ref inside the callback: listen()/unlisten is promise-based,
+  // so a capability flip to false has a brief async gap before the
+  // subscription actually drops — the fire-time check closes it.
+  const tickRef = useRef(tick);
+  tickRef.current = tick;
+  const seekableRef = useRef(seekable);
+  seekableRef.current = seekable;
+  useEffect(() => {
+    if (!seekable) return;
+    return onSeekNudge((d) => {
+      if (d === dir && seekableRef.current) void tickRef.current();
+    });
+  }, [seekable, dir]);
   return (
     <IconButton
       size={size}

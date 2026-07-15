@@ -99,8 +99,11 @@ src-tauri/src/
                 5xx, and 403s (ambiguous: scope OR Premium-required) never
                 are. "spotify-status" event + spotify_status seed. Scopes
                 request read+modify up front so PR 3's play-now/feeder needs
-                no re-consent. Queue read (spotify_queue) has a 5s response
-                cache; ureq blocking in spawn_blocking per the lyrics.rs
+                no re-consent. Queue reads are internal-only (queue_fresh, for
+                play_now positioning + upnext's reconcile — the frontend
+                spotify_queue command and its 5s cache were removed 2026-07-15;
+                the queue UI is Palette-managed via upnext.rs); ureq blocking in
+                spawn_blocking per the lyrics.rs
                 discipline; art comes as small remote URLs the webview loads
                 directly. Tray item "Connect Spotify" ⇄ "Disconnect Spotify"
                 doubles as state + flow narration — spotify.rs owns the

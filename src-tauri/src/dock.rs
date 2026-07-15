@@ -42,7 +42,7 @@
  * now-disconnected monitor.
  */
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -79,6 +79,13 @@ const WATCH_MS: u64 = 60;
 /// must flip before a click can land), relaxed when it's far away.
 const HIT_NEAR_MS: u64 = 8;
 const HIT_FAR_MS: u64 = 40;
+/// While hidden the watcher PARKS on Dock::show_signal instead of polling — a
+/// hidden window takes no clicks. apply_visibility wakes it on show, so the
+/// click-through state is correct before the first click can land (no
+/// post-show staleness). This is just the park's safety-timeout: if a wake
+/// signal were ever missed the watcher re-checks visibility this often, so a
+/// bug degrades to a slow correction, never a wedge or a stuck click-through.
+const HIT_PARK_SAFETY_MS: u64 = 250;
 /// "Near" halo around the window rect that switches the fast cadence on.
 const HIT_NEAR_PAD: i32 = 64;
 /// Post-corner-change grace: the webview shell glides to its new seat for
@@ -203,6 +210,15 @@ pub struct Dock {
     /// (logical px) for set_window_size to settle instead of the
     /// window-state position — which IS the fullscreen seat in that case.
     launch_pos: Mutex<Option<(f64, f64)>>,
+    /// The hit watcher parks here while the window is hidden (a hidden window
+    /// takes no clicks, so there's nothing to poll for). apply_visibility's
+    /// show path calls notify_shown, waking it within a frame so the
+    /// click-through state is correct before the first click can land — no
+    /// post-show staleness window. The bool is the wake flag guarding against
+    /// a lost wakeup (a show landing between the watcher's visibility check
+    /// and its park); the Condvar's timeout is a safety net so a missed
+    /// signal degrades to a slow re-check, never a wedge.
+    show_signal: (Mutex<bool>, Condvar),
 }
 
 impl Default for Dock {
@@ -221,8 +237,19 @@ impl Default for Dock {
             fs_seat: Mutex::new(None),
             seat_gate: Mutex::new(()),
             launch_pos: Mutex::new(None),
+            show_signal: (Mutex::new(false), Condvar::new()),
         }
     }
+}
+
+/// Wake the hit watcher from its hidden-window park (apply_visibility's show
+/// path). Sets the wake flag under the lock so a park that hasn't started yet
+/// still sees it, then signals. No-op cost when the watcher isn't parked.
+pub(crate) fn notify_shown(app: &AppHandle) {
+    let dock = app.state::<Dock>();
+    let (lock, cv) = &dock.show_signal;
+    *lock.lock().unwrap_or_else(PoisonError::into_inner) = true;
+    cv.notify_all();
 }
 
 /// Work area (monitor minus taskbar) in physical px: (x, y, w, h).
@@ -357,8 +384,16 @@ fn settle_target(
     // Rails: per-axis, the seat coordinate IS the margin rail on the
     // corner's side — a near-edge drop settles flush instead of a few px off.
     let rail = (RAIL_PX * scale).round() as i32;
-    let x = if (x - seat.0).abs() <= rail { seat.0 } else { x };
-    let y = if (y - seat.1).abs() <= rail { seat.1 } else { y };
+    let x = if (x - seat.0).abs() <= rail {
+        seat.0
+    } else {
+        x
+    };
+    let y = if (y - seat.1).abs() <= rail {
+        seat.1
+    } else {
+        y
+    };
     (corner, (x, y))
 }
 
@@ -509,7 +544,13 @@ fn spawn_animation(
 /// not the whole-window fallback, so a settle within the grace window can't
 /// derive — and, during a fullscreen episode, PERSIST — a window-center
 /// corner (quick-review catch, 2026-07-13).
-fn footprint_rect(window: &WebviewWindow, wx: i32, wy: i32, ww: i32, wh: i32) -> (i32, i32, i32, i32) {
+fn footprint_rect(
+    window: &WebviewWindow,
+    wx: i32,
+    wy: i32,
+    ww: i32,
+    wh: i32,
+) -> (i32, i32, i32, i32) {
     let dock = window.state::<Dock>();
     let hit = *dock.hit_size.lock().unwrap_or_else(PoisonError::into_inner);
     let Some((hw, hh)) = hit else {
@@ -538,7 +579,10 @@ fn footprint_rect(window: &WebviewWindow, wx: i32, wy: i32, ww: i32, wh: i32) ->
 /// stays interactive until it lands (see corner_changed / HIT_GRACE_MS).
 fn hit_rect(window: &WebviewWindow, wx: i32, wy: i32, ww: i32, wh: i32) -> (i32, i32, i32, i32) {
     let dock = window.state::<Dock>();
-    let changed = *dock.corner_changed.lock().unwrap_or_else(PoisonError::into_inner);
+    let changed = *dock
+        .corner_changed
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     if changed.is_some_and(|t| t.elapsed() < Duration::from_millis(HIT_GRACE_MS)) {
         return (wx, wy, ww, wh);
     }
@@ -554,7 +598,10 @@ fn hit_rect(window: &WebviewWindow, wx: i32, wy: i32, ww: i32, wh: i32) -> (i32,
 fn set_corner(dock: &Dock, corner: Corner, gliding: bool) {
     let mut c = dock.corner.lock().unwrap_or_else(PoisonError::into_inner);
     if gliding && c.is_some() && *c != Some(corner) {
-        *dock.corner_changed.lock().unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+        *dock
+            .corner_changed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
     }
     *c = Some(corner);
 }
@@ -573,7 +620,9 @@ fn settle_release(window: &WebviewWindow) {
     } else {
         Space::Desktop
     };
-    let Some(rect) = space_rect(window, space) else { return };
+    let Some(rect) = space_rect(window, space) else {
+        return;
+    };
     let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
         return;
     };
@@ -583,8 +632,13 @@ fn settle_release(window: &WebviewWindow) {
     // just below the midline would snap UP if judged by the window center.
     let (hx, hy, hw, hh) = footprint_rect(window, pos.x, pos.y, w, h);
     let scale = window.scale_factor().unwrap_or(1.0);
-    let (corner, target) =
-        settle_target((hx + hw / 2, hy + hh / 2), (pos.x, pos.y), (w, h), &rect, scale);
+    let (corner, target) = settle_target(
+        (hx + hw / 2, hy + hh / 2),
+        (pos.x, pos.y),
+        (w, h),
+        &rect,
+        scale,
+    );
     // A real corner CHANGE glides the shell to its new seat (App.tsx FLIP) —
     // open the hit-rect grace window for that visible glide.
     set_corner(&dock, corner, true);
@@ -624,7 +678,10 @@ pub fn init(app: &AppHandle) {
             v.get("x").and_then(Value::as_f64),
             v.get("y").and_then(Value::as_f64),
         ) {
-            *dock.launch_pos.lock().unwrap_or_else(PoisonError::into_inner) = Some((x, y));
+            *dock
+                .launch_pos
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some((x, y));
         }
         if !v.is_null() {
             crate::settings::set_value(app, "desktopReturn", Value::Null);
@@ -650,10 +707,15 @@ pub fn set_fullscreen_context(app: &AppHandle, on: bool) {
 /// flight — moving the window mid-drag would yank it out from under the
 /// hand, the conceal's exact rule.
 pub fn sync_seat(app: &AppHandle) {
-    let Some(window) = app.get_webview_window("main") else { return };
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
     let dock = app.state::<Dock>();
     // One reconciler at a time — see the seat_gate field doc.
-    let _gate = dock.seat_gate.lock().unwrap_or_else(PoisonError::into_inner);
+    let _gate = dock
+        .seat_gate
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let want = dock.want_fs.load(Ordering::SeqCst);
     if want == dock.seated_fs.load(Ordering::SeqCst) {
         return;
@@ -688,7 +750,9 @@ pub fn sync_seat(app: &AppHandle) {
             "desktopReturn",
             json!({ "x": pos.x as f64 / scale, "y": pos.y as f64 / scale }),
         );
-        let Some(rect) = space_rect(&window, Space::Fullscreen) else { return };
+        let Some(rect) = space_rect(&window, Space::Fullscreen) else {
+            return;
+        };
         match *dock.fs_seat.lock().unwrap_or_else(PoisonError::into_inner) {
             Some(s) => {
                 let seat = corner_origin(s.corner, &rect, w, h, margin);
@@ -705,7 +769,9 @@ pub fn sync_seat(app: &AppHandle) {
     } else {
         // Resolve the rect BEFORE taking the return seat: a monitor-info
         // miss must leave it in place for the next tick's retry.
-        let Some(rect) = space_rect(&window, Space::Desktop) else { return };
+        let Some(rect) = space_rect(&window, Space::Desktop) else {
+            return;
+        };
         let Some(((rx, ry), rcorner)) = dock
             .desktop_return
             .lock()
@@ -763,9 +829,9 @@ pub fn set_window_size(window: WebviewWindow, dock: State<Dock>, width: f64, hei
         .unwrap_or_else(PoisonError::into_inner)
         .take()
         .map(|(x, y)| ((x * scale).round() as i32, (y * scale).round() as i32));
-    let restored = launch_pos.map(Ok).unwrap_or_else(|| {
-        window.outer_position().map(|p| (p.x, p.y)).map_err(|_| ())
-    });
+    let restored = launch_pos
+        .map(Ok)
+        .unwrap_or_else(|| window.outer_position().map(|p| (p.x, p.y)).map_err(|_| ()));
     let (corner, (x, y)) = match restored {
         Ok(pos) => {
             // hit_size isn't reported yet at launch, so footprint_rect
@@ -804,14 +870,35 @@ pub fn set_hit_size(dock: State<Dock>, width: f64, height: f64) {
 /// window is interactive exactly while the cursor is inside the hit rect —
 /// the current mode's footprint, anchored at the docked corner. Toggles are
 /// suppressed mid-press so a drag/click can't have the window yanked out
-/// from under it, and skipped while hidden.
+/// from under it. While hidden the loop parks on Dock::show_signal (woken by
+/// apply_visibility's show path) instead of polling.
 pub fn spawn_hit_watcher(window: WebviewWindow) {
     std::thread::spawn(move || {
         // Local mirror of the applied state — the window starts interactive.
         let mut ignoring = false;
         loop {
             let mut near = false;
-            if window.is_visible().unwrap_or(false) {
+            let visible = window.is_visible().unwrap_or(false);
+            if !visible {
+                // Park until a show wakes us (or the safety timeout). Re-check
+                // visibility under the lock so a show that landed between the
+                // check above and here isn't waited past (lost-wakeup guard);
+                // the wake flag covers a notify_shown that ran before we
+                // parked. On wake the top-of-loop is_visible() runs the hit
+                // block immediately, so the state is right before any click.
+                let dock = window.state::<Dock>();
+                let (lock, cv) = &dock.show_signal;
+                let mut shown = lock.lock().unwrap_or_else(PoisonError::into_inner);
+                if !*shown && !window.is_visible().unwrap_or(false) {
+                    let (g, _) = cv
+                        .wait_timeout(shown, Duration::from_millis(HIT_PARK_SAFETY_MS))
+                        .unwrap_or_else(PoisonError::into_inner);
+                    shown = g;
+                }
+                *shown = false; // consume
+                continue;
+            }
+            {
                 let mut p = windows::Win32::Foundation::POINT::default();
                 let got = unsafe { GetCursorPos(&mut p).is_ok() };
                 if got {
@@ -847,7 +934,12 @@ pub fn spawn_hit_watcher(window: WebviewWindow) {
                     }
                 }
             }
-            std::thread::sleep(Duration::from_millis(if near { HIT_NEAR_MS } else { HIT_FAR_MS }));
+            // Only reached while visible (the hidden branch parks + continues).
+            std::thread::sleep(Duration::from_millis(if near {
+                HIT_NEAR_MS
+            } else {
+                HIT_FAR_MS
+            }));
         }
     });
 }
@@ -879,7 +971,10 @@ pub fn on_moved(window: &Window) {
     if dock.animating.load(Ordering::SeqCst) {
         return; // self-inflicted move
     }
-    *dock.last_moved.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now();
+    *dock
+        .last_moved
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Instant::now();
     if dock
         .watcher_armed
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -890,7 +985,10 @@ pub fn on_moved(window: &Window) {
             let dock = window.state::<Dock>();
             loop {
                 std::thread::sleep(Duration::from_millis(WATCH_MS));
-                let last = *dock.last_moved.lock().unwrap_or_else(PoisonError::into_inner);
+                let last = *dock
+                    .last_moved
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
                 if last.elapsed() < Duration::from_millis(DEBOUNCE_MS) {
                     continue; // still moving
                 }
@@ -916,7 +1014,9 @@ pub fn on_moved(window: &Window) {
 /// forgets the remembered fullscreen seat (reset means "back to defaults"
 /// for whichever seat is live); the desktop return position is untouched.
 pub fn reset_position(app: &AppHandle) {
-    let Some(window) = app.get_webview_window("main") else { return };
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
     // An explicit summons: clear manual hide, snooze any conceal episode,
     // and let apply_visibility (the only show/hide caller) reconcile.
     let vis = app.state::<crate::VisIntent>();
@@ -937,7 +1037,9 @@ pub fn reset_position(app: &AppHandle) {
     // flips the corner, the shell FLIPs with it, so open the grace window.
     set_corner(&dock, Corner::BottomRight, true);
     emit_corner(&window, Corner::BottomRight);
-    let Some(wa) = space_rect(&window, space) else { return };
+    let Some(wa) = space_rect(&window, space) else {
+        return;
+    };
     let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
         return;
     };

@@ -31,18 +31,18 @@ use windows::Win32::Media::Audio::{
     eConsole, eRender, ActivateAudioInterfaceAsync, AudioSessionStateActive,
     IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
     IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
-    IAudioSessionControl2, IMMDeviceEnumerator, MMDeviceEnumerator,
-    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-    AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS,
-    AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
-    AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
-    VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX,
+    IAudioSessionControl2, IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT,
+    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
+    AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
+    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
+    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+    WAVEFORMATEX,
 };
 use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
 use windows::Win32::System::Threading::{
-    CreateEventW, OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject,
-    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    CreateEventW, OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
 };
 use windows::Win32::System::Variant::VT_BLOB;
 
@@ -113,7 +113,9 @@ fn process_aumid(process: HANDLE) -> Option<String> {
         if rc != ERROR_SUCCESS {
             return None;
         }
-        Some(String::from_utf16_lossy(&buf[..len.saturating_sub(1) as usize]))
+        Some(String::from_utf16_lossy(
+            &buf[..len.saturating_sub(1) as usize],
+        ))
     }
 }
 
@@ -122,11 +124,20 @@ fn process_stem(process: HANDLE) -> Option<String> {
     unsafe {
         let mut buf = vec![0u16; 1024];
         let mut len = buf.len() as u32;
-        QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len)
-            .ok()?;
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .ok()?;
         let path = String::from_utf16_lossy(&buf[..len as usize]);
         let file = path.rsplit(['\\', '/']).next()?;
-        Some(file.trim_end_matches(".exe").trim_end_matches(".EXE").to_lowercase())
+        Some(
+            file.trim_end_matches(".exe")
+                .trim_end_matches(".EXE")
+                .to_lowercase(),
+        )
     }
 }
 
@@ -180,8 +191,12 @@ pub fn resolve_target(aumid: &str) -> Option<Target> {
         let sessions = manager.GetSessionEnumerator().ok()?;
         let count = sessions.GetCount().ok()?;
         for i in 0..count {
-            let Ok(control) = sessions.GetSession(i) else { continue };
-            let Ok(control2) = control.cast::<IAudioSessionControl2>() else { continue };
+            let Ok(control) = sessions.GetSession(i) else {
+                continue;
+            };
+            let Ok(control2) = control.cast::<IAudioSessionControl2>() else {
+                continue;
+            };
             let pid = control2.GetProcessId().unwrap_or(0);
             if pid == 0 || !pid_matches(pid, &aumid_lower) {
                 continue;
@@ -511,9 +526,11 @@ mod tests {
         };
         std::thread::sleep(Duration::from_secs(3));
         let packets = frames.load(Ordering::Relaxed);
-        let samples = ring.lock().unwrap_or_else(std::sync::PoisonError::into_inner).snapshot();
-        let rms =
-            (samples.iter().map(|s| s * s).sum::<f32>() / samples.len().max(1) as f32).sqrt();
+        let samples = ring
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot();
+        let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len().max(1) as f32).sqrt();
         eprintln!(
             "probe: 3s → packets={packets} rms={rms:.5} (packets>0 = stream delivers; rms>0 = real audio while the target plays; has_data={})",
             cap.has_data()

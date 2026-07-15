@@ -77,12 +77,15 @@ fn fill(app: &AppHandle, title: &str, artist: &str) -> String {
     // same-artist backfill. Below-floor different-artist entries are the
     // mush tail — dropped entirely.
     let seed_artist = artist.trim().to_lowercase();
-    let same_artist =
-        |s: &lastfm::SimilarTrack| s.artist.trim().to_lowercase() == seed_artist;
+    let same_artist = |s: &lastfm::SimilarTrack| s.artist.trim().to_lowercase() == seed_artist;
     let candidates: Vec<&lastfm::SimilarTrack> = similars
         .iter()
         .filter(|s| s.score >= MATCH_FLOOR && !same_artist(s))
-        .chain(similars.iter().filter(|s| s.score >= MATCH_FLOOR && same_artist(s)))
+        .chain(
+            similars
+                .iter()
+                .filter(|s| s.score >= MATCH_FLOOR && same_artist(s)),
+        )
         .collect();
     if candidates.is_empty() {
         return "no_data".into();

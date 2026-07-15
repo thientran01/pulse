@@ -1,8 +1,10 @@
 //! Play-history: logs every track Pulse displays, fed from the media loop's
 //! own GSMTC stream (GSMTC has no history API — this file IS the history).
 //! Append-only JSONL at app_data/history.jsonl, no cap; an in-memory
-//! (started_at, byte offset) index built at startup serves backwards
-//! pagination without holding entries in RAM.
+//! (started_at, byte offset) index serves backwards pagination without
+//! holding entries in RAM. The index build reads the whole log, so it runs
+//! on a background thread spawned from setup (off the launch path —
+//! Milestone D); page() waits on it, bounded, via the Tracker condvar.
 //!
 //! `ms_listened` is accumulated wall-clock time spent in status "playing",
 //! measured with `Instant` at status transitions. This is NOT position
@@ -27,9 +29,9 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Same-track reappearance window after a session vanish (AM stop → resume).
 const REAPPEAR_GRACE: Duration = Duration::from_secs(600);
@@ -112,7 +114,11 @@ impl Candidate {
             // position carries no replay signal — don't seed the baseline
             // from it (a stale first read past the bar would make the next
             // real near-zero position look like a replay).
-            last_raw_pos_ms: if np.position_at_ms > 0 { np.position_ms } else { 0 },
+            last_raw_pos_ms: if np.position_at_ms > 0 {
+                np.position_ms
+            } else {
+                0
+            },
             vanished_at: None,
             spotify_uri: None,
             media_kind: np.media_kind.clone(),
@@ -154,13 +160,24 @@ struct IndexEntry {
 }
 
 #[derive(Default)]
-pub struct Tracker(Mutex<Inner>);
+pub struct Tracker {
+    inner: Mutex<Inner>,
+    /// Signals `index_ready` flipping true (the background build finishing).
+    index_built: Condvar,
+}
 
 #[derive(Default)]
 struct Inner {
     /// app_data dir — None until init() ran (ingests before that no-op).
     dir: Option<PathBuf>,
     index: Vec<IndexEntry>,
+    /// False until the background index build finished (or was superseded by
+    /// a clear). Appends don't need it (they compute offsets from the file);
+    /// only page() waits.
+    index_ready: bool,
+    /// Bumped by clear_history so an in-flight build result from the
+    /// pre-truncation log is discarded instead of resurrecting it.
+    epoch: u64,
     candidate: Option<Candidate>,
 }
 
@@ -172,45 +189,99 @@ fn unix_ms() -> i64 {
 }
 
 fn lock(t: &Tracker) -> std::sync::MutexGuard<'_, Inner> {
-    t.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    t.inner
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn log_path(dir: &Path) -> PathBuf {
     dir.join("history.jsonl")
 }
 
-/// Resolve app_data and build the line index. Called once from setup; a
-/// failed resolution leaves the tracker inert (ingest no-ops) rather than
-/// logging to a surprise location.
+/// Resolve app_data (cheap, synchronous) and kick the line-index build onto
+/// a background thread — the build reads the whole log, and launch must not
+/// pay for a long listening history. Called once from setup; a failed
+/// resolution leaves the tracker inert (ingest no-ops) rather than logging
+/// to a surprise location.
 pub fn init(app: &AppHandle) {
     let Ok(dir) = app.path().app_data_dir() else {
         log::warn!("history: app data dir unavailable — history disabled this run");
+        // No build will ever run — release page()'s bounded wait immediately.
+        let tracker = app.state::<Tracker>();
+        lock(&tracker).index_ready = true;
+        tracker.index_built.notify_all();
         return;
     };
-    let index = load_index(&log_path(&dir));
-    let tracker = app.state::<Tracker>();
-    let mut inner = lock(&tracker);
-    inner.dir = Some(dir);
-    inner.index = index;
+    let path = log_path(&dir);
+    let epoch = {
+        let tracker = app.state::<Tracker>();
+        let mut inner = lock(&tracker);
+        inner.dir = Some(dir);
+        inner.epoch
+    };
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let (built, boundary) = load_index(&path);
+        let tracker = app.state::<Tracker>();
+        let mut inner = lock(&tracker);
+        if inner.epoch == epoch {
+            // Entries appended while the build ran sit at offsets >= the
+            // snapshot boundary (appends only ever grow the file), so they're
+            // exactly the in-memory rows the snapshot missed — keep them, in
+            // order, after the built rows. Anything below the boundary is
+            // already IN the snapshot and would only duplicate. The boundary
+            // is end-of-last-good-line (see load_index), so an append caught
+            // torn by the read lands at the boundary and is recovered here
+            // rather than falling into the gap between built and late.
+            let late: Vec<IndexEntry> = inner
+                .index
+                .drain(..)
+                .filter(|e| e.offset >= boundary)
+                .collect();
+            inner.index = built;
+            inner.index.extend(late);
+        }
+        // On an epoch mismatch a clear_history truncated the log mid-build:
+        // the live index (empty + post-clear appends) is the truth and the
+        // snapshot would resurrect erased listens — drop it on the floor.
+        inner.index_ready = true;
+        drop(inner);
+        tracker.index_built.notify_all();
+    });
 }
 
 /// Byte-wise on purpose: `read_to_string` would reject the WHOLE file over
 /// one torn multi-byte character (a crash mid-append on a non-ASCII title),
 /// silently emptying the index. Parsing per line bounds that damage to the
-/// torn line — every other entry stays reachable.
-fn load_index(path: &Path) -> Vec<IndexEntry> {
+/// torn line — every other entry stays reachable. Also returns the merge
+/// boundary: the offset just past the LAST SUCCESSFULLY PARSED line — NOT
+/// total bytes read. The distinction matters when the background build reads
+/// the file mid-append: a torn tail (an in-flight append caught half-written)
+/// fails to parse, and counting its bytes toward the boundary would push it
+/// past the offset the concurrent finalize() recorded for that same entry —
+/// excluding it from BOTH the built snapshot and the "late" merge set, silently
+/// dropping it from the in-memory index until the next restart. Boundary =
+/// end-of-last-good-line keeps that entry in the late set (its offset == the
+/// boundary), so the merge recovers it. A fully-read entry sits below the next
+/// good line's end, so it can't double-count either.
+fn load_index(path: &Path) -> (Vec<IndexEntry>, u64) {
     let Ok(raw) = std::fs::read(path) else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
     let mut offset = 0u64;
+    let mut good_end = 0u64;
     let mut out = Vec::new();
     for line in raw.split_inclusive(|b| *b == b'\n') {
         if let Ok(e) = serde_json::from_slice::<HistoryEntry>(line) {
-            out.push(IndexEntry { started_at_ms: e.started_at_ms, offset });
+            out.push(IndexEntry {
+                started_at_ms: e.started_at_ms,
+                offset,
+            });
+            good_end = offset + line.len() as u64;
         }
         offset += line.len() as u64;
     }
-    out
+    (out, good_end)
 }
 
 /// Feed one observation (a media-loop snapshot or a hidden-window probe)
@@ -271,7 +342,9 @@ pub fn flush(app: &AppHandle) {
 pub fn enrich_uri(app: &AppHandle, title: &str, artist: &str, uri: &str) {
     let tracker = app.state::<Tracker>();
     let mut inner = lock(&tracker);
-    let Some(c) = inner.candidate.as_mut() else { return };
+    let Some(c) = inner.candidate.as_mut() else {
+        return;
+    };
     if c.spotify_uri.is_some() || c.player != "spotify" {
         return;
     }
@@ -360,7 +433,10 @@ impl Inner {
         let dir = self.dir.clone()?;
         match append(&dir, &entry) {
             Ok(offset) => {
-                self.index.push(IndexEntry { started_at_ms: entry.started_at_ms, offset });
+                self.index.push(IndexEntry {
+                    started_at_ms: entry.started_at_ms,
+                    offset,
+                });
                 Some(entry)
             }
             Err(e) => {
@@ -442,20 +518,45 @@ fn append(dir: &Path, entry: &HistoryEntry) -> std::io::Result<u64> {
     let offset = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     let mut line = serde_json::to_string(entry).map_err(std::io::Error::other)?;
     line.push('\n');
-    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
     file.write_all(line.as_bytes())?;
     Ok(offset)
 }
 
 /// Newest-first history page. `before_started_at_ms` = the oldest loaded
 /// entry's started_at for infinite scroll; None seeds from the newest.
+/// Waits (bounded) for the background index build on the blocking pool —
+/// usually a no-op, the build finishes long before the first queue open; on
+/// timeout it fails open with whatever rows exist rather than hanging the
+/// feed.
 #[tauri::command]
 pub async fn history_page(
-    tracker: State<'_, Tracker>,
+    app: AppHandle,
     before_started_at_ms: Option<i64>,
     limit: u32,
 ) -> Result<Vec<HistoryEntry>, ()> {
-    Ok(lock(&tracker).page(before_started_at_ms, (limit as usize).min(200)))
+    tauri::async_runtime::spawn_blocking(move || {
+        let tracker = app.state::<Tracker>();
+        let mut inner = lock(&tracker);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !inner.index_ready {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let (guard, _) = tracker
+                .index_built
+                .wait_timeout(inner, deadline - now)
+                .unwrap_or_else(PoisonError::into_inner);
+            inner = guard;
+        }
+        inner.page(before_started_at_ms, (limit as usize).min(200))
+    })
+    .await
+    .map_err(|_| ())
 }
 
 /// Wipe all play history: the JSONL log, the thumbnail cache, and the
@@ -471,6 +572,10 @@ pub async fn clear_history(app: AppHandle) -> bool {
         let mut inner = lock(&tracker);
         inner.candidate = None;
         inner.index.clear();
+        // Invalidate any in-flight background index build — its snapshot
+        // predates the truncation and merging it would resurrect erased
+        // listens.
+        inner.epoch = inner.epoch.wrapping_add(1);
         inner.dir.clone()
     };
     let Some(dir) = dir else {
@@ -533,7 +638,10 @@ pub async fn history_thumb_url(app: AppHandle, key: String) -> Option<String> {
     }
     let path = thumbs_dir(&app)?.join(format!("{key}.jpg"));
     let mut bytes = Vec::new();
-    std::fs::File::open(path).ok()?.read_to_end(&mut bytes).ok()?;
+    std::fs::File::open(path)
+        .ok()?
+        .read_to_end(&mut bytes)
+        .ok()?;
     Some(format!("data:image/jpeg;base64,{}", B64.encode(&bytes)))
 }
 

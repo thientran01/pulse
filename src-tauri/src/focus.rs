@@ -91,7 +91,9 @@ pub async fn focus_open(app: AppHandle) {
                 return;
             }
             let _ = win.set_focus();
-            app.state::<VisIntent>().focus_open.store(true, Ordering::Relaxed);
+            app.state::<VisIntent>()
+                .focus_open
+                .store(true, Ordering::Relaxed);
             apply_visibility(&app);
         }
         Err(e) => {
@@ -115,6 +117,8 @@ pub async fn focus_close(app: AppHandle) {
 /// `.get()`, which must never block the message pump (the Application-Hang
 /// class). See lib.rs defer_main_action.
 pub fn on_destroyed(app: &AppHandle) {
-    app.state::<VisIntent>().focus_open.store(false, Ordering::Relaxed);
+    app.state::<VisIntent>()
+        .focus_open
+        .store(false, Ordering::Relaxed);
     crate::defer_main_action(app, apply_visibility);
 }

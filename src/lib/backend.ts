@@ -12,7 +12,6 @@ import {
   type PresenceState,
   type QueueTrack,
   type SearchResult,
-  type SpotifyQueueResult,
   type SpotifyStatus,
 } from "../types";
 import * as posClock from "./posClock";
@@ -136,12 +135,9 @@ if (!IN_TAURI) {
 // ---- Spotify Web API (spotify.rs seam) ----
 
 /** `?spotify=off` forces the disconnected gate state in preview; the mock is
- * otherwise connected so the queue surface is iterable at plain `/`.
- * `?queue=empty` forces the no_playback answer. */
+ * otherwise connected so the queue surface is iterable at plain `/`. */
 const SPOTIFY_OFF =
   !IN_TAURI && new URLSearchParams(window.location.search).get("spotify") === "off";
-const QUEUE_EMPTY =
-  !IN_TAURI && new URLSearchParams(window.location.search).get("queue") === "empty";
 /** `?similar=<status>` forces moreLikeThis to answer that status (no_data /
  * no_key / offline …) so every toast is preview-reachable. */
 const SIMILAR_FORCE = IN_TAURI
@@ -321,6 +317,18 @@ function mockArt(): string {
   ctx.arc(100, 44, 26, 0, Math.PI * 2);
   ctx.fill();
   return c.toDataURL("image/png");
+}
+
+/** A seek HOTKEY fired (lib.rs emits the direction only) — the SeekButton
+ * runs the same one-revolution spin a click gets, so both entry points speak
+ * one feedback language. Mock: never fires (the browser has no global
+ * hotkeys; IconLab demos the spin). */
+export function onSeekNudge(cb: (dir: -1 | 1) => void): () => void {
+  if (!IN_TAURI) return () => {};
+  const un = listen<-1 | 1>("seek-nudge", (e) => cb(e.payload));
+  return () => {
+    un.then((f) => f());
+  };
 }
 
 export function onNowPlaying(cb: (np: NowPlaying) => void): () => void {
@@ -790,29 +798,6 @@ export const commands = {
   spotifyDisconnect(): void {
     if (IN_TAURI) void invoke("spotify_disconnect");
     else pushMockSpotify(false);
-  },
-  /** The user's Spotify queue (currently playing + up next). Backend caches
-   * 5s; call on queue-view visible + track change, never poll hidden. */
-  async spotifyQueue(): Promise<SpotifyQueueResult> {
-    if (!IN_TAURI) {
-      if (!mockSpotifyConnected) {
-        return { status: "disconnected", currently_playing: null, queue: [] };
-      }
-      if (QUEUE_EMPTY) {
-        return { status: "no_playback", currently_playing: null, queue: [] };
-      }
-      // The ring rotated past the current index — mockSkip visibly refreshes.
-      const upcoming = Array.from(
-        { length: MOCK_TRACKS.length - 1 },
-        (_, i) => MOCK_TRACKS[(mockTrack + 1 + i) % MOCK_TRACKS.length],
-      );
-      return {
-        status: "ok",
-        currently_playing: mockQueueTrack(MOCK_TRACKS[mockTrack]),
-        queue: upcoming.map(mockQueueTrack),
-      };
-    }
-    return invoke<SpotifyQueueResult>("spotify_queue");
   },
   /** Pulse-managed up-next list (seed; "upnext-changed" is the live half). */
   async upnextList(): Promise<QueueTrack[]> {

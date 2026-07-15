@@ -80,12 +80,18 @@ fn hotkey_defs() -> [HotkeyDef; 7] {
         // Seek hotkeys: no post-seek emit (it would carry the pre-seek
         // position, snapping the UI back — the seek-command rule). The jump
         // distance reads the persisted "seek_amount" setting live.
+        // "seek-nudge" carries only the direction — the SeekButton runs the
+        // same one-revolution spin a click gets, so the hotkey and the button
+        // speak one feedback language (PR #21 follow-up). The buttons gate on
+        // can_seek, so a player that ignores the SMTC call (Apple Music)
+        // never shows a spin for a seek that didn't happen.
         HotkeyDef {
             id: "seekback",
             label: "Seek backward",
             default_chord: HK_SEEK_BACK,
             action: |app| {
                 media::seek_rel_ms(-seek_step_ms(app));
+                let _ = app.emit("seek-nudge", -1);
             },
         },
         HotkeyDef {
@@ -94,6 +100,7 @@ fn hotkey_defs() -> [HotkeyDef; 7] {
             default_chord: HK_SEEK_FWD,
             action: |app| {
                 media::seek_rel_ms(seek_step_ms(app));
+                let _ = app.emit("seek-nudge", 1);
             },
         },
         // Queue-aware like the media_next command — lands on the up-next front.
@@ -214,7 +221,10 @@ pub(crate) fn register_all(app: &AppHandle) {
     }
     {
         let state = app.state::<HotkeyState>();
-        *state.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = infos.clone();
+        *state
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = infos.clone();
     }
     let _ = app.emit("hotkeys-changed", &infos);
 }
@@ -248,7 +258,11 @@ async fn rebind_hotkey(app: AppHandle, id: String, chord: String) -> Vec<HotkeyI
 /// Clear all overrides and re-register the defaults. Returns the fresh table.
 #[tauri::command]
 async fn reset_hotkeys(app: AppHandle) -> Vec<HotkeyInfo> {
-    settings::set_value(&app, "hotkeys", serde_json::Value::Object(Default::default()));
+    settings::set_value(
+        &app,
+        "hotkeys",
+        serde_json::Value::Object(Default::default()),
+    );
     register_all(&app);
     hotkey_snapshot(&app)
 }
@@ -315,17 +329,18 @@ async fn media_seek_abs(position_ms: i64) -> bool {
 struct UiReactive(Arc<Mutex<std::collections::HashMap<String, bool>>>);
 
 fn reactive_effective(votes: &Mutex<std::collections::HashMap<String, bool>>) -> bool {
-    let m = votes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let m = votes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     m.is_empty() || m.values().any(|v| *v)
 }
 
 #[tauri::command]
-fn set_reactive_enabled(
-    enabled: bool,
-    window: tauri::WebviewWindow,
-    state: State<UiReactive>,
-) {
-    let mut votes = state.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+fn set_reactive_enabled(enabled: bool, window: tauri::WebviewWindow, state: State<UiReactive>) {
+    let mut votes = state
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     votes.insert(window.label().to_string(), enabled);
 }
 
@@ -380,10 +395,16 @@ async fn now_playing(app: AppHandle) -> Stamped {
     let my_seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let np = media::snapshot(&app.state::<ArtCache>());
     let last = app.state::<LastEmit>();
-    let mut st = last.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut st = last
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if my_seq >= st.published_seq {
         st.published_seq = my_seq;
-        return Stamped { seq: my_seq, now: np };
+        return Stamped {
+            seq: my_seq,
+            now: np,
+        };
     }
     // Outrun: a snapshot that STARTED after ours already published. Hand back
     // the freshest published payload instead; fall back to our own read when
@@ -434,7 +455,10 @@ pub(crate) fn emit_now(app: &AppHandle) -> media::NowPlaying {
     let my_seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let np = media::snapshot(&app.state::<ArtCache>());
     let last = app.state::<LastEmit>();
-    let mut st = last.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut st = last
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if my_seq < st.published_seq {
         return np;
     }
@@ -587,9 +611,13 @@ impl Default for VisIntent {
 
 impl VisIntent {
     pub fn effective_visible(&self) -> bool {
+        // ≡ !user_hidden && !(concealed && !snoozed) && !focus_open — the
+        // intent formula as documented; the middle term is written OR-style
+        // ("not concealed, or the conceal is snoozed") for clippy's
+        // nonminimal_bool hard gate.
         !self.user_hidden.load(Ordering::Relaxed)
-            && !(self.concealed.load(Ordering::Relaxed)
-                && !self.conceal_snoozed.load(Ordering::Relaxed))
+            && (!self.concealed.load(Ordering::Relaxed)
+                || self.conceal_snoozed.load(Ordering::Relaxed))
             && !self.focus_open.load(Ordering::Relaxed)
     }
 }
@@ -598,7 +626,9 @@ impl VisIntent {
 /// may touch GSMTC (emit_now runs inline on show — the toggle_widget
 /// precedent); from the single-instance WndProc, defer to the async pool.
 pub(crate) fn apply_visibility(app: &AppHandle) {
-    let Some(win) = app.get_webview_window("main") else { return };
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
     let want = app.state::<VisIntent>().effective_visible();
     // On an is_visible() error, assume the OPPOSITE of intent so the
     // reconcile always acts (show/hide are idempotent). A fixed default
@@ -612,6 +642,10 @@ pub(crate) fn apply_visibility(app: &AppHandle) {
         // calls back into apply_visibility.
         dock::sync_seat(app);
         let _ = win.show();
+        // The hit watcher parks while hidden — wake it so click-through is
+        // reconciled to the cursor before the first click, not up to a poll
+        // interval later.
+        dock::notify_shown(app);
         // The poll loop skips hidden windows — refresh immediately on show.
         emit_now(app);
     } else if !want && is {
@@ -620,7 +654,9 @@ pub(crate) fn apply_visibility(app: &AppHandle) {
 }
 
 fn toggle_widget(app: &AppHandle) {
-    let Some(win) = app.get_webview_window("main") else { return };
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
     let vis = app.state::<VisIntent>();
     // During the focus takeover the hotkey means "give me the widget back":
     // LEAVE FOCUS (the Destroyed handler restores the exact prior intent).
@@ -767,7 +803,9 @@ async fn spotify_connect(app: AppHandle) {
 /// show/hide flows through apply_visibility (grep rule).
 #[tauri::command]
 async fn hide_widget(app: AppHandle) {
-    app.state::<VisIntent>().user_hidden.store(true, Ordering::Relaxed);
+    app.state::<VisIntent>()
+        .user_hidden
+        .store(true, Ordering::Relaxed);
     apply_visibility(&app);
 }
 
@@ -1002,7 +1040,9 @@ pub fn run() {
         .manage(history::Tracker::default())
         .manage(spotify::SpotifyAuth::default())
         .manage(upnext::UpNext::default())
-        .manage(UiReactive(Arc::new(Mutex::new(std::collections::HashMap::new()))))
+        .manage(UiReactive(Arc::new(Mutex::new(
+            std::collections::HashMap::new(),
+        ))))
         .manage(dock::Dock::default())
         .manage(presence::Presence::default())
         .manage(VisIntent::default())
@@ -1026,7 +1066,6 @@ pub fn run() {
             quit_app,
             spotify::spotify_status,
             spotify::spotify_disconnect,
-            spotify::spotify_queue,
             spotify::spotify_play_now,
             spotify::spotify_resolve_uri,
             spotify::spotify_search,
@@ -1085,8 +1124,10 @@ pub fn run() {
                 tauri::WindowEvent::Destroyed => {
                     let votes = window.app_handle().state::<UiReactive>();
                     {
-                        let mut m =
-                            votes.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let mut m = votes
+                            .0
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         m.remove(window.label());
                     }
                     if window.label() == focus::LABEL {
@@ -1130,8 +1171,7 @@ pub fn run() {
             // Preferences window (prefs.rs) — the reliable entry for returning
             // users (the right-click context menu is the other, in a later
             // phase). "Shortcuts / Help" jumps straight to the Hotkeys section.
-            let prefs_item =
-                MenuItem::with_id(app, "prefs", "Preferences…", true, None::<&str>)?;
+            let prefs_item = MenuItem::with_id(app, "prefs", "Preferences…", true, None::<&str>)?;
             let shortcuts_item =
                 MenuItem::with_id(app, "shortcuts", "Shortcuts / Help", true, None::<&str>)?;
             // Opt-in launch-at-login, default off. The plugin writes the HKCU
@@ -1197,8 +1237,13 @@ pub fn run() {
             // to summon on demand; this feeds the presence loop a synthetic
             // fullscreen verdict for 10s (hysteresis still applies).
             #[cfg(debug_assertions)]
-            let sim_fs =
-                MenuItem::with_id(app, "simfs", "Simulate fullscreen (10s)", true, None::<&str>)?;
+            let sim_fs = MenuItem::with_id(
+                app,
+                "simfs",
+                "Simulate fullscreen (10s)",
+                true,
+                None::<&str>,
+            )?;
             // Dev-only wedge test: fakes the un-reproducible hung-WinRT-call
             // state on the media loop (2026-07-15 freeze) — verifies the
             // watchdog line, that seed/transport stay live (lock narrowing),
@@ -1249,10 +1294,12 @@ pub fn run() {
             // Store the two check items so prefs toggles can mirror the tray.
             {
                 let th = app.state::<TrayHandles>();
-                *th.autostart.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Some(autostart.clone());
-                *th.companion.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Some(companion.clone());
+                *th.autostart
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(autostart.clone());
+                *th.companion
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(companion.clone());
             }
             let update_item = update_check.clone();
             TrayIconBuilder::with_id("pulse-tray")
@@ -1323,7 +1370,8 @@ pub fn run() {
                 dock::spawn_hit_watcher(win);
             }
 
-            // Play-history: resolve the log dir + build the line index once.
+            // Play-history: resolve the log dir now, build the line index on a
+            // background thread (off the launch path — history_page waits on it).
             history::init(app.handle());
             // Managed up-next: restore the persisted list + fed marker.
             upnext::init(app.handle());
@@ -1427,7 +1475,10 @@ pub fn run() {
                         hidden_beats = 0;
                         let tick = media::tick_key();
                         let probing = media::art_probing(&handle.state::<ArtCache>());
-                        let p = if std::mem::take(&mut force_snapshot) || probing || tick != last_tick {
+                        let p = if std::mem::take(&mut force_snapshot)
+                            || probing
+                            || tick != last_tick
+                        {
                             let np = emit_now(&handle);
                             // A play_now jump flickers intermediate tracks as
                             // "playing" (and a slow skip can hold one past the

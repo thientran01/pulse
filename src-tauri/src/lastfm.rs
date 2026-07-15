@@ -40,7 +40,10 @@ pub fn validate_key(key: &str) -> &'static str {
         "https://ws.audioscrobbler.com/2.0/?method=chart.gettopartists&limit=1&api_key={}&format=json",
         urlenc(key),
     );
-    let resp = ureq::get(&url).set("User-Agent", UA).timeout(TIMEOUT).call();
+    let resp = ureq::get(&url)
+        .set("User-Agent", UA)
+        .timeout(TIMEOUT)
+        .call();
     let v: serde_json::Value = match resp {
         Ok(r) => match r.into_json() {
             Ok(v) => v,
@@ -80,7 +83,10 @@ pub fn get_similar(
         urlenc(title),
         urlenc(api_key),
     );
-    let resp = ureq::get(&url).set("User-Agent", UA).timeout(TIMEOUT).call();
+    let resp = ureq::get(&url)
+        .set("User-Agent", UA)
+        .timeout(TIMEOUT)
+        .call();
     let v: serde_json::Value = match resp {
         Ok(r) => r.into_json().map_err(|_| "offline")?,
         // Last.fm serves its application errors as 4xx WITH a JSON body —

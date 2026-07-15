@@ -30,7 +30,14 @@ pub const LABEL: &str = "prefs";
 const W: f64 = 720.0;
 const H: f64 = 560.0;
 
-const SECTIONS: [&str; 6] = ["connectors", "hotkeys", "playback", "general", "about", "data"];
+const SECTIONS: [&str; 6] = [
+    "connectors",
+    "hotkeys",
+    "playback",
+    "general",
+    "about",
+    "data",
+];
 
 fn valid_section(s: &str) -> bool {
     SECTIONS.contains(&s)
@@ -179,7 +186,10 @@ pub async fn prefs_seed(app: AppHandle) -> PrefsSeed {
 #[tauri::command]
 pub async fn set_setting(app: AppHandle, key: String, value: serde_json::Value) {
     crate::settings::set_value(&app, &key, value.clone());
-    let _ = app.emit("settings-changed", serde_json::json!({ "key": key, "value": value }));
+    let _ = app.emit(
+        "settings-changed",
+        serde_json::json!({ "key": key, "value": value }),
+    );
 }
 
 /// Validate a Last.fm API key against the live service (lastfm.rs). "ok" |
