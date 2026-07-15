@@ -29,8 +29,8 @@ import { Envelope, subscribeBands } from "./lib/reactive";
  * 2026-07-14 (Thien's live verdict): the 41-bar 1170×150 band matched the
  * progress bar's width and read as a second timeline, and PR #102's tiny
  * song-block wave overcorrected — now 15 capsules at ~⅔ height (420×100,
- * the lg gap rhythm), a centered instrument clearly narrower than the
- * console. Still under the gentle symmetric peak envelope (roomPeak) so it
+ * keeping the 41-bar band's own ~1.4 gap:bar rhythm), a centered
+ * instrument clearly narrower than the console. Still under the gentle symmetric peak envelope (roomPeak) so it
  * reads as one intentional instrument (tall bass center, tapered edges)
  * instead of a random picket. Same choreography at every size.
  * boxH/aliveW/restW size the container: sm/md morph width between rest and
@@ -59,7 +59,7 @@ const BAR_BINS = {
   sm: [9, 4, 1, 6, 11],
   md: [12, 9, 4, 1, 6, 11, 14],
   lg: [15, 12, 9, 4, 1, 6, 11, 14, 13],
-  room: [13, 15, 12, 14, 15, 12, 9, 4, 1, 6, 11, 14, 13, 15, 12],
+  room: [13, 14, 12, 15, 12, 9, 4, 1, 6, 11, 14, 13, 15, 12, 14],
 } as const;
 /** Minimum bar height while alive, as a fraction of the full bar. */
 const REST = 0.15;
