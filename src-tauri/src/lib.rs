@@ -696,6 +696,24 @@ async fn spotify_connect(app: AppHandle) {
     spotify::start_connect(&app);
 }
 
+/// Hide the widget from a frontend surface (the right-click menu's "Hide
+/// Palette"). A DEDICATED hide: sets the sticky manual-hide intent and
+/// reconciles — NOT toggle_widget, whose focus/visibility inference is meant
+/// for the hotkey/tray and could destroy the focus window instead. Every
+/// show/hide flows through apply_visibility (grep rule).
+#[tauri::command]
+async fn hide_widget(app: AppHandle) {
+    app.state::<VisIntent>().user_hidden.store(true, Ordering::Relaxed);
+    apply_visibility(&app);
+}
+
+/// Quit from a frontend surface (the right-click menu's "Quit Palette"),
+/// mirroring the tray "quit" handler.
+#[tauri::command]
+async fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
 /// Push a label/enabled change to a tray menu item from any thread — menu
 /// items are UI objects, so writes hop to the main thread.
 fn set_menu_label(
@@ -940,6 +958,8 @@ pub fn run() {
             history::history_thumb,
             history::history_thumb_url,
             spotify_connect,
+            hide_widget,
+            quit_app,
             spotify::spotify_status,
             spotify::spotify_disconnect,
             spotify::spotify_queue,

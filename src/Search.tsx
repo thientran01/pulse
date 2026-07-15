@@ -23,6 +23,7 @@ import { useEffect, useRef, useState } from "react";
 import { commands, onSearchShown } from "./lib/backend";
 import { initReactive } from "./lib/reactive";
 import { RowThumb, useSpotifyStatus } from "./Queue";
+import { SpotifyConnectButton } from "./SpotifyConnectButton";
 import type { HistoryEntry, QueueTrack } from "./types";
 
 const RESULT_LIMIT = 8;
@@ -326,11 +327,10 @@ export default function Search() {
     }
   };
 
-  const gateCaption = !spotify.connected
-    ? "Connect Spotify from the tray to search and play"
-    : searchStatus === "offline"
-      ? "Spotify unreachable"
-      : null;
+  // Disconnected → an in-place Connect button (below); connected-but-offline
+  // still narrates. `gated` blocks Enter-to-play and hides the ↵/⇧↵ hint.
+  const offline = spotify.connected && searchStatus === "offline";
+  const gated = !spotify.connected || offline;
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
@@ -344,7 +344,7 @@ export default function Search() {
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setSelected(Math.max(sel - 1, 0));
-    } else if (e.key === "Enter" && rows[sel] && !gateCaption) {
+    } else if (e.key === "Enter" && rows[sel] && !gated) {
       e.preventDefault();
       if (e.shiftKey) void queueRow(rows[sel]);
       else void playRow(rows[sel]);
@@ -391,14 +391,19 @@ export default function Search() {
             // the pane's only focusable element.
             className="search-input min-w-0 flex-1 bg-transparent text-[18px] text-fg outline-none placeholder:text-muted focus-visible:[outline:none]"
           />
-          <span className="shrink-0 text-[11px] text-muted/60">
-            ↵ play · ⇧↵ queue
-          </span>
+          {!gated && (
+            <span className="shrink-0 text-[11px] text-muted/60">↵ play · ⇧↵ queue</span>
+          )}
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-1.5 [scrollbar-width:none]">
-          {gateCaption ? (
-            <p className="m-0 px-2.5 py-2.5 text-[13px] text-muted">{gateCaption}</p>
+          {!spotify.connected ? (
+            <div className="flex flex-col items-start gap-1.5 px-2.5 py-2.5">
+              <SpotifyConnectButton />
+              <p className="m-0 text-[12px] text-muted/70">Connect Spotify to search and play.</p>
+            </div>
+          ) : offline ? (
+            <p className="m-0 px-2.5 py-2.5 text-[13px] text-muted">Spotify unreachable</p>
           ) : (
             <>
               {!hasQuery && rows.length > 0 && (

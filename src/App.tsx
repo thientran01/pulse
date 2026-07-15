@@ -7,6 +7,7 @@ import {
   commands,
   onCursorLeft,
   onDockCorner,
+  onHotkeysChanged,
   onNowPlaying,
   onPresence,
   onPresenceDebug,
@@ -14,7 +15,12 @@ import {
   onSpotifyJump,
   onSpotifyJumpCancel,
   type DockCorner,
+  type HotkeyInfo,
 } from "./lib/backend";
+import { chordById } from "./lib/chords";
+import { Keycaps } from "./Keycaps";
+import { IntroBubble } from "./IntroBubble";
+import { WidgetMenu, WIDGET_MENU_W, WIDGET_MENU_H } from "./WidgetMenu";
 import { VOCAL_LEAD_MS } from "./lib/lrc";
 import { PlayPauseButton, ProgressBar, Transport, useProgressDom } from "./Transport";
 import { LyricsPanel, lyricsKeyOf, useLyrics, type LyricsState } from "./LyricsPanel";
@@ -360,6 +366,37 @@ const SHELL_SEAT: Record<DockCorner, string> = {
  * child's props, so presence context is the only signal that still reaches
  * this subtree — and this instance's frozen `mode`/`corner` keep the
  * outgoing content seated while its shell shrinks over it. */
+/** The no-session resting state. The pill stays a single calm glance (art's
+ * job is done by absence); card and expanded add a one-line nudge pointing at
+ * Search — the play-from-silence path — so a stranger with nothing playing
+ * learns how to start. The resting middot is the ONE licensed ambient element
+ * outside the separator's bars (CLAUDE.md Presence clause 2); its markup rides
+ * along here unchanged. */
+function EmptyState({ mode, searchChord }: { mode: Mode; searchChord: string }) {
+  const restingRow = (
+    <div className="flex items-center justify-center gap-1 text-muted">
+      <MorphIcon name="note" size={22} />
+      <span className="ml-1 text-sm">Nothing playing</span>
+      <span className="relative inline-flex h-[11px] w-[5px] items-center" aria-hidden>
+        <span className="resting-pulse absolute left-1/2 top-1/2 h-[3px] w-[3px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-muted" />
+      </span>
+    </div>
+  );
+  // Pill stays calm; also fall back to the lone row until the chord table seeds
+  // (empty chord → no honest keycaps to show).
+  if (mode === "pill" || !searchChord) {
+    return <div className="flex h-full w-full items-center justify-center">{restingRow}</div>;
+  }
+  return (
+    <div className="flex h-full w-full flex-col items-center justify-center gap-2">
+      {restingRow}
+      <p className="flex items-center gap-1.5 text-[12px] text-muted/80">
+        Press <Keycaps chord={searchChord} size="sm" /> to play something
+      </p>
+    </div>
+  );
+}
+
 function ModeContent({
   mode,
   corner,
@@ -1098,6 +1135,15 @@ function App() {
   useArtAccent(shownArt);
   useHistoryThumb(np?.art_id ?? null);
   const lyrics = useLyrics(np);
+  // Resolved global-hotkey table (seeded below), so onboarding surfaces render
+  // the LIVE Search / show-hide chords rather than a hardcoded default.
+  const [hotkeys, setHotkeys] = useState<HotkeyInfo[]>([]);
+  // Onboarding + widget-menu overlays. seenIntro defaults true (assume seen)
+  // so the bubble can't flash before the seed resolves the real value.
+  const [seenIntro, setSeenIntro] = useState(true);
+  const [introOpen, setIntroOpen] = useState(false);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const didIntro = useRef(false);
   // Assert the reduced-motion capture vote even before any separator mounts,
   // then compose the persisted "Audio-reactive separator" preference on top:
   // seed it once from prefsSeed and keep it live via "settings-changed" (a
@@ -1107,16 +1153,25 @@ function App() {
     initReactive();
     let alive = true;
     void commands.prefsSeed().then((s) => {
-      if (alive) setReactiveEnabledSetting(s.reactive_separator);
+      if (!alive) return;
+      setReactiveEnabledSetting(s.reactive_separator);
+      // Live hotkey chords power the empty-state nudge + first-run bubble, so
+      // onboarding copy tracks a rebind instead of hardcoding a default.
+      setHotkeys(s.hotkeys);
+      setSeenIntro(s.seen_intro);
     });
     const un = onSettingsChanged(({ key, value }) => {
       if (key === "reactive_separator") setReactiveEnabledSetting(Boolean(value));
     });
+    const unHotkeys = onHotkeysChanged(setHotkeys);
     return () => {
       alive = false;
       un();
+      unHotkeys();
     };
   }, []);
+  const searchChord = chordById(hotkeys, "search");
+  const showhideChord = chordById(hotkeys, "showhide");
 
   const nothing = !np || np.player === "none";
   const playing = np?.status === "playing";
@@ -1169,6 +1224,36 @@ function App() {
   }, [mode]);
 
   const reducedMotion = useReducedMotion();
+
+  // First-run hint: the first time a REAL track appears (not the resting
+  // state), show the bubble ONCE and immediately persist seenIntro — so it
+  // never reappears, even across a crash before dismiss. Prefs "Show again"
+  // re-arms it for next launch. didIntro guards against a same-session
+  // nothing↔playing flap re-triggering it.
+  useEffect(() => {
+    if (seenIntro || nothing || didIntro.current) return;
+    didIntro.current = true;
+    setIntroOpen(true);
+    commands.setSetting("seenIntro", true);
+  }, [seenIntro, nothing]);
+
+  // The bubble and the right-click menu are transient overlays that extend past
+  // the mode box. While either is open the whole window goes hit-active (below)
+  // and a dismiss scrim is painted, so a click-away lands instead of falling
+  // through the click-through gutter to the desktop.
+  const overlayOpen = introOpen || menu !== null;
+  const closeOverlays = () => {
+    setIntroOpen(false);
+    setMenu(null);
+  };
+  useEffect(() => {
+    if (!overlayOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeOverlays();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [overlayOpen]);
 
   // A dock-corner CHANGE re-seats the shell across the fixed-size window —
   // as a bare class flip it teleports the visible widget mid-snap, which
@@ -1249,7 +1334,14 @@ function App() {
   useEffect(
     () =>
       onPresence((p) => {
-        if (p.concealed) setHot(false);
+        if (p.concealed) {
+          setHot(false);
+          // A conceal mid-overlay hides the window; drop the overlays so a
+          // stale bubble/menu can't reappear floating on restore (seenIntro is
+          // already persisted, so the bubble won't re-trigger).
+          setIntroOpen(false);
+          setMenu(null);
+        }
       }),
     [],
   );
@@ -1276,10 +1368,14 @@ function App() {
     // Popover extent from the docked corner: the 6px near-side inset + its
     // box (NOT the full 12px both-sides gutter — a fatter rect would let the
     // widget capture a 6px band of desktop past the popover's far edge).
-    const w1 = popoverVisible ? Math.max(mw, POPOVER_W + SHELL_GUTTER_PX / 2) : mw;
-    const h1 = popoverVisible
-      ? Math.min(WINDOW_MAX[1], mh + SHELL_GUTTER_PX / 2 + popH)
-      : mh;
+    const pw = popoverVisible ? Math.max(mw, POPOVER_W + SHELL_GUTTER_PX / 2) : mw;
+    const ph = popoverVisible ? Math.min(WINDOW_MAX[1], mh + SHELL_GUTTER_PX / 2 + popH) : mh;
+    // A transient overlay (first-run bubble, right-click menu) can extend in any
+    // direction — make the WHOLE window interactive while one is open so the
+    // dismiss scrim catches a click-away and nothing falls through the overlay
+    // to the desktop. Max'd with the popover extent so it never shrinks below it.
+    const w1 = overlayOpen ? Math.max(pw, WINDOW_MAX[0]) : pw;
+    const h1 = overlayOpen ? Math.max(ph, WINDOW_MAX[1]) : ph;
     const [cw, ch] = hitCommanded.current ?? [w1, h1];
     const uw = Math.max(w1, cw);
     const uh = Math.max(h1, ch);
@@ -1296,7 +1392,7 @@ function App() {
       );
     }
     return () => window.clearTimeout(timer);
-  }, [mode, reducedMotion, popoverVisible]);
+  }, [mode, reducedMotion, popoverVisible, overlayOpen]);
 
   const morph = {
     // Opacity ONLY — no scale. The shell's size glide is the mode swap's
@@ -1367,6 +1463,14 @@ function App() {
       onMouseMove={() => setHot(true)}
       onMouseLeave={() => setHot(false)}
       onMouseDown={onDragStart}
+      // Suppress the WebView2 native menu and open our own at the cursor (a
+      // right-click also dismisses the bubble). App grows the menu toward the
+      // window interior so it can't clip the fixed window / screen edge.
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setIntroOpen(false);
+        setMenu({ x: e.clientX, y: e.clientY });
+      }}
     >
       {PRESENCE_OVERLAY && <PresenceOverlay corner={corner} />}
       {/* THE widget box — persistent across modes: the chrome never remounts
@@ -1396,19 +1500,7 @@ function App() {
         <motion.div key={mode} {...morph} className="absolute inset-0">
         <ModeContent mode={mode} corner={corner}>
         {nothing ? (
-          /* The resting state: the note glyph, the words, and the living
-             separator's resting middot with nothing to separate — breathing
-             (opacity only, 8s) while it waits for a song. The ONE licensed
-             ambient element outside the separator's bars (CLAUDE.md
-             Presence clause 2). Geometry borrowed from SeparatorDot;
-             Waveform's phase machine stays untouched. */
-          <div className="flex h-full w-full items-center justify-center gap-1 text-muted">
-            <MorphIcon name="note" size={22} />
-            <span className="ml-1 text-sm">Nothing playing</span>
-            <span className="relative inline-flex h-[11px] w-[5px] items-center" aria-hidden>
-              <span className="resting-pulse absolute left-1/2 top-1/2 h-[3px] w-[3px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-muted" />
-            </span>
-          </div>
+          <EmptyState mode={mode} searchChord={searchChord} />
         ) : mode === "pill" ? (
           /* "5a — time at rest" (ANIMATIONS.md §3): at rest the pill is pure
              glance — art · title · artist · elapsed time, no buttons. On widget
@@ -1606,6 +1698,55 @@ function App() {
         >
           <QueuePanel np={np} connected={spotifyConnected} open={popoverVisible} />
         </div>
+      )}
+      {/* Dismiss scrim — full-window while a transient overlay is open. Its
+          stopPropagation is what stops the dismissing click from ALSO starting
+          a native window drag (the root's onMouseDown), and its click closes
+          the overlays. Below the overlays (z-40), above the shell/content. */}
+      {overlayOpen && (
+        <div
+          aria-hidden
+          className="absolute inset-0 z-30"
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            closeOverlays();
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            closeOverlays();
+          }}
+        />
+      )}
+      {introOpen && (
+        <IntroBubble
+          corner={corner}
+          // Sit just off the shell's far edge — but clamp so the bubble stays
+          // fully on-screen in EXPANDED, where the shell fills the window and
+          // the raw offset (446) would push it off (a burned one-shot hint).
+          anchorPx={Math.min(
+            MODE_SIZES[mode][1] - SHELL_GUTTER_PX + 6 + POPOVER_GAP,
+            WINDOW_MAX[1] - 210,
+          )}
+          searchChord={searchChord}
+          showhideChord={showhideChord}
+          onDismiss={() => setIntroOpen(false)}
+        />
+      )}
+      {menu && (
+        <WidgetMenu
+          style={{
+            // Anchor at the cursor, clamped so the whole menu stays inside the
+            // fixed window at ANY corner — the cursor can sit far from the
+            // docked corner on a wide shell, where corner-derived growth alone
+            // would push the menu off the far window edge.
+            left: Math.max(4, Math.min(menu.x, WINDOW_MAX[0] - WIDGET_MENU_W - 4)),
+            top: Math.max(4, Math.min(menu.y, WINDOW_MAX[1] - WIDGET_MENU_H - 4)),
+          }}
+          spotifyConnected={spotifyConnected}
+          showhideChord={showhideChord}
+          onClose={() => setMenu(null)}
+        />
       )}
       {/* Broken-art detector — OUTSIDE the mode-keyed subtree so the data URL
           isn't re-decoded on every mode switch, only per track. */}
