@@ -2,9 +2,11 @@
  * The living separator: at rest it's a colorless middot between artist and
  * album — a plain typographic separator. When music plays it blooms into
  * five Apple-style accent capsules bouncing on live spectrum bins. On pause
- * it settles in beats: the bars retract into five dots, the dots vanish in
- * pairs from the outside in (reverse-reading as one dot having multiplied),
- * and the survivor drains to gray as the very last event. The app's ONLY
+ * it settles in beats: the bars retract into dots, then the dots fade from
+ * the outside in — a distance-staggered cascade normalized to the drop beat,
+ * so a 5-bar and a 41-bar rendition collapse in the same wall-clock (reverse-
+ * reading as one dot having multiplied) — and the survivor drains to gray as
+ * the very last event. The app's ONLY
  * audio-reactive surface. State morphs use the house EASE token; per-frame
  * motion is DOM spans + scaleY transforms only (compositor-friendly) at
  * ~30fps.
@@ -99,8 +101,10 @@ const SLEEP_MS = 500;
  * The bloom walks the SAME ladder in reverse (rest → one → three → dots →
  * alive) on faster beats: the middot warms to accent as the survivor takes
  * over (the color beat leads, loosely mirroring color-leaves-last on the
- * settle — the warm-up overlaps the first multiplication beat), pairs fade
- * in from the inside out, and the dots grow into bars.
+ * settle — the warm-up overlaps the first multiplication beat), pairs fade in
+ * from the inside out — distance-staggered (riseDelayMs) so a 41-bar rendition
+ * fans in as smoothly as a 5-bar one, the entrance mirror of the settle's
+ * outside-in drop — and the dots grow into bars.
  */
 type Phase = "alive" | "dots" | "three" | "one" | "rest";
 /** Bars → dots retraction; also the survivor's grow-to-middot beat, which
@@ -132,8 +136,11 @@ function barClass(phase: Phase, i: number, size: Size): string {
   if (phase === "alive")
     return `${g.bar} [transition:height_220ms_var(--ease-out-tk),width_220ms_var(--ease-out-tk),opacity_140ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]`;
   // Distance from the center bar drives the collapse: "three" keeps the
-  // survivor plus its immediate pair, so at lg the three outer pairs leave
-  // on one beat — their 260ms fades on 200ms beats still read outside-in.
+  // survivor plus its immediate pair; everything outside that (d>1) drops on
+  // this beat, but dropDelayMs staggers their fades by distance so they leave
+  // outside-in as one smooth cascade at any bar count — the "one" beat then
+  // takes the inner pair. (Formerly the whole d>1 group vanished on a single
+  // beat, so a 9- or 41-bar rendition snapped straight to three dots.)
   const d = Math.abs(i - (BAR_BINS[size].length - 1) / 2);
   const mid = d === 0;
   const dropped = phase === "three" ? d > 1 : phase !== "dots" && !mid;
@@ -141,6 +148,52 @@ function barClass(phase: Phase, i: number, size: Size): string {
   // layer handoff is pixel-perfect.
   const dotSize = mid && (phase === "one" || phase === "rest") ? g.survivor : g.dot;
   return `${dotSize} ${dropped ? `opacity-0 ${g.dropBlur}` : "opacity-100 blur-0"} [transition:height_260ms_var(--ease-out-tk),width_260ms_var(--ease-out-tk),transform_260ms_var(--ease-out-tk),opacity_260ms_var(--ease-out-tk),filter_260ms_var(--ease-out-tk),background-color_220ms_var(--ease-out-tk)]`;
+}
+
+/** Outside-in stagger for the settle collapse. Each dropped dot's fade is
+ * delayed by how FAR IN it is from the outermost — normalized to the drop
+ * beat (DROP_MS) so the whole sweep takes the same wall-clock no matter how
+ * many bars a size has: outermost pair leads at 0, the d=2 pair lands just
+ * under a full DROP_MS later (near the "one" beat that drops the inner d=1
+ * pair), and the dots in between fill the gap evenly. sm (5 bars, maxD 2)
+ * collapses to the old two-beat feel — d=2 leads on "three", d=1 on "one";
+ * md/lg/room fan the former single-beat drop into a real cascade.
+ *
+ * Applied to the outer dots (d≥2, dropped on "three") in the hiding phases:
+ * "alive"/"dots" carry no delay (the rAF loop and the retraction own those)
+ * and the inner pair (d<2) needs none — the "one" beat IS its stagger. The
+ * CALLER additionally gates this to the SETTLE ladder (settlingRef): the
+ * announce/bloom ladders reuse these phase names on the faster BLOOM/
+ * ANNOUNCE_MS beats — and the announcement fires at room's 41 bars too
+ * (Focus.tsx), where a DROP_MS-normalized stagger would overrun their window —
+ * so those collapse plainly, matching their "glanced at, not watched" cadence. */
+function dropDelayMs(phase: Phase, i: number, size: Size): number {
+  if (phase !== "three" && phase !== "one" && phase !== "rest") return 0;
+  const n = BAR_BINS[size].length;
+  const maxD = (n - 1) / 2;
+  const d = Math.abs(i - (n - 1) / 2);
+  if (d < 2 || maxD <= 1) return 0;
+  return Math.round(((maxD - d) / (maxD - 1)) * DROP_MS);
+}
+
+/** Inside-out stagger for the bloom reveal — the entrance mirror of
+ * dropDelayMs. On the bloom's "dots" beat every outer dot (d≥2) un-hides at
+ * once; delay each by how FAR OUT it is so the reveal fans from the center
+ * (the survivor + its just-revealed inner pair) outward, normalized to the
+ * bloom beat (BLOOM_MS) so a 5-bar and a 41-bar rendition fan in the same
+ * wall-clock. The innermost outer pair (d=2) leads at 0, the outermost lands a
+ * full BLOOM_MS later — into the "alive" handoff, where the bars are already
+ * growing. d<2 needs none (its pair revealed a beat earlier, on "three") and
+ * sm (maxD 2) has no outer tier to fan. CALLER-gated to the bloom
+ * (bloomingRef); the announcement reveals plainly, same reasoning as the drop
+ * stagger. */
+function riseDelayMs(phase: Phase, i: number, size: Size): number {
+  if (phase !== "dots") return 0;
+  const n = BAR_BINS[size].length;
+  const maxD = (n - 1) / 2;
+  const d = Math.abs(i - (n - 1) / 2);
+  if (d < 2 || maxD <= 2) return 0;
+  return Math.round(((d - 2) / (maxD - 2)) * BLOOM_MS);
 }
 
 /** Announcement (track change) beat spacing — the bloom's quick cadence for
@@ -164,6 +217,15 @@ export function Waveform({
   const [phase, setPhase] = useState<Phase>(lastAlive ? "alive" : "rest");
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
+  // Gates for the collapse/reveal stagger, each raised only by its own
+  // choreographed ladder (read in render; set imperatively before the phase
+  // change so the render sees it). The settle earns the OUTSIDE-IN drop
+  // stagger (dropDelayMs); the bloom the INSIDE-OUT rise stagger (riseDelayMs).
+  // The announcement reuses these phase names on faster beats — and runs at
+  // room's 41 bars in focus mode (Focus.tsx), where either stagger would
+  // overrun its window — so it collapses/reveals plainly, ungated.
+  const settlingRef = useRef(false);
+  const bloomingRef = useRef(false);
   // Render-visible half of the announce ladder: while true the bars paint
   // muted, so clearing it at the final beat lets the existing 220ms
   // background-color transition BE the accent ignition (color lands last —
@@ -251,6 +313,9 @@ export function Waveform({
           setPhase("rest");
           return;
         }
+        // Arm the drop stagger: this is the watched settle, the one ladder
+        // that earns the outside-in cascade (dropDelayMs).
+        settlingRef.current = true;
         setPhase("dots");
         seqTimers.push(window.setTimeout(() => setPhase("three"), DOTS_MS));
         seqTimers.push(window.setTimeout(() => setPhase("one"), DOTS_MS + DROP_MS));
@@ -261,6 +326,7 @@ export function Waveform({
         seqTimers.push(
           window.setTimeout(() => {
             seqTimers.splice(0);
+            settlingRef.current = false;
             setPhase("rest");
           }, DOTS_MS + DROP_MS + DOTS_MS),
         );
@@ -321,6 +387,10 @@ export function Waveform({
     const unsub = subscribeBands((b) => {
       latest = b;
       if (b.level > WAKE_LEVEL) {
+        // Any wake abandons an in-flight settle (snap-back, or a bloom that
+        // reveals plainly) — disarm the drop stagger so a later announce/bloom
+        // collapse can't inherit a stale settle flag.
+        settlingRef.current = false;
         if (sleepTimer !== null) {
           window.clearTimeout(sleepTimer);
           sleepTimer = null;
@@ -336,12 +406,14 @@ export function Waveform({
           // the muted middot crossfades out under the accent survivor
           // (identical geometry, so it reads as the dot catching the color).
           blooming = true;
+          bloomingRef.current = true; // arm the inside-out rise stagger
           setPhase("one");
           seqTimers.push(window.setTimeout(() => setPhase("three"), BLOOM_MS));
           seqTimers.push(window.setTimeout(() => setPhase("dots"), BLOOM_MS * 2));
           seqTimers.push(
             window.setTimeout(() => {
               blooming = false;
+              bloomingRef.current = false;
               seqTimers.splice(0); // all fired — see armSettle
               setPhase("alive");
               start();
@@ -449,18 +521,32 @@ export function Waveform({
           atRest ? "opacity-0" : "opacity-100 [transition:opacity_220ms_var(--ease-out-tk)]"
         }`}
       >
-        {bins.map((_, i) => (
-          <span
-            key={i}
-            ref={(el) => {
-              barsRef.current[i] = el;
-            }}
-            className={`origin-center rounded-full will-change-transform ${
-              announceTint ? "bg-muted" : "bg-accent"
-            } ${barClass(phase, i, size)}`}
-            style={{ transform: phase === "alive" ? `scaleY(${REST})` : "scale(1)" }}
-          />
-        ))}
+        {bins.map((_, i) => {
+          // Per-bar stagger, each gated to its own ladder: the settle's
+          // outside-in drop, the bloom's inside-out reveal. The announcement
+          // (ungated) collapses/reveals plainly. undefined at delay 0 so the
+          // alive state and the plain ladders carry no transition-delay at all.
+          const delay = settlingRef.current
+            ? dropDelayMs(phase, i, size)
+            : bloomingRef.current
+              ? riseDelayMs(phase, i, size)
+              : 0;
+          return (
+            <span
+              key={i}
+              ref={(el) => {
+                barsRef.current[i] = el;
+              }}
+              className={`origin-center rounded-full will-change-transform ${
+                announceTint ? "bg-muted" : "bg-accent"
+              } ${barClass(phase, i, size)}`}
+              style={{
+                transform: phase === "alive" ? `scaleY(${REST})` : "scale(1)",
+                transitionDelay: delay ? `${delay}ms` : undefined,
+              }}
+            />
+          );
+        })}
       </span>
     </span>
   );

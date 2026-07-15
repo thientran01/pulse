@@ -449,15 +449,13 @@ export default function Search() {
                       <span className="truncate text-[14px] font-medium leading-5 text-fg">{row.title}</span>
                       <span className="truncate text-[12px] leading-4 text-muted">{row.artist}</span>
                     </span>
-                    {/* The pick's why — without it the resurfacing reads as
-                        a bug. Yields to the action buttons on hover. */}
-                    {row.reason && (
-                      <span className="shrink-0 text-[11px] text-muted/60 [transition:opacity_140ms_var(--ease-out-tk)] group-hover/row:opacity-0">
-                        {row.reason}
-                      </span>
-                    )}
-                    {/* Explicit verbs on hover (the history-row grammar) —
-                        the bare row click also plays, but nothing SAID so. */}
+                    {/* Explicit verbs, revealed on hover (the history-row
+                        grammar) — the bare row click also plays, but nothing
+                        SAID so. Seated to the LEFT of the reason: at rest they
+                        hold their slot invisibly, so the reason stays anchored
+                        to the row's right edge instead of floating with the
+                        empty button space stranded past it (Thien, 2026-07-13).
+                        On hover they simply fill that gap; the reason holds. */}
                     <button
                       type="button"
                       tabIndex={-1}
@@ -486,6 +484,14 @@ export default function Search() {
                     >
                       {PlusGlyph}
                     </button>
+                    {/* The pick's why — without it the resurfacing reads as a
+                        bug. Flush to the right edge; the hover controls slot in
+                        to its left. */}
+                    {row.reason && (
+                      <span className="shrink-0 text-[11px] text-muted/60">
+                        {row.reason}
+                      </span>
+                    )}
                   </div>
                 ))}
               </div>
