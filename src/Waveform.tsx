@@ -4,7 +4,7 @@
  * five Apple-style accent capsules bouncing on live spectrum bins. On pause
  * it settles in beats: the bars retract into dots, then the dots fade from
  * the outside in — a distance-staggered cascade normalized to the drop beat,
- * so a 5-bar and a 41-bar rendition collapse in the same wall-clock (reverse-
+ * so a 5-bar and a 15-bar rendition collapse in the same wall-clock (reverse-
  * reading as one dot having multiplied) — and the survivor drains to gray as
  * the very last event. The app's ONLY
  * audio-reactive surface. State morphs use the house EASE token; per-frame
@@ -102,7 +102,7 @@ const SLEEP_MS = 500;
  * alive) on faster beats: the middot warms to accent as the survivor takes
  * over (the color beat leads, loosely mirroring color-leaves-last on the
  * settle — the warm-up overlaps the first multiplication beat), pairs fade in
- * from the inside out — distance-staggered (riseDelayMs) so a 41-bar rendition
+ * from the inside out — distance-staggered (riseDelayMs) so a 15-bar rendition
  * fans in as smoothly as a 5-bar one, the entrance mirror of the settle's
  * outside-in drop — and the dots grow into bars.
  */
@@ -180,7 +180,7 @@ function dropDelayMs(phase: Phase, i: number, size: Size): number {
  * dropDelayMs. On the bloom's "dots" beat every outer dot (d≥2) un-hides at
  * once; delay each by how FAR OUT it is so the reveal fans from the center
  * (the survivor + its just-revealed inner pair) outward, normalized to the
- * bloom beat (BLOOM_MS) so a 5-bar and a 41-bar rendition fan in the same
+ * bloom beat (BLOOM_MS) so a 5-bar and a 15-bar rendition fan in the same
  * wall-clock. The innermost outer pair (d=2) leads at 0, the outermost lands a
  * full BLOOM_MS later — into the "alive" handoff, where the bars are already
  * growing. d<2 needs none (its pair revealed a beat earlier, on "three") and
