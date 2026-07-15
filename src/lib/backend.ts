@@ -325,18 +325,58 @@ function mockArt(): string {
 
 export function onNowPlaying(cb: (np: NowPlaying) => void): () => void {
   if (IN_TAURI) {
+    /** While playing, the backend emits at least every heartbeat (position
+     * pairs defeat its diff-suppression) — so "last payload said playing AND
+     * nothing for 15s" is the signature of a dead event stream, not idleness.
+     * The 2026-07-15 freeze (media loop wedged in a WinRT call) sat exactly
+     * there, and the frontend trusted the stream's liveness forever. */
+    const STALE_RESEED_MS = 15_000;
     let gotEvent = false;
+    let lastPayloadAt = Date.now();
+    let lastStatus = "";
+    const deliver = (np: NowPlaying) => {
+      lastPayloadAt = Date.now();
+      lastStatus = np.status;
+      cb(np);
+    };
     const un = listen<NowPlaying>("now-playing", (e) => {
       gotEvent = true;
-      cb(e.payload);
+      deliver(e.payload);
     });
     // Emits are diff-suppressed backend-side, so a fresh webview (mount, dev
     // reload) seeds itself instead of waiting for the next change. An event
     // that lands first wins — it is always at least as new as the seed.
-    void invoke<NowPlaying>("now_playing").then((np) => {
-      if (!gotEvent) cb(np);
-    });
+    void invoke<NowPlaying>("now_playing")
+      .then((np) => {
+        if (!gotEvent) deliver(np);
+      })
+      .catch(() => {});
+    // Staleness net: re-seed from a live backend read. Attempts are paced at
+    // STALE_RESEED_MS regardless of outcome (a failure must not retry at the
+    // interval's 5s), at most one invoke is in flight (a hung backend gets
+    // ONE stuck promise, never a stack), and a hidden window never re-seeds
+    // (the backend deliberately emits nothing while hidden — silence there is
+    // policy, not staleness; WebView2 mirrors window visibility into
+    // document.hidden). posClock's seq gate drops a response that is
+    // genuinely a stale straggler.
+    let reseedInflight = false;
+    let lastAttemptAt = 0;
+    const reseed = window.setInterval(() => {
+      if (reseedInflight || lastStatus !== "playing" || document.hidden) return;
+      const now = Date.now();
+      if (now - lastPayloadAt < STALE_RESEED_MS || now - lastAttemptAt < STALE_RESEED_MS) return;
+      lastAttemptAt = now;
+      reseedInflight = true;
+      console.warn("now-playing stream stale while playing — re-seeding");
+      void invoke<NowPlaying>("now_playing")
+        .then(deliver)
+        .catch(() => {})
+        .finally(() => {
+          reseedInflight = false;
+        });
+    }, 5_000);
     return () => {
+      window.clearInterval(reseed);
       un.then((f) => f());
     };
   }

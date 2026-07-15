@@ -367,25 +367,41 @@ async fn media_art(app: AppHandle, art_id: String) -> Option<String> {
 
 /// One-shot state read for webview mount/reload. Emits are diff-suppressed,
 /// so a freshly loaded webview cannot count on an event ever arriving — it
-/// seeds from this instead. Snapshot + seq happen under the same LastEmit
-/// lock as emits, so seed seq order is linearized with emit seq order and the
-/// frontend clock's seq guard can trust either source.
+/// seeds from this instead. Ordering rides the same claim-then-publish gate
+/// as emit_now; NO lock is held across the snapshot — the 2026-07-15 wedge
+/// held LastEmit inside a hung snapshot and this seed blocked forever behind
+/// it (a freshly opened focus window sat on the resting dot while music
+/// played). The winning branch bumps published_seq but must NOT write
+/// st.payload: the diff-suppression baseline stays "last payload actually
+/// emitted to all windows" — a single-window seed writing it would suppress
+/// the next real emit.
 #[tauri::command]
 async fn now_playing(app: AppHandle) -> Stamped {
-    let cache = app.state::<ArtCache>();
+    let my_seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let np = media::snapshot(&app.state::<ArtCache>());
     let last = app.state::<LastEmit>();
-    let _guard = last.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut st = last.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if my_seq >= st.published_seq {
+        st.published_seq = my_seq;
+        return Stamped { seq: my_seq, now: np };
+    }
+    // Outrun: a snapshot that STARTED after ours already published. Hand back
+    // the freshest published payload instead; fall back to our own read when
+    // nothing has ever been emitted (only reachable seed-vs-seed, where the
+    // winner's data went to a different webview's clock).
     Stamped {
-        seq: SEQ.fetch_add(1, Ordering::Relaxed),
-        now: media::snapshot(&cache),
+        seq: st.published_seq,
+        now: st.payload.clone().unwrap_or(np),
     }
 }
 
-/// Monotonic stamp on every now-playing payload. No consumer yet — the
-/// position clock kernel (next PR) uses it to drop stale/out-of-order
-/// payloads instead of trusting IPC delivery order. Ordering invariant
-/// established here: seq is assigned in the same critical section as the
-/// snapshot AND the emit, so higher seq == later snapshot == later emit.
+/// Monotonic stamp on every now-playing payload — the frontend position
+/// clock (posClock.ingest) drops any payload whose seq is <= the last one it
+/// accepted, instead of trusting IPC delivery order. Ordering invariant:
+/// seq is claimed BEFORE the snapshot starts, so seq order == snapshot-START
+/// order, and the publish gate in emit_now/now_playing discards any snapshot
+/// a later-started one has already outrun — higher seq never carries older
+/// data.
 static SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Serialize, Clone)]
@@ -395,27 +411,41 @@ struct Stamped {
     now: media::NowPlaying,
 }
 
-/// Last payload emitted. Raw pairs make unchanged GSMTC data byte-identical,
-/// so suppressing equal payloads costs nothing and zeroes idle/paused IPC —
+/// Last payload emitted + the seq high-water mark of the newest published
+/// snapshot. Raw pairs make unchanged GSMTC data byte-identical, so
+/// suppressing equal payloads costs nothing and zeroes idle/paused IPC —
 /// and every suppressed emit is also one less regression lottery ticket for
 /// the position pipeline (ad-hoc emit_now callers included).
-struct LastEmit(Mutex<Option<media::NowPlaying>>);
+#[derive(Default)]
+struct LastEmitState {
+    payload: Option<media::NowPlaying>,
+    published_seq: u64,
+}
+struct LastEmit(Mutex<LastEmitState>);
 
 pub(crate) fn emit_now(app: &AppHandle) -> media::NowPlaying {
-    let cache = app.state::<ArtCache>();
+    // Claim seq BEFORE the snapshot, snapshot with NO lock held: a wedged
+    // WinRT read (the 2026-07-15 freeze — a player that never answered hung
+    // the media loop INSIDE this lock, freezing the display and deadlocking
+    // the now_playing seed) must only ever stall its own caller. Concurrent
+    // callers (media loop, commands, hotkeys, tray) order at the publish
+    // gate below instead: seq order == snapshot-START order, and a snapshot
+    // that a later-started one has outrun is discarded, never emitted.
+    let my_seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let np = media::snapshot(&app.state::<ArtCache>());
     let last = app.state::<LastEmit>();
-    // Snapshot INSIDE the lock: concurrent callers (media loop, commands,
-    // hotkeys, tray) serialize here, so an older snapshot can never be
-    // emitted after — or seq-stamped above — a newer one.
-    let mut last = last.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let np = media::snapshot(&cache);
-    if last.as_ref() != Some(&np) {
+    let mut st = last.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if my_seq < st.published_seq {
+        return np;
+    }
+    st.published_seq = my_seq;
+    if st.payload.as_ref() != Some(&np) {
         let stamped = Stamped {
-            seq: SEQ.fetch_add(1, Ordering::Relaxed),
+            seq: my_seq,
             now: np.clone(),
         };
         let _ = app.emit("now-playing", &stamped);
-        *last = Some(stamped.now);
+        st.payload = Some(stamped.now);
     }
     np
 }
@@ -434,6 +464,22 @@ pub(crate) fn emit_now(app: &AppHandle) -> media::NowPlaying {
 //      logged otherwise).
 
 static MAIN_TICK_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Media-loop liveness threshold (see media::beat_age_ms). The 2026-07-15
+/// freeze was that thread blocked forever in a WinRT call — no panic, no
+/// log, display frozen while everything else ran. The watchdog names the
+/// stall AND its stage (media::stage_name). The beat refreshes on EVERY
+/// stage transition (plus once per iteration), so what goes stale is one
+/// blocking call that never returns — a slow-but-progressing art fetch
+/// (dozens of succeeding 3s-bounded chunk reads) keeps beating and never
+/// false-positives. No single healthy call takes 1s, wait_op bounds the
+/// async ones at 2-3s — 10s of NO transitions is unambiguous.
+/// Recovery is deliberately log-only: after the lock narrowing (emit_now)
+/// and wait_op timeouts, a wedge stalls nothing but the loop itself and
+/// self-heals when the op times out. Add generation-respawn machinery ONLY
+/// if pulse.log ever shows a stall stuck on a sync-call stage (get_session /
+/// session_id / timeline / playback_info — the un-timeout-able surface).
+const MEDIA_STALL_WARN_MS: i64 = 10_000;
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -462,6 +508,7 @@ fn spawn_main_thread_watchdog(app: AppHandle) {
     MAIN_TICK_MS.store(now_ms(), Ordering::Relaxed);
     std::thread::spawn(move || {
         let mut warned = false;
+        let mut media_stall_peak: i64 = 0;
         loop {
             std::thread::sleep(Duration::from_secs(1));
             let _ = app.run_on_main_thread(|| {
@@ -477,6 +524,23 @@ fn spawn_main_thread_watchdog(app: AppHandle) {
                 }
             } else {
                 warned = false;
+            }
+            // Media-loop liveness (see MEDIA_STALL_WARN_MS). Same warn-once
+            // latch; the recovery line distinguishes "wedged until restart"
+            // (the 2026-07-15 incident) from "one slow player episode".
+            // beat_age_ms is 0 until the loop thread starts.
+            let media_stall = media::beat_age_ms();
+            if media_stall >= MEDIA_STALL_WARN_MS {
+                if media_stall_peak == 0 {
+                    log::error!(
+                        "media-loop watchdog: no progress for {media_stall}ms — stuck at stage '{}' (a WinRT call into the player is blocking)",
+                        media::stage_name()
+                    );
+                }
+                media_stall_peak = media_stall;
+            } else if media_stall_peak > 0 {
+                log::info!("media-loop watchdog: loop resumed after ~{media_stall_peak}ms stall");
+                media_stall_peak = 0;
             }
         }
     });
@@ -934,7 +998,7 @@ pub fn run() {
         )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(ArtCache(Mutex::new(None)))
-        .manage(LastEmit(Mutex::new(None)))
+        .manage(LastEmit(Mutex::new(LastEmitState::default())))
         .manage(history::Tracker::default())
         .manage(spotify::SpotifyAuth::default())
         .manage(upnext::UpNext::default())
@@ -1135,6 +1199,19 @@ pub fn run() {
             #[cfg(debug_assertions)]
             let sim_fs =
                 MenuItem::with_id(app, "simfs", "Simulate fullscreen (10s)", true, None::<&str>)?;
+            // Dev-only wedge test: fakes the un-reproducible hung-WinRT-call
+            // state on the media loop (2026-07-15 freeze) — verifies the
+            // watchdog line, that seed/transport stay live (lock narrowing),
+            // and the frontend staleness re-seed. 15s > the 10s watchdog
+            // threshold so the stall demonstrably logs mid-wedge.
+            #[cfg(debug_assertions)]
+            let sim_wedge = MenuItem::with_id(
+                app,
+                "simwedge",
+                "Simulate media wedge (15s)",
+                true,
+                None::<&str>,
+            )?;
             #[cfg(debug_assertions)]
             let menu = Menu::with_items(
                 app,
@@ -1147,6 +1224,7 @@ pub fn run() {
                     &companion,
                     &spotify_item,
                     &sim_fs,
+                    &sim_wedge,
                     &update_check,
                     &open_logs,
                     &quit,
@@ -1214,6 +1292,8 @@ pub fn run() {
                         app.state::<presence::Presence>()
                             .simulate_fullscreen(Duration::from_secs(10));
                     }
+                    #[cfg(debug_assertions)]
+                    "simwedge" => media::simulate_wedge(15_000),
                     "update" => {
                         // Disable before spawning — we're on the main thread
                         // here, so a double-click can't race two checks.
@@ -1295,6 +1375,20 @@ pub fn run() {
             // exposed through Tauri; accepted for v1.
             let handle = app.handle().clone();
             std::thread::spawn(move || {
+                // Explicit MTA: media.rs's wait_op timeouts rely on WinRT
+                // completions arriving on the COM threadpool — make the
+                // implicit-MTA assumption explicit (S_FALSE double-init is
+                // fine; same idiom as audio.rs).
+                let _ = unsafe {
+                    windows::Win32::System::Com::CoInitializeEx(
+                        None,
+                        windows::Win32::System::Com::COINIT_MULTITHREADED,
+                    )
+                };
+                // Stage telemetry + dev sim-wedge key off this mark; the
+                // watchdog reads media::beat_age_ms (stage transitions +
+                // the per-iteration beat below).
+                media::mark_media_loop_thread();
                 let (wake_tx, wake_rx) = std::sync::mpsc::channel::<media::Wake>();
                 // None → GSMTC unavailable; the loop degrades to pure polling.
                 let mut watch = media::SessionWatch::new(wake_tx);
@@ -1312,6 +1406,7 @@ pub fn run() {
                 const HISTORY_PROBE_BEATS: u32 = 10;
                 let mut hidden_beats = 0u32;
                 loop {
+                    media::beat();
                     if let Some(w) = watch.as_mut() {
                         w.resubscribe(std::mem::take(&mut resubscribe));
                     }

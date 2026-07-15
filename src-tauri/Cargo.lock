@@ -3076,7 +3076,7 @@ dependencies = [
 
 [[package]]
 name = "pulse"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "base64 0.22.1",
  "cpal",
@@ -3098,6 +3098,7 @@ dependencies = [
  "ureq",
  "windows 0.61.3",
  "windows-core 0.61.2",
+ "windows-future",
 ]
 
 [[package]]

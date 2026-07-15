@@ -105,8 +105,10 @@ export function subscribe(cb: () => void): () => void {
 /** Feed one backend payload through the monotonic filter. Returns false when
  * the payload is a stale straggler (older seq) the caller must also ignore. */
 export function ingest(np: NowPlaying): boolean {
-  // The backend guarantees higher seq == later snapshot (seq is assigned in
-  // the same critical section as the snapshot) — lower is a stale straggler.
+  // The backend guarantees higher seq never carries an older snapshot: seq
+  // is claimed before the snapshot starts (seq order == snapshot-START
+  // order) and a snapshot outrun by a later-started one is discarded
+  // backend-side, never published — lower here is a stale straggler.
   if (np.seq <= lastSeq) return false;
   lastSeq = np.seq;
 
