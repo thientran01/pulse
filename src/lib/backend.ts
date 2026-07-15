@@ -351,14 +351,29 @@ export function onNowPlaying(cb: (np: NowPlaying) => void): () => void {
         if (!gotEvent) deliver(np);
       })
       .catch(() => {});
-    // Staleness net: re-seed from a live backend read. Self-pacing — any
-    // response refreshes lastPayloadAt, so a still-degraded backend is asked
-    // once per STALE_RESEED_MS, and posClock's seq gate drops a response
-    // that is genuinely a stale straggler.
+    // Staleness net: re-seed from a live backend read. Attempts are paced at
+    // STALE_RESEED_MS regardless of outcome (a failure must not retry at the
+    // interval's 5s), at most one invoke is in flight (a hung backend gets
+    // ONE stuck promise, never a stack), and a hidden window never re-seeds
+    // (the backend deliberately emits nothing while hidden — silence there is
+    // policy, not staleness; WebView2 mirrors window visibility into
+    // document.hidden). posClock's seq gate drops a response that is
+    // genuinely a stale straggler.
+    let reseedInflight = false;
+    let lastAttemptAt = 0;
     const reseed = window.setInterval(() => {
-      if (lastStatus !== "playing" || Date.now() - lastPayloadAt < STALE_RESEED_MS) return;
+      if (reseedInflight || lastStatus !== "playing" || document.hidden) return;
+      const now = Date.now();
+      if (now - lastPayloadAt < STALE_RESEED_MS || now - lastAttemptAt < STALE_RESEED_MS) return;
+      lastAttemptAt = now;
+      reseedInflight = true;
       console.warn("now-playing stream stale while playing — re-seeding");
-      void invoke<NowPlaying>("now_playing").then(deliver).catch(() => {});
+      void invoke<NowPlaying>("now_playing")
+        .then(deliver)
+        .catch(() => {})
+        .finally(() => {
+          reseedInflight = false;
+        });
     }, 5_000);
     return () => {
       window.clearInterval(reseed);

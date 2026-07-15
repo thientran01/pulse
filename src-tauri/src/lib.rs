@@ -465,20 +465,21 @@ pub(crate) fn emit_now(app: &AppHandle) -> media::NowPlaying {
 
 static MAIN_TICK_MS: AtomicU64 = AtomicU64::new(0);
 
-/// Media-loop liveness: stored at the top of every loop iteration. The
-/// 2026-07-15 freeze was this thread blocked forever in a WinRT call — no
-/// panic, no log, display frozen while everything else ran. The watchdog
-/// names the stall AND its stage (media::stage_name). Threshold rationale:
-/// a healthy iteration is ≤~600ms (500ms recv_timeout + snapshot); the worst
-/// legitimately degraded one is a handful of consecutive wait_op timeouts
-/// (~2-3s each) inside one snapshot, ~8s — 10s never false-positives.
+/// Media-loop liveness threshold (see media::beat_age_ms). The 2026-07-15
+/// freeze was that thread blocked forever in a WinRT call — no panic, no
+/// log, display frozen while everything else ran. The watchdog names the
+/// stall AND its stage (media::stage_name). The beat refreshes on EVERY
+/// stage transition (plus once per iteration), so what goes stale is one
+/// blocking call that never returns — a slow-but-progressing art fetch
+/// (dozens of succeeding 3s-bounded chunk reads) keeps beating and never
+/// false-positives. No single healthy call takes 1s, wait_op bounds the
+/// async ones at 2-3s — 10s of NO transitions is unambiguous.
 /// Recovery is deliberately log-only: after the lock narrowing (emit_now)
 /// and wait_op timeouts, a wedge stalls nothing but the loop itself and
 /// self-heals when the op times out. Add generation-respawn machinery ONLY
 /// if pulse.log ever shows a stall stuck on a sync-call stage (get_session /
 /// session_id / timeline / playback_info — the un-timeout-able surface).
-static MEDIA_TICK_MS: AtomicU64 = AtomicU64::new(0);
-const MEDIA_STALL_WARN_MS: u64 = 10_000;
+const MEDIA_STALL_WARN_MS: i64 = 10_000;
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -505,10 +506,9 @@ pub(crate) fn defer_main_action(app: &AppHandle, f: impl FnOnce(&AppHandle) + Se
 /// fresh when idle.
 fn spawn_main_thread_watchdog(app: AppHandle) {
     MAIN_TICK_MS.store(now_ms(), Ordering::Relaxed);
-    MEDIA_TICK_MS.store(now_ms(), Ordering::Relaxed);
     std::thread::spawn(move || {
         let mut warned = false;
-        let mut media_stall_peak: u64 = 0;
+        let mut media_stall_peak: i64 = 0;
         loop {
             std::thread::sleep(Duration::from_secs(1));
             let _ = app.run_on_main_thread(|| {
@@ -525,14 +525,15 @@ fn spawn_main_thread_watchdog(app: AppHandle) {
             } else {
                 warned = false;
             }
-            // Media-loop liveness (see MEDIA_TICK_MS). Same warn-once latch;
-            // the recovery line distinguishes "wedged until restart" (the
-            // 2026-07-15 incident) from "one slow player episode".
-            let media_stall = now_ms().saturating_sub(MEDIA_TICK_MS.load(Ordering::Relaxed));
+            // Media-loop liveness (see MEDIA_STALL_WARN_MS). Same warn-once
+            // latch; the recovery line distinguishes "wedged until restart"
+            // (the 2026-07-15 incident) from "one slow player episode".
+            // beat_age_ms is 0 until the loop thread starts.
+            let media_stall = media::beat_age_ms();
             if media_stall >= MEDIA_STALL_WARN_MS {
                 if media_stall_peak == 0 {
                     log::error!(
-                        "media-loop watchdog: no iteration for {media_stall}ms — stuck at stage '{}' (a WinRT call into the player is blocking)",
+                        "media-loop watchdog: no progress for {media_stall}ms — stuck at stage '{}' (a WinRT call into the player is blocking)",
                         media::stage_name()
                     );
                 }
@@ -1385,7 +1386,8 @@ pub fn run() {
                     )
                 };
                 // Stage telemetry + dev sim-wedge key off this mark; the
-                // watchdog reads MEDIA_TICK_MS (stored each iteration below).
+                // watchdog reads media::beat_age_ms (stage transitions +
+                // the per-iteration beat below).
                 media::mark_media_loop_thread();
                 let (wake_tx, wake_rx) = std::sync::mpsc::channel::<media::Wake>();
                 // None → GSMTC unavailable; the loop degrades to pure polling.
@@ -1404,7 +1406,7 @@ pub fn run() {
                 const HISTORY_PROBE_BEATS: u32 = 10;
                 let mut hidden_beats = 0u32;
                 loop {
-                    MEDIA_TICK_MS.store(now_ms(), Ordering::Relaxed);
+                    media::beat();
                     if let Some(w) = watch.as_mut() {
                         w.resubscribe(std::mem::take(&mut resubscribe));
                     }

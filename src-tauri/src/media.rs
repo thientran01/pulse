@@ -157,6 +157,13 @@ const STAGE_NAMES: [&str; 12] = [
 ];
 
 static MEDIA_STAGE: AtomicU8 = AtomicU8::new(0);
+/// Last stage TRANSITION on the media loop thread (unix ms; 0 = loop not
+/// started). The watchdog measures staleness of this, not iteration
+/// completion: one legitimate slow-art iteration can chain dozens of
+/// succeeding 3s-bounded chunk reads and take >10s while making real
+/// progress — each transition refreshes the beat, so only a single blocking
+/// call that never returns goes stale.
+static MEDIA_BEAT_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 thread_local! {
     static IS_MEDIA_LOOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -166,17 +173,38 @@ thread_local! {
 /// the dev sim-wedge apply only on that thread.
 pub fn mark_media_loop_thread() {
     IS_MEDIA_LOOP.with(|f| f.set(true));
+    beat();
+}
+
+/// Refresh the liveness beat without touching the stage — the media loop
+/// calls this once per iteration (covers stage-free hidden beats).
+pub fn beat() {
+    if IS_MEDIA_LOOP.with(|f| f.get()) {
+        MEDIA_BEAT_MS.store(now_ms(), Ordering::Relaxed);
+    }
 }
 
 fn set_stage(stage: Stage) {
     if IS_MEDIA_LOOP.with(|f| f.get()) {
         MEDIA_STAGE.store(stage as u8, Ordering::Relaxed);
+        MEDIA_BEAT_MS.store(now_ms(), Ordering::Relaxed);
     }
 }
 
 /// The stage the media loop last entered — read by the watchdog on a stall.
 pub fn stage_name() -> &'static str {
     STAGE_NAMES[(MEDIA_STAGE.load(Ordering::Relaxed) as usize) % STAGE_NAMES.len()]
+}
+
+/// Ms since the media loop last made progress (a stage transition or an
+/// iteration beat); 0 while the loop hasn't started. Read by the watchdog.
+pub fn beat_age_ms() -> i64 {
+    let beat = MEDIA_BEAT_MS.load(Ordering::Relaxed);
+    if beat == 0 {
+        0
+    } else {
+        now_ms() - beat
+    }
 }
 
 /// Async-op timeout for metadata/manager/transport calls — normally <10ms.
@@ -205,10 +233,17 @@ fn wait_op<T: windows::core::RuntimeType + 'static>(
     let out = if hooked && rx.recv_timeout(Duration::from_millis(timeout_ms)).is_ok() {
         op.GetResults().ok()
     } else {
-        log::warn!(
-            "media: WinRT op gave up after {timeout_ms}ms at stage '{}'",
-            STAGE_NAMES[stage as u8 as usize]
-        );
+        if hooked {
+            log::warn!(
+                "media: WinRT op timed out after {timeout_ms}ms at stage '{}'",
+                STAGE_NAMES[stage as u8 as usize]
+            );
+        } else {
+            log::warn!(
+                "media: SetCompleted failed at stage '{}' (no wait attempted)",
+                STAGE_NAMES[stage as u8 as usize]
+            );
+        }
         let _ = op.Cancel();
         None
     };
@@ -237,10 +272,17 @@ where
     let out = if hooked && rx.recv_timeout(Duration::from_millis(timeout_ms)).is_ok() {
         op.GetResults().ok()
     } else {
-        log::warn!(
-            "media: WinRT op gave up after {timeout_ms}ms at stage '{}'",
-            STAGE_NAMES[stage as u8 as usize]
-        );
+        if hooked {
+            log::warn!(
+                "media: WinRT op timed out after {timeout_ms}ms at stage '{}'",
+                STAGE_NAMES[stage as u8 as usize]
+            );
+        } else {
+            log::warn!(
+                "media: SetCompleted failed at stage '{}' (no wait attempted)",
+                STAGE_NAMES[stage as u8 as usize]
+            );
+        }
         let _ = op.Cancel();
         None
     };
