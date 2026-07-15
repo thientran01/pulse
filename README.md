@@ -73,6 +73,14 @@ Two honest caveats:
 
 Everything above is an optional power tier layered on top — the base player never needs any of it.
 
+## Privacy
+
+Palette keeps everything local. There is no analytics, no telemetry, and no account.
+
+- **What's stored on your machine** (`%APPDATA%\com.thien.pulse`): your preferences, your play history (`history.jsonl` — every track Palette displayed), the on-disk lyrics and thumbnail caches, and — only if you connect Spotify — your Spotify tokens. Logs and the WebView2 cache live under `%LOCALAPPDATA%\com.thien.pulse`.
+- **What leaves your machine**: lyric lookups to [LRCLIB](https://lrclib.net), and — only for the opt-in tier — requests to the Spotify Web API and Last.fm. Nothing else.
+- **Clearing data**: **Preferences → Data → Clear play history** wipes the history log and its thumbnails. Uninstalling removes your Spotify tokens.
+
 ## Build from source
 
 Requires Node 20+, Rust (MSVC toolchain), and the VS Build Tools.
