@@ -300,18 +300,21 @@ export default function Focus() {
                     pointerEvents: "none" as const,
                     transition: { duration: reducedMotion ? 0 : DUR[2] / 1000, ease: [...EASE.out] as [number, number, number, number] },
                   }}
-                  className="absolute inset-0 flex items-stretch gap-[7%] px-[10%]"
+                  className="absolute inset-0 flex items-stretch gap-[7%] px-[10%] [--art-top:calc(50vh_-_min(560px,46vh,100vh_-_660px))]"
                 >
-                  {/* The album's BOTTOM edge sits on the window's vertical
-                      midpoint (Thien's rule, 2026-07-14): pt = 50vh − art,
-                      top-aligned — the artwork hangs above the midline and
-                      the metadata starts right at it. The min() term IS the
+                  {/* --art-top: the album's BOTTOM edge sits on the window's
+                      vertical midpoint (Thien's rule, 2026-07-14), so its
+                      top lands at 50vh − art height. The min() term IS the
                       IdentityStack width formula (square art: width =
-                      height) — keep the two in sync. */}
-                  <div className="flex min-h-0 shrink-0 flex-col pt-[calc(50vh_-_min(560px,46vh,100vh_-_660px))]">
+                      height) — keep the two in sync. Both columns seat on
+                      it: the artwork hangs above the midline with the
+                      metadata starting at it, and the lyric box's top edge
+                      ALIGNS with the album's (its topmost ghost fades out
+                      exactly at the art's top line). */}
+                  <div className="flex min-h-0 shrink-0 flex-col pt-(--art-top)">
                     <IdentityStack np={np} artUrl={artUrl} caption={caption} centered={false} />
                   </div>
-                  <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col pb-4">
+                  <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col pb-4 pt-(--art-top)">
                     <LyricsPanel
                       lines={lyrics.lines}
                       seekable={seekable}
@@ -331,12 +334,12 @@ export default function Focus() {
                     pointerEvents: "none" as const,
                     transition: { duration: reducedMotion ? 0 : DUR[2] / 1000, ease: [...EASE.out] as [number, number, number, number] },
                   }}
-                  className="absolute inset-0 flex items-start justify-center"
+                  className="absolute inset-0 flex items-start justify-center [--art-top:calc(50vh_-_min(560px,46vh,100vh_-_660px))]"
                 >
                   {/* Same seat rule as the lyrics view (album bottom on the
                       window midline), so the lyrics⇄fallback crossfade holds
                       the art still on the vertical axis. */}
-                  <div className="pt-[calc(50vh_-_min(560px,46vh,100vh_-_660px))]">
+                  <div className="pt-(--art-top)">
                     <IdentityStack np={np} artUrl={artUrl} caption={caption} centered />
                   </div>
                 </motion.div>

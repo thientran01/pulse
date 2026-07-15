@@ -199,15 +199,17 @@ const SCALE = {
     // leans on tier-1's brightness (the next line reads through the
     // ramp's start).
     anchor: 0.5,
-    // Two visible lines cut per side vs the first live cut (200/320 →
-    // 360/440): at fullscreen the lyric ghosts climbed nearly to the
-    // window's top edge and ~12 lines read at once (Thien, 2026-07-14 live
-    // — "way too many lyrics"). The knob if it wants more/less. The min()
-    // guards keep the stops from crossing on short viewports (35%+42% ≤
-    // 77% always orders) — the ramps scale instead of inverting there.
-    mask: "[mask-image:linear-gradient(transparent,black_min(360px,35%),black_calc(100%-min(440px,42%)),transparent)]",
-    chipTop: "top-84",
-    chipBottom: "bottom-110",
+    // Tuned to the ALIGNED box (Focus seats the lyric column's top on the
+    // album's top edge via --art-top, 2026-07-14): the box no longer
+    // reaches the window top, so the ramps are shallow again — ~3 strong +
+    // 1 faint lines above the current line, ~2 strong + 1 faint below
+    // (one cut per side vs the previous round's window, per Thien live).
+    // The knob if it wants more/less. The min() guards keep the stops
+    // from crossing on short viewports (20%+28% ≤ 48% always orders) —
+    // the ramps scale instead of inverting there.
+    mask: "[mask-image:linear-gradient(transparent,black_min(160px,20%),black_calc(100%-min(240px,28%)),transparent)]",
+    chipTop: "top-44",
+    chipBottom: "bottom-64",
     // Break-row dots scaled up for the room — bigger dots on a wider gap so
     // the countdown reads at fullscreen distance (the feel knob for the
     // focus break row, 2026-07-13).
