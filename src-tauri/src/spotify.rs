@@ -156,8 +156,11 @@ pub struct QueueTrack {
     pub artist: String,
     pub album: String,
     pub duration_ms: i64,
-    /// Smallest suitable remote cover URL — the webview loads it directly
-    /// (null CSP), no data-URL bloat, no ArtCache involvement.
+    /// Cover the webview renders directly. Spotify-sourced adds carry the
+    /// smallest suitable remote URL (CSP img-src allow-lists the Spotify
+    /// image CDNs); history-sourced adds carry the bounded 96px local thumb
+    /// as a data URL. Stored verbatim — never ArtCache's full-size art (the
+    /// bloat this field is scoped to keep out of the persisted list).
     pub art_url: Option<String>,
 }
 

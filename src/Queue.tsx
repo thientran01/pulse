@@ -150,6 +150,29 @@ const thumbCache = new Map<string, string | null>();
  * runs for days; an uncapped map of base64 JPEGs would only ever grow. */
 const THUMB_CACHE_MAX = 300;
 
+/** Longest a history-add waits for its thumb before adding glyph'd — the
+ * read is local disk (normally a sync cache hit); the bound exists so the
+ * add verb can never hang on a wedged IPC call. */
+const ART_WAIT_MS = 300;
+
+/** Fetch+cache one thumb — shared by useThumb (display) and addResolved
+ * (the history-add art). Errors resolve null and stay UNcached so a
+ * transient failure can retry. */
+async function thumbFor(key: string): Promise<string | null> {
+  if (thumbCache.has(key)) return thumbCache.get(key) ?? null;
+  try {
+    const u = await commands.historyThumbUrl(key);
+    if (thumbCache.size >= THUMB_CACHE_MAX) {
+      const oldest = thumbCache.keys().next().value;
+      if (oldest !== undefined) thumbCache.delete(oldest);
+    }
+    thumbCache.set(key, u);
+    return u;
+  } catch {
+    return null;
+  }
+}
+
 function useThumb(key: string): string | null {
   const [url, setUrl] = useState<string | null>(() => thumbCache.get(key) ?? null);
   useEffect(() => {
@@ -158,12 +181,7 @@ function useThumb(key: string): string | null {
       return;
     }
     let alive = true;
-    void commands.historyThumbUrl(key).then((u) => {
-      if (thumbCache.size >= THUMB_CACHE_MAX) {
-        const oldest = thumbCache.keys().next().value;
-        if (oldest !== undefined) thumbCache.delete(oldest);
-      }
-      thumbCache.set(key, u);
+    void thumbFor(key).then((u) => {
       if (alive) setUrl(u);
     });
     return () => {
@@ -218,17 +236,29 @@ async function playTrackNow(t: { uri: string; title: string; artist: string }): 
 
 // ---- rows ----
 
-/** Cover thumb (remote url straight into an img; note glyph fallback) —
- * 26px in the queue rows; the search window passes its own size (same grammar,
- * bigger room). Exported for the search window's result rows. */
+/** Cover thumb (remote url straight into an img; note glyph on a null OR
+ * dead url) — 26px in the queue rows; the search window passes its own size
+ * (same grammar, bigger room). Exported for the search window's result rows. */
 export function RowThumb({ url, size = 26 }: { url: string | null; size?: number }) {
+  // A dead art_url (CDN 403/404) degrades to the glyph — an empty tile reads
+  // as a rendering bug. Failure is keyed to the url itself: RowThumb never
+  // remounts on url flips (useThumb resolves in place), so a reset effect
+  // would flash the glyph a frame; a NEW url simply stops matching and retries.
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const showImg = url !== null && url !== failedUrl;
   return (
     <span
       className="grid shrink-0 place-items-center overflow-hidden rounded-md bg-surface-2 text-muted"
       style={{ width: size, height: size }}
     >
-      {url ? (
-        <img src={url} alt="" className="h-full w-full object-cover" draggable={false} />
+      {showImg ? (
+        <img
+          src={url}
+          alt=""
+          className="h-full w-full object-cover"
+          draggable={false}
+          onError={() => setFailedUrl(url)}
+        />
       ) : (
         <MorphIcon name="note" size={Math.round(size / 2)} />
       )}
@@ -701,9 +731,21 @@ export function QueuePanel({
   );
   // Queue a history entry, resolving its uri first when it wasn't enriched
   // (pre-v0.6.1 entries, Apple Music listens). Fire-and-forget; misses toast.
+  // The local 96px thumb rides along as the row's art (it matches what the
+  // history row shows and works offline — resolve returns a bare uri, so
+  // there is no other art source here), fetched in PARALLEL and raced
+  // against ART_WAIT_MS: the art is a nicety and never gates the verb — a
+  // slow or wedged thumb read means the row adds glyph'd, exactly the
+  // pre-thumb behavior. Play-now skips the fetch entirely (renders no art).
   const addResolved = (entry: HistoryEntry, at?: number) => {
-    void resolveTrack(entry).then((t) => {
-      if (t) addToQueue(t, at);
+    void Promise.all([
+      resolveTrack(entry),
+      Promise.race([
+        thumbFor(entry.key),
+        new Promise<string | null>((r) => setTimeout(() => r(null), ART_WAIT_MS)),
+      ]),
+    ]).then(([t, art]) => {
+      if (t) addToQueue({ ...t, art_url: art }, at);
       else showToast("Couldn't find it on Spotify");
     });
   };
