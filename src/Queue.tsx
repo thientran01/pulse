@@ -150,7 +150,12 @@ const thumbCache = new Map<string, string | null>();
  * runs for days; an uncapped map of base64 JPEGs would only ever grow. */
 const THUMB_CACHE_MAX = 300;
 
-/** Fetch+cache one thumb — shared by useThumb (display) and resolveTrack
+/** Longest a history-add waits for its thumb before adding glyph'd — the
+ * read is local disk (normally a sync cache hit); the bound exists so the
+ * add verb can never hang on a wedged IPC call. */
+const ART_WAIT_MS = 300;
+
+/** Fetch+cache one thumb — shared by useThumb (display) and addResolved
  * (the history-add art). Errors resolve null and stay UNcached so a
  * transient failure can retry. */
 async function thumbFor(key: string): Promise<string | null> {
@@ -431,7 +436,7 @@ const HistoryRow = memo(HistoryRowBase);
 
 // ---- the shared panel (both garments render this) ----
 
-function historyToTrack(e: HistoryEntry, art: string | null): QueueTrack | null {
+function historyToTrack(e: HistoryEntry): QueueTrack | null {
   if (!e.spotify_uri) return null;
   return {
     uri: e.spotify_uri,
@@ -439,7 +444,7 @@ function historyToTrack(e: HistoryEntry, art: string | null): QueueTrack | null 
     artist: e.artist,
     album: e.album,
     duration_ms: e.duration_ms,
-    art_url: art,
+    art_url: null,
   };
 }
 
@@ -453,11 +458,7 @@ const uriCache = new Map<string, string | null>();
 /** The actionable form of a history entry: its enriched uri, a cached or
  * fresh search resolution, or null when Spotify can't find it. */
 async function resolveTrack(entry: HistoryEntry): Promise<QueueTrack | null> {
-  // The local 96px thumb IS the art: it matches what the history row shows,
-  // works offline, and resolve returns a bare uri — there is no other art
-  // source on this path. Normally a sync cache hit (the row is on screen).
-  const art = await thumbFor(entry.key);
-  const direct = historyToTrack(entry, art);
+  const direct = historyToTrack(entry);
   if (direct) return direct;
   let uri: string | null;
   const cached = uriCache.get(entry.key);
@@ -474,7 +475,7 @@ async function resolveTrack(entry: HistoryEntry): Promise<QueueTrack | null> {
         artist: entry.artist,
         album: entry.album,
         duration_ms: entry.duration_ms,
-        art_url: art,
+        art_url: null,
       }
     : null;
 }
@@ -730,9 +731,21 @@ export function QueuePanel({
   );
   // Queue a history entry, resolving its uri first when it wasn't enriched
   // (pre-v0.6.1 entries, Apple Music listens). Fire-and-forget; misses toast.
+  // The local 96px thumb rides along as the row's art (it matches what the
+  // history row shows and works offline — resolve returns a bare uri, so
+  // there is no other art source here), fetched in PARALLEL and raced
+  // against ART_WAIT_MS: the art is a nicety and never gates the verb — a
+  // slow or wedged thumb read means the row adds glyph'd, exactly the
+  // pre-thumb behavior. Play-now skips the fetch entirely (renders no art).
   const addResolved = (entry: HistoryEntry, at?: number) => {
-    void resolveTrack(entry).then((t) => {
-      if (t) addToQueue(t, at);
+    void Promise.all([
+      resolveTrack(entry),
+      Promise.race([
+        thumbFor(entry.key),
+        new Promise<string | null>((r) => setTimeout(() => r(null), ART_WAIT_MS)),
+      ]),
+    ]).then(([t, art]) => {
+      if (t) addToQueue({ ...t, art_url: art }, at);
       else showToast("Couldn't find it on Spotify");
     });
   };
