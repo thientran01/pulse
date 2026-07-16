@@ -194,11 +194,12 @@ const SCALE = {
   focus: {
     row: "px-6 py-3 text-[44px] leading-[1.27] tracking-[-0.01em]",
     marker: "h-9 w-[5px]",
-    // 0.5: the current line rides the room's center (the album sits its
-    // deliberate ~7vh bias below — Focus's seat comment). Forward context
-    // leans on tier-1's brightness (the next line reads through the
-    // ramp's start).
-    anchor: 0.5,
+    // 0.46: Thien's Figma pass (2026-07-14) zeroed the ladder's top
+    // padding — in the room shrunken by the horizon's new mb-[10vh],
+    // that lands the current line back on the original 0.46 seat.
+    // Forward context leans on tier-1's brightness (the next line reads
+    // through the ramp's start).
+    anchor: 0.46,
     // Tuned to the ALIGNED box (Focus seats the lyric column's top on the
     // album's top edge via --art-top, 2026-07-14): ~2 strong + 1 faint
     // lines above the current line, ~2 + 1 faint below — Thien's live

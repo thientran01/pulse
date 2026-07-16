@@ -373,10 +373,13 @@ export default function Focus() {
               this takeover, so the horizon is the only now-playing pulse on
               screen). RESIZED 2026-07-14 (Thien's live verdict): the 1170px
               band matched the progress bar's width and read as a second
-              timeline — now a 420×100 fifteen-capsule instrument, clearly
-              narrower than the console; my-[3.5vh] keeps its air on both
-              sides so the three bands read as deliberately spaced. */}
-          <div className="my-[3.5vh] flex shrink-0 items-center justify-center">
+              timeline — now a 780×100 fifteen-capsule instrument (⅔ the
+              console's width), clearly narrower than the console. Margins
+              are ASYMMETRIC per Thien's Figma pass (2026-07-14): the
+              horizon rides up near the lyrics (mt-[3.5vh]) with the big
+              air below it (mb-[10vh]), so the bottom third breathes
+              before the console. */}
+          <div className="mb-[10vh] mt-[3.5vh] flex shrink-0 items-center justify-center">
             <Waveform size="room" announceKey={lyricsKeyOf(np) ?? undefined} />
           </div>
 
