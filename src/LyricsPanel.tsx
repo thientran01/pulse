@@ -206,17 +206,22 @@ const SCALE = {
   focus: {
     row: "px-6 py-3 text-[44px] leading-[1.27] tracking-[-0.01em]",
     marker: "h-9 w-[5px]",
+    // 0.46: Thien's Figma pass (2026-07-14) zeroed the ladder's top
+    // padding — in the room shrunken by the horizon's new mb-[10vh],
+    // that lands the current line back on the original 0.46 seat.
+    // Forward context leans on tier-1's brightness (the next line reads
+    // through the ramp's start).
     anchor: 0.46,
-    // Deep ramps both edges: the lyrics column absorbed the old horizon
-    // band's height (Focus recomposition, 2026-07-14), so without them the
-    // taller viewport showed ~11 lines and the eye had no focal band. Tuned
-    // for ~7 readable lines — "a sentence, not a page". The knob if it
-    // wants more/less. The min() guards keep the stops from crossing on
-    // short viewports (fixed 260+380 needs a 640px column; 30%+40% ≤ 70%
-    // always orders) — below ~867px the ramps scale instead of inverting.
-    mask: "[mask-image:linear-gradient(transparent,black_min(260px,30%),black_calc(100%-min(380px,40%)),transparent)]",
+    // Tuned to the ALIGNED box (Focus seats the lyric column's top on the
+    // album's top edge via --art-top, 2026-07-14): ~2 strong + 1 faint
+    // lines above the current line, ~2 + 1 faint below — Thien's live
+    // rounds settled here ("that line is barely visible anyway, it'd fade
+    // cleaner"). The knob if it wants more/less. The min() guards keep
+    // the stops from crossing on short viewports (26%+34% ≤ 60% always
+    // orders) — the ramps scale instead of inverting there.
+    mask: "[mask-image:linear-gradient(transparent,black_min(240px,26%),black_calc(100%-min(320px,34%)),transparent)]",
     chipTop: "top-64",
-    chipBottom: "bottom-96",
+    chipBottom: "bottom-84",
     // Break-row dots scaled up for the room — bigger dots on a wider gap so
     // the countdown reads at fullscreen distance (the feel knob for the
     // focus break row, 2026-07-13).
@@ -234,7 +239,7 @@ const SCALE = {
  * and the tiers re-settle on re-latch. */
 function focusTone(tier: number, browsing: boolean): string {
   if (browsing) return "text-muted/80";
-  return tier <= 1 ? "text-muted/85" : tier === 2 ? "text-muted/40" : "text-muted/15";
+  return tier <= 1 ? "text-muted/85" : tier === 2 ? "text-muted/50" : "text-muted/30";
 }
 
 /** One lyric line. Memoized so a line advance reconciles the two rows whose

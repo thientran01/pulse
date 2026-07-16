@@ -4,7 +4,7 @@
  * five Apple-style accent capsules bouncing on live spectrum bins. On pause
  * it settles in beats: the bars retract into dots, then the dots fade from
  * the outside in — a distance-staggered cascade normalized to the drop beat,
- * so a 5-bar and a 41-bar rendition collapse in the same wall-clock (reverse-
+ * so a 5-bar and a 19-bar rendition collapse in the same wall-clock (reverse-
  * reading as one dot having multiplied) — and the survivor drains to gray as
  * the very last event. The app's ONLY
  * audio-reactive surface. State morphs use the house EASE token; per-frame
@@ -21,49 +21,46 @@ import { Envelope, subscribeBands } from "./lib/reactive";
  * with them; the lyrics header is also that view's only now-playing signal);
  * "lg" is the standalone hero in the expanded big-art view (9 bars — the
  * wider stage earns the extra pairs); "room" is focus mode's horizon (the
- * Soundboard design, 2026-07-12: a 1170×150 instrument spanning the lower
- * third of the fullscreen takeover). Room was RESHAPED 2026-07-12 after the
+ * Soundboard design, 2026-07-12). Room was RESHAPED 2026-07-12 after the
  * first cut read wrong at fullscreen size: 24px-wide bars turned into fat
  * ovals whenever they went short (a wide rounded-full shape is a blob when
  * height ≈ width), worst at the edges where the quiet high bins keep them
- * shortest. Now 41 thin (12px) capsules — a thin capsule stays a capsule at
- * any height — under a gentle symmetric peak envelope (roomPeak) so the
- * horizon reads as one intentional instrument (tall bass center, tapered
- * edges) instead of a random picket. Same choreography at every size.
+ * shortest — thin 12px capsules stay capsules at any height. RESIZED
+ * 2026-07-14 (Thien's live verdict): the 41-bar 1170×150 band matched the
+ * progress bar's width and read as a second timeline, and PR #102's tiny
+ * song-block wave overcorrected — now 19 capsules at 780×100 (⅔ the
+ * console's width — Thien's Figma pass, 2026-07-14: 19 capsules stretched on
+ * ~31px gaps read calmer than a dense picket), still clearly narrower
+ * than the console. Still under the gentle symmetric peak envelope (roomPeak) so it
+ * reads as one intentional instrument (tall bass center, tapered edges)
+ * instead of a random picket. Same choreography at every size.
  * boxH/aliveW/restW size the container: sm/md morph width between rest and
- * alive; the HERO footprints (lg, xl, room) are CONSTANT (no width/margin
+ * alive; the HERO footprints (lg, room) are CONSTANT (no width/margin
  * morph, rest keeps the full box) because they sit in centered columns/bands —
  * collapsing would re-seat everything around them. */
-type Size = "sm" | "md" | "lg" | "xl" | "room";
+type Size = "sm" | "md" | "lg" | "room";
 const GEOM = {
   sm: { bar: "h-[9px] w-[2px]", dot: "h-[2px] w-[2px]", survivor: "h-[3px] w-[3px]", dropBlur: "blur-[1.5px]", boxH: "h-[11px]", aliveW: "w-[18px]", restW: "w-[5px]" },
   md: { bar: "h-[18px] w-[4px]", dot: "h-[3px] w-[3px]", survivor: "h-[4px] w-[4px]", dropBlur: "blur-[2px]", boxH: "h-[20px]", aliveW: "w-[46px]", restW: "w-[6px]" },
   lg: { bar: "h-[26px] w-[5px]", dot: "h-[5px] w-[5px]", survivor: "h-[7px] w-[7px]", dropBlur: "blur-[3px]", boxH: "h-[30px]", aliveW: "w-[85px]", restW: "w-[85px]" },
-  xl: { bar: "h-[36px] w-[6px]", dot: "h-[6px] w-[6px]", survivor: "h-[8px] w-[8px]", dropBlur: "blur-[3px]", boxH: "h-[40px]", aliveW: "w-[190px]", restW: "w-[190px]" },
-  room: { bar: "h-[150px] w-[12px]", dot: "h-[6px] w-[6px]", survivor: "h-[10px] w-[10px]", dropBlur: "blur-[4px]", boxH: "h-[170px]", aliveW: "w-[1170px]", restW: "w-[1170px]" },
+  room: { bar: "h-[100px] w-[12px]", dot: "h-[6px] w-[6px]", survivor: "h-[10px] w-[10px]", dropBlur: "blur-[4px]", boxH: "h-[120px]", aliveW: "w-[780px]", restW: "w-[780px]" },
 } as const;
 /** The constant-footprint, purely-decorative standalone renditions. */
-const HERO: ReadonlySet<Size> = new Set(["lg", "xl", "room"]);
+const HERO: ReadonlySet<Size> = new Set(["lg", "room"]);
 /** Which spectrum bin each bar rides: center gets the lowest (Apple's
  * tall-middle silhouette); neighbors sit on staggered mids/highs so the
  * bars never bounce in lockstep. md is sm's inner five plus an outer high
  * pair; lg adds one more high pair outside those (15/13 deliberately
- * asymmetric — twin bins would bounce the edges in lockstep). xl extends lg
- * with two more staggered outer pairs (13 bars — the focus identity-stack
- * rendition). room walks
- * the same asymmetric pattern out to 41: the center rides bass (bin 1 — the
- * tall middle) and the bins trend toward the highs at the edges (so energy
- * tapers outward WITH the roomPeak envelope), jittered so no two neighbors
- * share a bin and the two halves are never mirror images. */
+ * asymmetric — twin bins would bounce the edges in lockstep). room extends
+ * lg with five more staggered outer pairs (19 bars): the center rides bass
+ * (bin 1 — the tall middle) and the bins trend toward the highs at the
+ * edges (so energy tapers outward WITH the roomPeak envelope), jittered so
+ * no two neighbors share a bin and the two halves are never mirror images. */
 const BAR_BINS = {
   sm: [9, 4, 1, 6, 11],
   md: [12, 9, 4, 1, 6, 11, 14],
   lg: [15, 12, 9, 4, 1, 6, 11, 14, 13],
-  xl: [14, 13, 15, 12, 9, 4, 1, 6, 11, 14, 13, 15, 12],
-  room: [
-    12, 15, 13, 14, 15, 13, 15, 12, 14, 11, 13, 9, 12, 7, 10, 5, 8, 3, 6, 4, 1,
-    3, 5, 7, 6, 9, 8, 11, 9, 13, 11, 14, 12, 15, 13, 15, 14, 13, 15, 14, 15,
-  ],
+  room: [12, 15, 13, 14, 12, 15, 12, 9, 4, 1, 6, 11, 14, 13, 15, 12, 14, 13, 15],
 } as const;
 /** Minimum bar height while alive, as a fraction of the full bar. */
 const REST = 0.15;
@@ -106,7 +103,7 @@ const SLEEP_MS = 500;
  * alive) on faster beats: the middot warms to accent as the survivor takes
  * over (the color beat leads, loosely mirroring color-leaves-last on the
  * settle — the warm-up overlaps the first multiplication beat), pairs fade in
- * from the inside out — distance-staggered (riseDelayMs) so a 41-bar rendition
+ * from the inside out — distance-staggered (riseDelayMs) so a 19-bar rendition
  * fans in as smoothly as a 5-bar one, the entrance mirror of the settle's
  * outside-in drop — and the dots grow into bars.
  */
@@ -168,9 +165,8 @@ function barClass(phase: Phase, i: number, size: Size): string {
  * and the inner pair (d<2) needs none — the "one" beat IS its stagger. The
  * CALLER additionally gates this to the SETTLE ladder (settlingRef): the
  * announce/bloom ladders reuse these phase names on the faster BLOOM/
- * ANNOUNCE_MS beats — and the announcement fires at the focus renditions too
- * (xl's 13 / room's 41 bars, Focus.tsx), where a DROP_MS-normalized stagger
- * would overrun their window —
+ * ANNOUNCE_MS beats — and the announcement fires at room's 19 bars too
+ * (Focus.tsx), where a DROP_MS-normalized stagger would overrun their window —
  * so those collapse plainly, matching their "glanced at, not watched" cadence. */
 function dropDelayMs(phase: Phase, i: number, size: Size): number {
   if (phase !== "three" && phase !== "one" && phase !== "rest") return 0;
@@ -185,7 +181,7 @@ function dropDelayMs(phase: Phase, i: number, size: Size): number {
  * dropDelayMs. On the bloom's "dots" beat every outer dot (d≥2) un-hides at
  * once; delay each by how FAR OUT it is so the reveal fans from the center
  * (the survivor + its just-revealed inner pair) outward, normalized to the
- * bloom beat (BLOOM_MS) so a 5-bar and a 41-bar rendition fan in the same
+ * bloom beat (BLOOM_MS) so a 5-bar and a 19-bar rendition fan in the same
  * wall-clock. The innermost outer pair (d=2) leads at 0, the outermost lands a
  * full BLOOM_MS later — into the "alive" handoff, where the bars are already
  * growing. d<2 needs none (its pair revealed a beat earlier, on "three") and
@@ -227,9 +223,8 @@ export function Waveform({
   // change so the render sees it). The settle earns the OUTSIDE-IN drop
   // stagger (dropDelayMs); the bloom the INSIDE-OUT rise stagger (riseDelayMs).
   // The announcement reuses these phase names on faster beats — and runs at
-  // the focus renditions (xl's 13 / room's 41 bars, Focus.tsx), where either
-  // stagger would overrun its window — so it collapses/reveals plainly,
-  // ungated.
+  // room's 19 bars in focus mode (Focus.tsx), where either stagger would
+  // overrun its window — so it collapses/reveals plainly, ungated.
   const settlingRef = useRef(false);
   const bloomingRef = useRef(false);
   // Render-visible half of the announce ladder: while true the bars paint

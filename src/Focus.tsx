@@ -4,31 +4,30 @@
  * view's expand bracket, closed by Esc / the collapse control / Alt-F4).
  *
  * Composition: "SOUNDBOARD" (the 3-design/3-judge panel's winner,
- * 2026-07-12), RECOMPOSED 2026-07-14 — the full-width horizon band sat
- * directly above the progress bar at its exact width and read as a
- * second timeline, outweighing the lyrics. Now each view owns its full
- * composition inside the swap, one reactive surface each: the LYRICS
- * view seats the identity column (art + metadata + an xl Waveform riding
- * the song block — the house grammar; vertically centered on the lyric
- * anchor) left and the receding lyric lines right; the NO-LYRICS
- * fallback centers the identity stack over the room-scale horizon, that
- * view's hero. Progress + transport are the console, fixed below the
- * swap so a view crossfade never moves it. Surviving grafts: art at
+ * 2026-07-12), RETUNED 2026-07-14 after Thien's live verdicts on two
+ * cuts: the original 1170×150 horizon band matched the progress bar's
+ * width and read as a second timeline; PR #102's answer (a small wave in
+ * the song block) was too small and off to the side. The keeper: the
+ * three-band Soundboard skeleton with a SMALLER instrument — upper room
+ * (identity column vertically centered on the lyric anchor + receding
+ * lyric lines; the fallback centers the same stack), then the horizon
+ * (room Waveform, now 19 capsules at 780×100 (⅔ the console) — clearly narrower than
+ * the console), then the console. The horizon + console live OUTSIDE
+ * the upper-room swap so they never remount: the horizon survives every
+ * track change and runs the ANNOUNCEMENT (announceKey) — the pill is
+ * hidden behind this takeover, so the horizon is the room's one
+ * now-playing pulse. The upper room carries NO other Waveform
+ * (SeparatorDot only): one reactive surface per view. Grafts: art at
  * ~560px (The Hang), the asymmetric deep-bottom lyric mask (The Hang),
  * the reserved lyrics-status caption slot (Gatefold), one-stack-two-seats
  * with an opacity crossfade (The Hang).
  *
- * Track-change grammar (honest limits): lyricsLive flips false for the
- * fetch interlude on EVERY track change (the key-mismatch gate in
- * lyricsKeyOf's doc comment), so the active seat always exits through
- * the fallback and remounts — per-track state (title fade, lyric panel)
- * resets for free, and the crossfade + title-in ARE the track-change
- * choreography here. The Waveform announcement (announceKey) therefore
- * only fires on a surface that stays mounted across the change — the
- * fallback's horizon during instrumental→instrumental changes — not in
- * the lyrics view (a fresh mount treats its first key as initial). The
- * pill keeps the announcement's home; this room narrates changes by
- * swapping instead.
+ * Track-change grammar: lyricsLive flips false for the fetch interlude
+ * on EVERY track change (the key-mismatch gate in lyricsKeyOf's doc
+ * comment), so the active seat always exits through the fallback and
+ * remounts — per-track state (title fade, lyric panel) resets for free.
+ * Anything that must SURVIVE a track change (the announcing horizon)
+ * must live outside the swap; nothing keyed inside a seat does.
  *
  * Realm notes: own onNowPlaying → posClock.ingest loop (posClock is
  * per-realm), own lyric fetch (disk cache makes the second fetch ~free),
@@ -51,6 +50,12 @@ import { QueuePanel, useSpotifyStatus } from "./Queue";
 import { ProgressBar, Transport } from "./Transport";
 import { SeparatorDot, Waveform } from "./Waveform";
 import type { NowPlaying } from "./types";
+
+/** How long the "No synced lyrics" caption stays before fading out — the
+ * expanded view's rule (App.tsx NO_LYRICS_CAPTION_MS, kept in step): it's an
+ * answer to "where are the lyrics", and once read it shouldn't sit under the
+ * metadata forever. The reserved slot keeps its height, so nothing moves. */
+const NO_LYRICS_CAPTION_MS = 4000;
 
 /** Identity fields — the same re-render gate App.tsx uses (position lives
  * in posClock, never in React state). */
@@ -125,28 +130,25 @@ function IdentityStack({
   np,
   artUrl,
   caption,
+  captionExpired,
   centered,
-  waveKey,
 }: {
   np: NowPlaying;
   artUrl: string | null;
   caption: string | null;
+  /** The miss caption answers once, then leaves (the expanded view's
+   * grammar) — when true the span fades out but stays mounted so the
+   * reserved slot's height never moves; aria-hidden goes with it. */
+  captionExpired: boolean;
   centered: boolean;
-  /** When set, the stack carries the view's reactive surface: an xl
-   * Waveform under the metadata, announcing on this key. The lyrics seat
-   * passes it (capsules ride the song, the house grammar); the fallback
-   * seat doesn't — its surface is the room horizon (one per view). */
-  waveKey?: string;
 }) {
   const align = centered ? "items-center text-center" : "items-start text-left";
   return (
-    // Width caps: 560px design size, 46vh so the square art leaves room for
-    // the stack on normal monitors, and 100vh-500px as the short-monitor
-    // guard — 500px ≈ the stack's fixed parts (metadata + wave + caption
-    // ≈ 210) + the console band (≈ 230) + slack, so at ≤ ~925px heights the
-    // art cedes height instead of the centered column overflowing into the
-    // console (nothing clips between them).
-    <div className={`flex w-[min(560px,46vh,calc(100vh_-_500px))] flex-col ${align}`}>
+    // Width = var(--art), defined ONCE on each seat in Focus's return
+    // (both seats set it identically) — the seats' stack-top math, this
+    // width, and the lyric column's bottom-alignment all derive from the
+    // same value, which is what makes the aligned edges exact.
+    <div className={`flex w-(--art) flex-col ${align}`}>
       <div className="grid aspect-square w-full place-items-center overflow-hidden rounded-3xl bg-surface-2 text-muted">
         {artUrl ? (
           <img src={artUrl} alt="" className="h-full w-full object-cover" draggable={false} />
@@ -164,19 +166,19 @@ function IdentityStack({
           {np.album}
         </p>
       </div>
-      {waveKey !== undefined && (
-        <div className="mt-6">
-          <Waveform size="xl" announceKey={waveKey} />
-        </div>
-      )}
       {/* Reserved slot — "Finding lyrics…" answers the wait, the miss stays
           quiet, and the fixed height means resolution never moves the art. */}
       <p className="mt-1 h-7 w-full truncate text-[17px] leading-7 text-muted/70">
         {caption && (
           <span
             key={caption}
-            className={`inline-block animate-[caption-in_200ms_var(--ease-out-tk)_both] ${
-              caption === "Finding lyrics…" ? "[animation-delay:400ms]" : ""
+            aria-hidden={captionExpired || undefined}
+            className={`inline-block ${
+              captionExpired
+                ? "animate-[caption-out_260ms_var(--ease-out-tk)_both]"
+                : `animate-[caption-in_200ms_var(--ease-out-tk)_both] ${
+                    caption === "Finding lyrics…" ? "[animation-delay:400ms]" : ""
+                  }`
             }`}
           >
             {caption}
@@ -246,6 +248,18 @@ export default function Focus() {
           ? "No synced lyrics"
           : null;
 
+  // The miss caption answers once, then leaves (the expanded view's rule) —
+  // the timer restarts per track and per status flip so a loading→none
+  // resolve gets its full read window.
+  const trackKey = lyricsKeyOf(np);
+  const [captionExpired, setCaptionExpired] = useState(false);
+  useEffect(() => {
+    setCaptionExpired(false);
+    if (lyrics.status !== "none") return;
+    const t = window.setTimeout(() => setCaptionExpired(true), NO_LYRICS_CAPTION_MS);
+    return () => window.clearTimeout(t);
+  }, [lyrics.status, trackKey]);
+
   const swap = {
     initial: { opacity: 0 },
     animate: { opacity: 1 },
@@ -260,7 +274,19 @@ export default function Focus() {
     // Opaque room, one 200ms opacity arrival for the whole surface — chrome
     // gets no theater; the lyrics cascade and the hero's own bloom are the
     // arrival's only choreography.
-    <div className="group/focus room-in relative flex h-screen w-screen flex-col overflow-hidden bg-surface text-fg">
+    //
+    // --art / --stack-top: the room's two layout constants, defined ONCE
+    // here (every band derives from them — the identity seat, the lyric
+    // box's edges, the horizon's centering). --art = the album's size:
+    // 560px design size, 46vh so the square art leaves room on normal
+    // monitors, 100vh-660px as the short-monitor guard, 50vw-582px as the
+    // narrow-width guard (the identity column must end left of the
+    // centered 780px horizon: 192 + art ≤ (100vw-780)/2 — the metadata
+    // riding into the horizon's ROW is accepted per Thien's Figma pass).
+    // --stack-top centers the identity STACK (art + 146px of metadata) on
+    // the window's vertical midpoint (Thien's Figma verdict, 2026-07-14:
+    // it lifts the art to meet the lyric cluster).
+    <div className="group/focus room-in relative flex h-screen w-screen flex-col overflow-hidden bg-surface text-fg [--art:min(560px,46vh,100vh_-_660px,50vw_-_582px)] [--stack-top:calc(50vh_-_var(--art)/2_-_73px)]">
       {/* Corner exit: hover-revealed + the has-[:focus-visible] keyboard
           reveal (the widget's contract). The contract-bracket verb, going
           home. */}
@@ -293,21 +319,18 @@ export default function Focus() {
         </div>
       ) : (
         <>
-          {/* THE UPPER ROOM — everything above the console; each view owns
-              its full composition (lyrics: identity column + lyrics; fallback:
-              centered identity over the room horizon). Seats crossfade by
-              opacity; the art never slides. Seat keys are per-VIEW: a track
-              change exits through the fallback interlude anyway (see the
-              header), which remounts per-track state for free. The lyrics
-              column carries its own per-track key as the backstop for the
-              one path that DOESN'T remount — a lyrics resolve fast enough
-              to catch the exiting "split" seat mid-fade, which
-              AnimatePresence recycles with props updated in place. */}
+          {/* THE UPPER ROOM — the only region that swaps (one stack, two
+              seats). Crossfade by opacity; the art never slides. Seats are
+              keyed per track (split) / per view (centered): every track
+              change exits through the fallback interlude anyway (lyricsLive
+              flips while lyrics re-key), so the per-track key just makes
+              the remount explicit and covers the fast-resolve path where
+              AnimatePresence would otherwise recycle the exiting seat. */}
           <div className="relative min-h-0 flex-1">
             <AnimatePresence initial={false}>
               {lyricsLive ? (
                 <motion.div
-                  key="split"
+                  key={`split:${lyrics.key}`}
                   {...swap}
                   transition={swapTiming}
                   exit={{
@@ -317,19 +340,18 @@ export default function Focus() {
                   }}
                   className="absolute inset-0 flex items-stretch gap-[7%] px-[10%]"
                 >
-                  {/* Vertically centered with a small upward bias so the
-                      art's optical center lands near the lyric anchor (the
-                      current line sits at 46% height, not 50%). */}
-                  <div className="flex min-h-0 shrink-0 flex-col justify-center pb-[6vh]">
-                    <IdentityStack
-                      np={np}
-                      artUrl={artUrl}
-                      caption={caption}
-                      centered={false}
-                      waveKey={lyricsKeyOf(np) ?? undefined}
-                    />
+                  {/* Seated on the root's --stack-top (see the root div's
+                      comment for the full layout-constant story). */}
+                  <div className="flex min-h-0 shrink-0 flex-col pt-(--stack-top)">
+                    <IdentityStack np={np} artUrl={artUrl} caption={caption} captionExpired={captionExpired} centered={false} />
                   </div>
-                  <div key={lyrics.key} className="flex h-full min-h-0 min-w-0 flex-1 flex-col pb-4">
+                  {/* The lyric column keeps its own top (the ladder Thien
+                      likes; tops can't align now that the art centers) and
+                      its BOTTOM edge aligns with the album's — the explicit
+                      height ends the box at --stack-top + --art, so the
+                      bottom fade dissolves exactly at the art's bottom line
+                      (Thien, 2026-07-14). */}
+                  <div className="flex h-[calc(var(--stack-top)_+_var(--art)_-_11vh)] min-h-0 min-w-0 flex-1 flex-col mt-[11vh]">
                     <LyricsPanel
                       lines={lyrics.lines}
                       seekable={seekable}
@@ -349,20 +371,13 @@ export default function Focus() {
                     pointerEvents: "none" as const,
                     transition: { duration: reducedMotion ? 0 : DUR[2] / 1000, ease: [...EASE.out] as [number, number, number, number] },
                   }}
-                  className="absolute inset-0 flex flex-col"
+                  className="absolute inset-0 flex items-start justify-center"
                 >
-                  <div className="flex min-h-0 flex-1 items-center justify-center">
-                    <IdentityStack np={np} artUrl={artUrl} caption={caption} centered />
-                  </div>
-                  {/* THE HORIZON — the fallback view's hero and its one
-                      reactive surface (no lyrics to carry the room's life);
-                      it runs the track-change announcement here. In the
-                      lyrics view the capsules ride the song block instead —
-                      a full-width band above the progress bar read as a
-                      second timeline and outweighed the lyrics (Thien,
-                      2026-07-14). */}
-                  <div className="flex shrink-0 items-center justify-center pb-[3.5vh]">
-                    <Waveform size="room" announceKey={lyricsKeyOf(np) ?? undefined} />
+                  {/* Same seat rule as the lyrics view (identity stack
+                      centered on the window midline), so the lyrics⇄fallback
+                      crossfade holds the art still on the vertical axis. */}
+                  <div className="pt-(--stack-top)">
+                    <IdentityStack np={np} artUrl={artUrl} caption={caption} captionExpired={captionExpired} centered />
                   </div>
                 </motion.div>
               )}
@@ -372,10 +387,11 @@ export default function Focus() {
           {/* The queue/history surface — the widget's QueuePanel wholesale,
               floating over the upper room's right side on the popover shell
               recipe. Always mounted (scroll + feed survive toggling), the
-              expanded-surface visibility grammar. The bottom inset still
-              budgets for the fallback view's horizon band (170px) + console —
-              the lyrics view could reach lower now, but one seat position
-              serves both views without overlapping either. */}
+              expanded-surface visibility grammar. Bottom inset clears the
+              CONSOLE — the only band it horizontally overlaps (the 420px
+              horizon is centered and never reaches under this right-docked
+              popover); the extra ~120px is breathing room, not a horizon
+              budget. */}
           <div
             inert={!queueOpen}
             className={`absolute right-6 top-16 z-20 flex w-[380px] flex-col rounded-xl border border-border/10 bg-surface p-1.5 shadow-xl shadow-black/40 ${
@@ -383,14 +399,33 @@ export default function Focus() {
                 ? "visible opacity-100 [transition:opacity_140ms_var(--ease-out-tk)]"
                 : "invisible opacity-0 [transition:opacity_140ms_var(--ease-out-tk),visibility_0s_140ms]"
             }`}
-            style={{ bottom: "calc(170px + 176px)" }}
+            style={{ bottom: "calc(120px + 176px)" }}
           >
             <QueuePanel np={np} connected={spotify.connected} open={queueOpen} />
           </div>
 
+          {/* THE HORIZON — the room's one living reactive surface, OUTSIDE
+              the swap (never remounts, so it survives every track change
+              and the announcement always fires — the pill is hidden behind
+              this takeover, so the horizon is the only now-playing pulse on
+              screen). RESIZED 2026-07-14 (Thien's live verdict): the 1170px
+              band matched the progress bar's width and read as a second
+              timeline — now a 780×100 nineteen-capsule instrument (⅔ the
+              console's width), clearly narrower than the console. Seated
+              EQUIDISTANT between the lyric box's bottom edge (= the art's
+              bottom line, --stack-top + --art) and the console's top
+              (93vh − 92px: 92 = progress row 20 + mt-4 16 + transport 56;
+              keep in sync with the console's classes). In this flex
+              column only the bottom margin positions the box — the flex-1
+              region above absorbs the rest — so mb = half the free space
+              (Thien, 2026-07-14: "even" gaps both sides). */}
+          <div className="mb-[calc((93vh_-_212px_-_var(--stack-top)_-_var(--art))/2)] flex shrink-0 items-center justify-center">
+            <Waveform size="room" announceKey={lyricsKeyOf(np) ?? undefined} />
+          </div>
+
           {/* THE CONSOLE — persistent (a summoned takeover shows its
               required controls; the P3/P4 lesson is binding). Fixed below
-              the swap, so a view crossfade never moves it. */}
+              the horizon, so a view crossfade never moves it. */}
           <div className="mx-auto w-[1170px] max-w-[92vw] shrink-0 pb-[6vh] pt-[1vh]">
             <ProgressBar np={np} size="lg" />
             <div className="mt-4 flex items-center justify-center">

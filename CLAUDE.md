@@ -206,19 +206,19 @@ src-tauri/src/
                 intent. The media loop's `visible` and the audio capture
                 gate widen to main-OR-focus (main hides behind the
                 takeover; ungated, the player froze). Frontend:
-                src/Focus.tsx, two views, one reactive surface each: the
-                lyrics view (LyricsPanel "focus" type scale, identity
-                column vertically centered with an xl Waveform riding the
-                song block — the house grammar; a full-width horizon band
-                there read as a second timeline, recomposed 2026-07-14)
-                and the no-lyrics fallback (centered identity over the
-                room-size Waveform horizon, that view's hero). Every track
-                change exits through the fetch interlude (lyricsLive flips
-                false while lyrics re-key), so per-track state remounts and
-                the crossfade + title-in ARE the change choreography; the
-                Waveform announcement fires only on a surface mounted
-                across the change (the fallback horizon,
-                instrumental→instrumental).
+                src/Focus.tsx: the Soundboard three-band skeleton — upper
+                room (identity column vertically centered on the lyric
+                anchor + LyricsPanel "focus" lines; the no-lyrics fallback
+                centers the same stack), the horizon (room Waveform,
+                RESIZED 2026-07-14 to 19 capsules at 780×100 (⅔ the console): the original
+                1170px band matched the progress bar and read as a second
+                timeline, and #102's song-block wave was too small — both
+                Thien live verdicts), the console. Horizon + console live
+                OUTSIDE the upper-room swap, so the horizon survives every
+                track change and runs the announcement. Track changes exit
+                through the fetch interlude (lyricsLive flips while lyrics
+                re-key) — anything that must survive one lives outside the
+                swap.
                 This is the removed P3's want with the correct trigger:
                 invoked, never guessed
   audio.rs      audio capture → FFT → smoothed auto-gained band energies at
