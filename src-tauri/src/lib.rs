@@ -1093,6 +1093,7 @@ pub fn run() {
             upnext::upnext_remove,
             upnext::upnext_move,
             similar::more_like_this,
+            similar::discovery_picks,
             dock::set_window_size,
             dock::set_hit_size,
             dock::start_drag,

@@ -14,6 +14,7 @@
  * rows arrive incrementally in the open queue panel — earned arrival for
  * content the user explicitly asked for.
  */
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -28,9 +29,45 @@ const MATCH_FLOOR: f64 = 0.05;
 /// honors one Retry-After on top.
 const RESOLVE_GAP: Duration = Duration::from_millis(120);
 
+/// discovery_picks fan: at most 2 seed tracks, ≤2 resolved picks each — a
+/// bounded ≤4 Spotify calls, capped so a single summon never storms the API
+/// or the 15s Last.fm timeout twice (a hard error on any seed breaks).
+const SEED_CAP: usize = 2;
+const PER_SEED: usize = 2;
+
 /// One run at a time (the enrich_in_flight shape) — a double click must not
 /// race two fills into the same list.
 static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// discovery_picks has its OWN gate: the search window's empty-state fetch and
+/// the queue's more-like-this button must never block each other.
+static DISCOVERY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// Discovery-first candidate ordering, the shared spike-verified rule (see the
+/// module header): different-artist entries above the match floor first (real
+/// genre discovery, not artist radio), then same-artist backfill only when the
+/// different-artist pool runs dry. Below-floor different-artist entries are the
+/// mush tail — dropped entirely.
+fn ordered<'a>(seed_artist: &str, similars: &'a [lastfm::SimilarTrack]) -> Vec<&'a lastfm::SimilarTrack> {
+    let seed = seed_artist.trim().to_lowercase();
+    let same = |s: &lastfm::SimilarTrack| s.artist.trim().to_lowercase() == seed;
+    similars
+        .iter()
+        .filter(|s| s.score >= MATCH_FLOOR && !same(s))
+        .chain(similars.iter().filter(|s| s.score >= MATCH_FLOOR && same(s)))
+        .collect()
+}
+
+/// The exclude-key contract shared with the frontend (Search.tsx): a track's
+/// identity for dedupe is its lowercased, trimmed `artist\u{1}title`. Kept in
+/// lockstep on both sides — a drift silently stops excluding.
+fn norm_key(artist: &str, title: &str) -> String {
+    format!(
+        "{}\u{1}{}",
+        artist.trim().to_lowercase(),
+        title.trim().to_lowercase()
+    )
+}
 
 /// Statuses: "ok:<n>" | "no_matches" | "no_data" | "no_key" (absent) |
 /// "bad_key" (rejected) | "busy" | "disconnected" | "offline". Blocking
@@ -73,20 +110,7 @@ fn fill(app: &AppHandle, title: &str, artist: &str) -> String {
         return "no_data".into();
     }
 
-    // Discovery-first ordering: different-artist above the floor, then
-    // same-artist backfill. Below-floor different-artist entries are the
-    // mush tail — dropped entirely.
-    let seed_artist = artist.trim().to_lowercase();
-    let same_artist = |s: &lastfm::SimilarTrack| s.artist.trim().to_lowercase() == seed_artist;
-    let candidates: Vec<&lastfm::SimilarTrack> = similars
-        .iter()
-        .filter(|s| s.score >= MATCH_FLOOR && !same_artist(s))
-        .chain(
-            similars
-                .iter()
-                .filter(|s| s.score >= MATCH_FLOOR && same_artist(s)),
-        )
-        .collect();
+    let candidates = ordered(artist, &similars);
     if candidates.is_empty() {
         return "no_data".into();
     }
@@ -120,5 +144,149 @@ fn fill(app: &AppHandle, title: &str, artist: &str) -> String {
         "no_matches".into()
     } else {
         format!("ok:{added}")
+    }
+}
+
+/*
+ * discovery_picks: the search window's "Something different" section. Same
+ * Last.fm→Spotify similarity engine as more_like_this, but it RETURNS resolved
+ * tracks instead of appending to up-next — the empty state renders them as
+ * playable rows, seeded from what the user actually listens to.
+ *
+ * The frontend passes 1–2 seeds (rotated by its day-block) and the normalized
+ * keys of everything already in the history pool, so "different" means
+ * genuinely un-played. Excluding BEFORE resolving means a dead candidate never
+ * costs a Spotify search.
+ */
+#[derive(serde::Deserialize)]
+pub struct Seed {
+    pub title: String,
+    pub artist: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct DiscoveryPick {
+    /// The played track this suggestion came from — the row's "Because you
+    /// played X" label.
+    pub seed_title: String,
+    pub track: spotify::QueueTrack,
+}
+
+#[derive(serde::Serialize)]
+pub struct DiscoveryResult {
+    pub status: String,
+    pub picks: Vec<DiscoveryPick>,
+}
+
+/// Statuses: "ok" | "no_key" (absent) | "bad_key" (rejected) | "disconnected"
+/// | "offline" (transport/5xx) | "no_data" (every seed dry) | "busy". Blocking
+/// (Last.fm + Spotify hops) on the dedicated pool.
+#[tauri::command]
+pub async fn discovery_picks(app: AppHandle, seeds: Vec<Seed>, exclude: Vec<String>) -> DiscoveryResult {
+    tauri::async_runtime::spawn_blocking(move || run_discovery(&app, seeds, exclude))
+        .await
+        .unwrap_or_else(|e| {
+            log::error!("discovery_picks task panicked: {e}");
+            DISCOVERY_IN_FLIGHT.store(false, Ordering::SeqCst);
+            DiscoveryResult {
+                status: "offline".into(),
+                picks: Vec::new(),
+            }
+        })
+}
+
+fn run_discovery(app: &AppHandle, seeds: Vec<Seed>, exclude: Vec<String>) -> DiscoveryResult {
+    if DISCOVERY_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return DiscoveryResult {
+            status: "busy".into(),
+            picks: Vec::new(),
+        };
+    }
+    let out = discover(app, seeds, exclude);
+    DISCOVERY_IN_FLIGHT.store(false, Ordering::SeqCst);
+    out
+}
+
+fn discover(app: &AppHandle, seeds: Vec<Seed>, exclude: Vec<String>) -> DiscoveryResult {
+    let empty = |status: &str| DiscoveryResult {
+        status: status.into(),
+        picks: Vec::new(),
+    };
+    if !spotify::connected(app) {
+        return empty("disconnected");
+    }
+    let Some(key) = settings::get_string(app, "lastfm_api_key").filter(|k| !k.is_empty()) else {
+        return empty("no_key");
+    };
+
+    let excl: HashSet<String> = exclude.into_iter().collect();
+    let mut picks: Vec<DiscoveryPick> = Vec::new();
+    // Cross-set artist diversity (the "no artist radio" doctrine) + uri dedupe,
+    // both spanning all seeds so two seeds can't surface the same artist twice.
+    let mut picked_artists: HashSet<String> = HashSet::new();
+    let mut picked_uris: HashSet<String> = HashSet::new();
+    let mut resolved_any = false;
+    // A hard verdict (rejected key / unreachable) is worth reporting only when
+    // nothing resolved; a merely dry seed is not an error.
+    let mut hard_err: Option<&'static str> = None;
+
+    for seed in seeds.iter().take(SEED_CAP) {
+        let similars = match lastfm::get_similar(&key, &seed.title, &seed.artist, FETCH_LIMIT) {
+            Ok(v) => v,
+            Err(e) => {
+                // bad_key is terminal for every seed (same key); offline breaks
+                // too, so a second seed can't spend another 15s timeout.
+                if e == "bad_key" || e == "offline" {
+                    hard_err = Some(e);
+                    break;
+                }
+                continue; // "no_data" for this seed — try the next
+            }
+        };
+        let mut from_seed = 0usize;
+        for c in ordered(&seed.artist, &similars) {
+            if from_seed >= PER_SEED {
+                break;
+            }
+            if excl.contains(&norm_key(&c.artist, &c.title)) {
+                continue;
+            }
+            let ca = c.artist.trim().to_lowercase();
+            if picked_artists.contains(&ca) {
+                continue;
+            }
+            if resolved_any {
+                std::thread::sleep(RESOLVE_GAP);
+            }
+            resolved_any = true;
+            let Some(track) = spotify::search_best(app, &c.title, &c.artist) else {
+                continue; // no Spotify match / transient — keep walking
+            };
+            // Belt-and-suspenders: the resolved uri could still collide with an
+            // already-picked one (two Last.fm titles resolving to one track).
+            if picked_uris.contains(&track.uri) {
+                continue;
+            }
+            picked_uris.insert(track.uri.clone());
+            picked_artists.insert(ca);
+            picks.push(DiscoveryPick {
+                seed_title: seed.title.clone(),
+                track,
+            });
+            from_seed += 1;
+        }
+    }
+
+    let status = if !picks.is_empty() {
+        "ok"
+    } else {
+        hard_err.unwrap_or("no_data")
+    };
+    DiscoveryResult {
+        status: status.into(),
+        picks,
     }
 }

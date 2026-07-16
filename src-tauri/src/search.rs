@@ -24,12 +24,17 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 pub const LABEL: &str = "search";
 /// Born at this logical size, never resized (house rule). The webview keeps
-/// a shadow gutter inside it; the visible shell is smaller. Sized between
-/// Raycast and the first cut's 560×420 (Thien's live call, 2026-07-12 —
-/// "too small and hard to read"); the type/row scale in Search.tsx steps
-/// up with it.
+/// a shadow gutter inside it; the visible shell is smaller. Width sized
+/// between Raycast and the first cut's 560×420 (Thien's live call,
+/// 2026-07-12 — "too small and hard to read"); the type/row scale in
+/// Search.tsx steps up with it. Height seats the empty state EXACTLY — 7
+/// rows (4 history + 3 discovery) + 2 section headers, no clipped 7th row
+/// (Thien's live call, 2026-07-16); measured chrome: 24 gutter + 2 border
+/// + 60 search row + 12 list padding + 2×31 headers + 7×52 rows + 30 note
+/// = 554. Search results (8×52 = 416 + 12) fit inside the same 438px list
+/// budget. Re-derive if Search.tsx row/header/chrome sizes change.
 const W: f64 = 680.0;
-const H: f64 = 520.0;
+const H: f64 = 554.0;
 
 /// Setup-time create-once-hidden. A failure downgrades gracefully: the
 /// hotkey and tray simply find no window.

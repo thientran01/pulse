@@ -132,6 +132,14 @@ if (!IN_TAURI) {
       mockHistoryEntry(MOCK_TRACKS[i % MOCK_TRACKS.length], now - i * 4.2 * 60_000, 190_000),
     );
   }
+  // A 4th distinct artist so the search empty state fills all FOUR history
+  // picks (the 3-track ring alone yields 3) — the preview exercises the true
+  // 7-row layout the window height is sized to.
+  const fourth = { title: "Blue Hour", artist: "TXT", album: "minisode1 : Blue Hour" };
+  for (let i = 8; i >= 1; i--) {
+    mockHistory.push(mockHistoryEntry(fourth, now - (300 + i * 37) * 60_000, 190_000));
+  }
+  mockHistory.sort((a, b) => a.started_at_ms - b.started_at_ms);
 }
 
 // ---- Spotify Web API (spotify.rs seam) ----
@@ -145,6 +153,12 @@ const SPOTIFY_OFF =
 const SIMILAR_FORCE = IN_TAURI
   ? null
   : new URLSearchParams(window.location.search).get("similar");
+/** `?discovery=<status>` forces discoveryPicks to answer that status
+ * (no_key / no_data / offline / disconnected) so the search window's
+ * "Something different" fallbacks are preview-reachable. */
+const DISCOVERY_FORCE = IN_TAURI
+  ? null
+  : new URLSearchParams(window.location.search).get("discovery");
 
 let mockSpotifyConnected = !SPOTIFY_OFF;
 const mockSpotifyListeners = new Set<(s: SpotifyStatus) => void>();
@@ -176,6 +190,14 @@ const MOCK_SEARCH_EXTRAS = [
   { title: "Happy Ending", artist: "Kep1er", album: "LOVESTRUCK!" },
   { title: "About Love", artist: "Red Velvet", album: "Perfect Velvet" },
   { title: "Euphoria", artist: "keshi", album: "Requiem" },
+  // Enough distinct fixtures that a pull-to-refresh surfaces NEW discovery
+  // rows (the session-exclude filters the already-shown ones) instead of
+  // dry-ing out after one pull.
+  { title: "Drowning", artist: "WOODZ", album: "OO-LI" },
+  { title: "Polaroid", artist: "LUCY", album: "Childhood" },
+  { title: "Ditto", artist: "NewJeans", album: "OMG" },
+  { title: "Antifragile", artist: "LE SSERAFIM", album: "ANTIFRAGILE" },
+  { title: "Love Lee", artist: "AKMU", album: "Love Lee" },
 ];
 
 function mockQueueTrack(t: { title: string; artist: string; album: string }) {
@@ -620,7 +642,10 @@ const mockSettings = {
   launch_mode: "card",
   start_at_login: false,
   hide_on_fullscreen: true,
-  lastfm_api_key: "",
+  // Non-empty so the search window's discovery section + the queue's
+  // more-like-this button are previewable by default; ?discovery=<status>
+  // and ?similar=<status> still force each fallback.
+  lastfm_api_key: "mock-lastfm-key",
   seen_intro: false,
   hotkeys: MOCK_HOTKEYS.map((h) => ({ ...h })),
 };
@@ -969,6 +994,39 @@ export const commands = {
       return candidates.length ? `ok:${candidates.length}` : "no_data";
     }
     return invoke<string>("more_like_this", { title, artist });
+  },
+  /** Resolve Last.fm-similar tracks for the given played seeds, minus the
+   * `exclude` set (normalized `artisttitle` keys of the history pool) —
+   * the search window's "Something different" rows. Unlike moreLikeThis this
+   * RETURNS the picks (never queues). Statuses: ok | no_key | bad_key |
+   * disconnected | offline | no_data | busy. */
+  async discoveryPicks(
+    seeds: { title: string; artist: string }[],
+    exclude: string[],
+  ): Promise<{ status: string; picks: { seed_title: string; track: QueueTrack }[] }> {
+    if (!IN_TAURI) {
+      if (!mockSpotifyConnected) return { status: "disconnected", picks: [] };
+      if (mockSettings.lastfm_api_key.trim().length === 0) return { status: "no_key", picks: [] };
+      if (DISCOVERY_FORCE) return { status: DISCOVERY_FORCE, picks: [] };
+      // Suggest from the search extras (deliberately NOT in the mock history
+      // ring), minus anything the caller already excluded — the same
+      // normalized key the backend/Search.tsx use.
+      const norm = (artist: string, title: string) =>
+        `${artist.trim().toLowerCase()}${title.trim().toLowerCase()}`;
+      const ex = new Set(exclude);
+      const seedTitle = seeds[0]?.title ?? "your library";
+      const picks = MOCK_SEARCH_EXTRAS.filter((t) => !ex.has(norm(t.artist, t.title)))
+        .slice(0, 3)
+        .map((t) => ({ seed_title: seedTitle, track: mockQueueTrack(t) }));
+      // A breath of latency so the progressive fill (history first, then
+      // discovery below) is preview-visible.
+      await new Promise((r) => setTimeout(r, 600));
+      return { status: picks.length ? "ok" : "no_data", picks };
+    }
+    return invoke<{ status: string; picks: { seed_title: string; track: QueueTrack }[] }>(
+      "discovery_picks",
+      { seeds, exclude },
+    );
   },
   /** Search-resolve a uri for a history row that was never enriched
    * (pre-enrichment entries, Apple Music listens). Null = no match. */

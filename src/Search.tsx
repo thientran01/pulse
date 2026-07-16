@@ -7,10 +7,13 @@
  * Pulse's up-next and stays open so several tracks queue in one summon.
  * Esc / blur / background click dismiss.
  *
- * The empty state answers "what do you want to hear?" with two or three
- * resurfacing rows computed from the local play history on each summon —
- * default content, not a feature surface. The search deliberately never
- * grows past this: verbs live on rows, not on the chrome.
+ * The empty state answers "what do you want to hear?" in two sections: "From
+ * your history" (up to four resurfacing picks over the local play log) and
+ * "Something different" (up to three Last.fm-similar discoveries, gated on a
+ * Last.fm key + Spotify, filled in below the history rows). Both rotate on a
+ * day-block seed — stable within a sitting, fresh a few times a day, never a
+ * per-summon shuffle. Default content, not a feature surface: verbs live on
+ * rows, not on the chrome.
  *
  * Realm notes (this is the codebase's first second window): this module
  * runs in its own JS realm — its own backend listeners, its own
@@ -19,7 +22,7 @@
  * lives in the MAIN realm, armed by the backend's "spotify-jump" emit —
  * never armed from here.
  */
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { commands, onSearchShown } from "./lib/backend";
 import { initReactive } from "./lib/reactive";
 import { RowThumb, useSpotifyStatus } from "./Queue";
@@ -65,13 +68,73 @@ async function resolveUri(row: SearchRow): Promise<string | null> {
   return uri;
 }
 
-/** The empty state's picks: (1) the most-lived-in track you haven't played
- * in the last day, (2) an "on this day" from a prior month when one exists,
- * (3) a daily pick from the top listens. All relative measures — the history
- * log is young, and absolute thresholds would answer nothing for months.
- * DETERMINISTIC within a day: the old per-summon random wildcard made the
- * list shuffle on every open, which read as flakiness, not curation. */
-async function computeResurfaced(): Promise<SearchRow[]> {
+/** One history track, aggregated across its listens. */
+interface Agg {
+  key: string;
+  title: string;
+  artist: string;
+  /** Cumulative ms listened, all time in the scanned window. */
+  ms: number;
+  /** Cumulative ms listened within the last 7 days (the "on repeat" signal). */
+  ms7: number;
+  last: number;
+  uri: string | null;
+}
+
+const DAY_MS = 86_400_000;
+
+/** The freshness clock for the empty state: three blocks a day (morning /
+ * afternoon / evening, local time). Rotation is per day-PART now, not per day
+ * — the picks feel curated and hold within a sitting, but the list has arcs
+ * across the day. Still zero per-summon randomness (a shuffle read as a bug;
+ * a dated pick reads as curation). Drives history rotation, discovery seeds,
+ * and the discovery cache key — one integer explains all the freshness. */
+function blockSeed(now: number): number {
+  const h = new Date(now).getHours();
+  return Math.floor(now / DAY_MS) * 3 + (h < 12 ? 0 : h < 18 ? 1 : 2);
+}
+
+/** The exclude-key contract shared with similar.rs's `norm_key`: a track's
+ * dedupe identity is its lowercased, trimmed `artist‹U+0001›title`. Keep the
+ * two in lockstep — a drift silently stops "different" from meaning un-played. */
+function discoveryKey(artist: string, title: string): string {
+  return `${artist.trim().toLowerCase()}${title.trim().toLowerCase()}`;
+}
+
+/** Up to two discovery seeds, rotated by the day-block so suggestions refresh
+ * a few times a day. Seed B prefers a different artist than A, so two seeds
+ * don't both pull the same artist's neighborhood. */
+function pickSeeds(pool: Agg[], seed: number): { title: string; artist: string }[] {
+  const top = pool.slice(0, 10);
+  if (!top.length) return [];
+  const a = top[seed % top.length];
+  const seeds = [{ title: a.title, artist: a.artist }];
+  const artistA = a.artist.trim().toLowerCase();
+  const start = (seed * 7 + 3) % top.length;
+  for (let i = 0; i < top.length; i++) {
+    const c = top[(start + i) % top.length];
+    if (c.key === a.key || c.artist.trim().toLowerCase() === artistA) continue;
+    seeds.push({ title: c.title, artist: c.artist });
+    break;
+  }
+  return seeds;
+}
+
+/** Discovery rows keyed by day-block. The window lives for the whole app
+ * session, so a re-summon inside a block is network-free; a new block misses
+ * (≤3 fetch rounds/day). Only successful ("ok") fetches are cached. */
+const discoveryCache = new Map<number, SearchRow[]>();
+
+/** The "From your history" section: up to four resurfacing picks over the
+ * local play log, each a relative measure (the log is young; absolute
+ * thresholds would answer nothing for months) with a short reason label, and
+ * artist-diversified so the four don't read as one artist. Returns the picks
+ * AND the aggregate pool, so the discovery seeds reuse it instead of
+ * re-scanning history. Deterministic within a day-block (see blockSeed). */
+async function computeResurfaced(
+  now: number,
+  offset = 0,
+): Promise<{ rows: SearchRow[]; pool: Agg[]; played: Agg[] }> {
   const entries: HistoryEntry[] = [];
   let before: number | null = null;
   for (let i = 0; i < RESURFACE_PAGES; i++) {
@@ -80,14 +143,6 @@ async function computeResurfaced(): Promise<SearchRow[]> {
     if (page.length < 200) break;
     before = page[page.length - 1].started_at_ms;
   }
-  interface Agg {
-    key: string;
-    title: string;
-    artist: string;
-    ms: number;
-    last: number;
-    uri: string | null;
-  }
   const byKey = new Map<string, Agg>();
   for (const e of entries) {
     const cur = byKey.get(e.key) ?? {
@@ -95,43 +150,83 @@ async function computeResurfaced(): Promise<SearchRow[]> {
       title: e.title,
       artist: e.artist,
       ms: 0,
+      ms7: 0,
       last: 0,
       uri: null,
     };
     cur.ms += e.ms_listened;
+    if (now - e.started_at_ms < 7 * DAY_MS) cur.ms7 += e.ms_listened;
     cur.last = Math.max(cur.last, e.ended_at_ms);
     cur.uri = cur.uri ?? e.spotify_uri;
     byKey.set(e.key, cur);
   }
-  const now = Date.now();
-  const day = 86_400_000;
-  const all = [...byKey.values()].filter((t) => t.ms >= RESURFACE_MIN_MS);
-  const rested = all.filter((t) => now - t.last > day);
+  // Every track the log has seen (any listen, even below the pick floor) —
+  // the exclude source for discovery, so "different" means genuinely un-played.
+  const played = [...byKey.values()];
+  const all = played.filter((t) => t.ms >= RESURFACE_MIN_MS);
+  const rested = all.filter((t) => now - t.last > DAY_MS);
   const pool = (rested.length ? rested : all).slice().sort((a, b) => b.ms - a.ms);
+
   const picks: { agg: Agg; reason: string }[] = [];
-  if (pool[0]) {
-    picks.push({
-      agg: pool[0],
-      reason: rested.length ? "Haven't heard in a while" : "Most played",
-    });
-  }
-  const today = new Date().getDate();
-  const onThisDay = all.find(
-    (t) =>
-      new Date(t.last).getDate() === today &&
-      now - t.last > 25 * day &&
-      !picks.some((p) => p.agg === t),
+  const taken = new Set<string>();
+  // Push the FIRST candidate (from a priority-ordered list) that is neither
+  // already taken nor a repeat artist — so a strategy whose top choice was
+  // already claimed still contributes its next-best instead of silently
+  // yielding nothing. A relaxed top-up pass below fills any remainder when
+  // diversity ran the pool dry (a one-artist library still fills its rows).
+  const pushFirst = (cands: Agg[], reason: string, start = 0): void => {
+    const n = cands.length;
+    for (let k = 0; k < n; k++) {
+      const agg = cands[(start + k) % n];
+      if (taken.has(agg.key)) continue;
+      const artist = agg.artist.trim().toLowerCase();
+      if (picks.some((p) => p.agg.artist.trim().toLowerCase() === artist)) continue;
+      picks.push({ agg, reason });
+      taken.add(agg.key);
+      return;
+    }
+  };
+
+  // Each strategy walks its ranked list from `offset`, so a pull-to-refresh
+  // (offset++) advances the whole section to the next-best of each category —
+  // the labels stay category-accurate, and mod-wrap means it never empties.
+  // 1. The most lived-in track (pool is sorted by ms desc).
+  pushFirst(pool, rested.length ? "Haven't heard in a while" : "Most played", offset);
+  // 2. A prior month's same date, when one exists (usually absent).
+  const today = new Date(now).getDate();
+  pushFirst(
+    all.filter((t) => new Date(t.last).getDate() === today && now - t.last > 25 * DAY_MS),
+    "On this day",
+    offset,
   );
-  if (onThisDay) picks.push({ agg: onThisDay, reason: "On this day" });
-  const rest = pool.filter((t) => !picks.some((p) => p.agg === t)).slice(0, 10);
-  if (rest.length) {
-    // Rotates DAILY, stable within the day — a per-summon shuffle read as
-    // a bug; a dated pick reads as curation.
-    const daySeed = Math.floor(now / day);
-    picks.push({ agg: rest[daySeed % rest.length], reason: "Today's pick" });
+  // 3. On repeat this week.
+  pushFirst(
+    all.filter((t) => t.ms7 >= RESURFACE_MIN_MS).sort((a, b) => b.ms7 - a.ms7),
+    "On repeat lately",
+    offset,
+  );
+  // 4. Heavy once, untouched for a month+.
+  pushFirst(
+    all.filter((t) => now - t.last > 30 * DAY_MS).sort((a, b) => b.ms - a.ms),
+    "Forgotten favorite",
+    offset,
+  );
+  // 5. A rotating deep cut from the top listens (day-block wildcard + refresh
+  // offset), starting the walk at the combined offset.
+  const rest = pool.filter((t) => !taken.has(t.key)).slice(0, 10);
+  if (rest.length) pushFirst(rest, "Today's pick", (blockSeed(now) + offset) % rest.length);
+  // Top-up: if diversity left us short of four, backfill from the pool
+  // (offset-walked too) ignoring the artist constraint (one-artist library).
+  for (let k = 0; k < pool.length; k++) {
+    if (picks.length >= 4) break;
+    const agg = pool[(offset + k) % pool.length];
+    if (taken.has(agg.key)) continue;
+    picks.push({ agg, reason: "Played before" });
+    taken.add(agg.key);
   }
+
   const rows: SearchRow[] = [];
-  for (const p of picks.slice(0, 3)) {
+  for (const p of picks.slice(0, 4)) {
     rows.push({
       key: p.agg.key,
       title: p.agg.title,
@@ -142,7 +237,63 @@ async function computeResurfaced(): Promise<SearchRow[]> {
       reason: p.reason,
     });
   }
-  return rows;
+  return { rows, pool, played };
+}
+
+/** A ghost of one result row — shown where real rows will land while a fetch
+ * runs (discovery fill and first search results), so the wait fills its space
+ * with the shape of the answer instead of a void. Geometry mirrors the real
+ * row exactly (h-52, 32px thumb, gap-3 px-3, reason bar flush right → in-place
+ * swap, zero shift); widths stagger so three read as content, not a grid.
+ * Opacity-breathing only (.skeleton-pulse): the classic shimmer is a translate
+ * sweep, and that motion vocabulary belongs to the waveform. The breathe is
+ * delayed per COLUMN (thumb → text → reason), identical across rows, so the
+ * crest reads as a left-to-right sweep — a per-ROW stagger read as
+ * top-to-bottom (Thien, 2026-07-16). Visual-only (presentation + aria-hidden)
+ * — rows landing are the AT-visible event, as before. */
+const SKELETON_WIDTHS: readonly [string, string, string][] = [
+  ["42%", "28%", "21%"],
+  ["33%", "22%", "17%"],
+  ["46%", "25%", "23%"],
+  ["37%", "31%", "19%"],
+  ["44%", "20%", "22%"],
+];
+/** The left→right feel knob: per-column delay into the 1300ms breathe.
+ * Paired with the crest shape in skeleton-breathe — the two together set how
+ * gently the light passes (crest widened 8/22→12/34 + delay 220→280 after
+ * "too fast, cadence good" — Thien, 2026-07-16). */
+const SKELETON_COL_DELAY_MS = 280;
+function SkeletonRow({ index, reason = false }: { index: number; reason?: boolean }) {
+  const [titleW, artistW, reasonW] = SKELETON_WIDTHS[index % SKELETON_WIDTHS.length];
+  const col = (n: number) => ({ animationDelay: `${n * SKELETON_COL_DELAY_MS}ms` });
+  return (
+    <div role="presentation" aria-hidden className="flex h-[52px] items-center gap-3 px-3">
+      {/* Thumb one tone brighter than the text bars — real rows are bright
+          art beside muted text, and a single tone read as a flat gray grid. */}
+      <span
+        className="skeleton-pulse h-[32px] w-[32px] shrink-0 rounded-md bg-surface-2"
+        style={col(0)}
+      />
+      <span className="flex min-w-0 flex-1 flex-col gap-[7px]">
+        <span
+          className="skeleton-pulse h-[10px] rounded-full bg-fg/5"
+          style={{ width: titleW, ...col(1) }}
+        />
+        <span
+          className="skeleton-pulse h-[8px] rounded-full bg-fg/5"
+          style={{ width: artistW, ...col(1) }}
+        />
+      </span>
+      {/* Only the discovery wait promises a reason label — search results
+          never carry one, so their ghosts must not either. */}
+      {reason && (
+        <span
+          className="skeleton-pulse h-[8px] shrink-0 rounded-full bg-fg/5"
+          style={{ width: reasonW, ...col(2) }}
+        />
+      )}
+    </div>
+  );
 }
 
 function SearchGlyph() {
@@ -154,31 +305,51 @@ function SearchGlyph() {
   );
 }
 
-const PlusGlyph = (
-  <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" aria-hidden>
-    <path d="M 8,3.4 L 8,12.6" />
-    <path d="M 3.4,8 L 12.6,8" />
-  </svg>
-);
-const PlayGlyph = (
-  <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-    <path d="M 5.4,3.4 L 5.4,12.6" />
-    <path d="M 5.4,3.4 L 13,8 L 5.4,12.6" />
-  </svg>
-);
-
 export default function Search() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<QueueTrack[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [searchStatus, setSearchStatus] = useState<"ok" | "disconnected" | "offline">("ok");
   const [resurfaced, setResurfaced] = useState<SearchRow[]>([]);
+  // "Something different" — Last.fm discovery, additive below the history
+  // rows, gated on a Last.fm key + Spotify (fills in after the history rows).
+  const [discovery, setDiscovery] = useState<SearchRow[]>([]);
+  // A discovery fetch is in flight with nothing to show yet — the section
+  // header + skeleton rows render on this so the wait is visible (a silent
+  // multi-second fill read as broken — Thien's live feedback, 2026-07-16).
+  // One state covers both summon-fill and pull-refresh: same underlying wait.
+  const [discoveryPending, setDiscoveryPending] = useState(false);
+  // The refresh number the current rows landed with (0 = summon/mount). >0
+  // keys a remount + .row-swap-in ripple so a pull visibly re-presents the
+  // set — next to the skeleton's visible wait, history's instant swap read
+  // as "nothing happened". Summon fills stay plain by construction.
+  const [swapTick, setSwapTick] = useState(0);
   const [selected, setSelected] = useState(0);
   const [note, setNote] = useState<string | null>(null);
   const [flashKeys, setFlashKeys] = useState<ReadonlySet<string>>(new Set());
   const spotify = useSpotifyStatus();
+  // Live connection for the summon-time discovery fetch (the onSearchShown
+  // listener is registered once and must not close over a stale value).
+  const connectedRef = useRef(spotify.connected);
+  connectedRef.current = spotify.connected;
   const inputRef = useRef<HTMLInputElement>(null);
   const searchGen = useRef(0);
+  // Bumped per empty-state refresh so a slow discovery fetch from a prior
+  // summon can't land over a newer one.
+  const resurfaceGen = useRef(0);
+  // Pull-to-refresh (Up at the top slot): a monotonic offset that rotates BOTH
+  // sections to a fresh set. Reset to 0 on each summon.
+  const refreshCount = useRef(0);
+  // Discovery keys already surfaced this session — fed into the exclude so a
+  // refresh brings genuinely new suggestions, not the same neighbors. Cleared
+  // on summon.
+  const discoveryShown = useRef<Set<string>>(new Set());
+  // One discovery fetch at a time: a held/mashed Up must not fan out concurrent
+  // fetches (the backend single-flights and would answer the extras "busy").
+  const refreshBusy = useRef(false);
+  // Last.fm key presence, resolved once per summon (one local IPC) and read
+  // SYNCHRONOUSLY by pulls — see the single-commit note in refreshEmptyState.
+  const lastfmKeyRef = useRef(false);
   const noteTimer = useRef<number | null>(null);
   const flashTimers = useRef(new Map<string, number>());
   const busy = useRef(false);
@@ -246,7 +417,89 @@ export default function Search() {
     return () => window.clearTimeout(t);
   }, [query]);
 
-  // Summon signal: refocus, select-all the stale query, fresh resurfacing.
+  // The empty state: history rows first (local, instant), then a gated,
+  // fire-and-forget discovery fetch that fills in below — never blocking the
+  // history rows. One block seed drives the whole refresh.
+  const refreshEmptyState = useCallback(async (refreshN = 0) => {
+    const now = Date.now();
+    const gen = ++resurfaceGen.current;
+    const { rows, pool, played } = await computeResurfaced(now, refreshN);
+    if (gen !== resurfaceGen.current) return;
+
+    // Resolve EVERYTHING that decides the discovery section BEFORE touching
+    // state, so rows + tick + section land in ONE commit — an await between
+    // them unmounted the "Something different" header for a frame and the
+    // list height tore on every pull (design-eng pass, 2026-07-16). The key
+    // check is one local IPC per summon, cached in a ref for pulls.
+    if (refreshN === 0) {
+      lastfmKeyRef.current = await commands.lastfmHasKey();
+      if (gen !== resurfaceGen.current) return;
+    }
+    // Discovery is gated on a Last.fm key + a live Spotify session (URIs must
+    // resolve to be playable). Its absence is silent — ambient content, not a
+    // feature whose failure needs narrating.
+    const canDiscover = connectedRef.current && pool.length > 0 && lastfmKeyRef.current;
+    // The seed rotates per refresh, so each pull pulls a different seed's
+    // neighborhood. The pristine block (refreshN 0) is cached so a re-summon
+    // inside the block is free; a user-driven refresh always fetches fresh.
+    const seed = blockSeed(now) + refreshN;
+    const cached = refreshN === 0 && canDiscover ? discoveryCache.get(seed) : undefined;
+    const remember = (list: SearchRow[]) =>
+      list.forEach((r) => discoveryShown.current.add(discoveryKey(r.artist, r.title)));
+
+    // The one commit: history rows, the swap tick (= the refresh number, so
+    // summon/mount resets it and renders plain), and the discovery section's
+    // fate — cached rows, skeletons (pending), or silently absent.
+    setResurfaced(rows);
+    setSwapTick(refreshN);
+    if (cached) {
+      remember(cached);
+      setDiscovery(cached);
+      setDiscoveryPending(false);
+      return;
+    }
+    setDiscovery([]);
+    setDiscoveryPending(canDiscover);
+    if (!canDiscover) return;
+
+    const seeds = pickSeeds(pool, seed);
+    // Exclude EVERY played track (not just the rested seed pool — a track heard
+    // in the last day is in `played` but NOT in `pool`) AND everything a prior
+    // refresh already surfaced this session, so a pull can't repeat a pick.
+    const exclude = played
+      .map((t) => discoveryKey(t.artist, t.title))
+      .concat([...discoveryShown.current]);
+    refreshBusy.current = true;
+    let res: Awaited<ReturnType<typeof commands.discoveryPicks>> | null;
+    try {
+      res = await commands.discoveryPicks(seeds, exclude);
+    } catch {
+      res = null; // transport hiccup — same silent fallback as a non-ok status
+    } finally {
+      refreshBusy.current = false;
+      // A stale gen never touches pending — the newer run owns it now.
+      if (gen === resurfaceGen.current) setDiscoveryPending(false);
+    }
+    if (gen !== resurfaceGen.current || !res || res.status !== "ok") return;
+    const seen = new Set(rows.map((r) => r.uri).filter((u): u is string => !!u));
+    const rows2: SearchRow[] = res.picks
+      .filter((p) => !seen.has(p.track.uri))
+      .slice(0, 3)
+      .map((p) => ({
+        key: p.track.uri,
+        title: p.track.title,
+        artist: p.track.artist,
+        artUrl: p.track.art_url,
+        track: p.track,
+        uri: p.track.uri,
+        reason: `Because you played ${p.seed_title}`,
+      }));
+    remember(rows2);
+    setDiscovery(rows2);
+    if (refreshN === 0) discoveryCache.set(seed, rows2);
+  }, []);
+
+  // Summon signal: refocus, select-all the stale query, fresh empty state.
   useEffect(
     () =>
       onSearchShown(() => {
@@ -254,14 +507,24 @@ export default function Search() {
         inputRef.current?.select();
         setNote(null);
         setSelected(0);
-        void computeResurfaced().then(setResurfaced);
+        // Every summon starts from the curated set; a pull-refresh advances
+        // from there.
+        refreshCount.current = 0;
+        discoveryShown.current.clear();
+        void refreshEmptyState(0);
       }),
-    [],
+    [refreshEmptyState],
   );
+  // Mount + whenever the Spotify connection resolves/flips: the initial
+  // render is disconnected until the status seed lands, and discovery needs a
+  // live session — so recompute when it settles (also refills discovery after
+  // a reconnect without waiting for the next summon).
   useEffect(() => {
     inputRef.current?.focus();
-    void computeResurfaced().then(setResurfaced);
-  }, []);
+    refreshCount.current = 0;
+    discoveryShown.current.clear();
+    void refreshEmptyState(0);
+  }, [refreshEmptyState, spotify.connected]);
 
   const hasQuery = query.trim().length > 0;
   // Row-source flips (typing the first char, clearing) restart selection at
@@ -271,7 +534,11 @@ export default function Search() {
     setSelected(0);
   }, [hasQuery]);
 
-  const rows: SearchRow[] = hasQuery ? (results ?? []).map(searchRow) : resurfaced;
+  // Discovery appends BELOW history, so a late-arriving discovery fill never
+  // shifts the selected index (the clamp handles list growth).
+  const rows: SearchRow[] = hasQuery
+    ? (results ?? []).map(searchRow)
+    : [...resurfaced, ...discovery];
   const sel = Math.min(selected, Math.max(rows.length - 1, 0));
 
   const playRow = async (row: SearchRow) => {
@@ -343,6 +610,15 @@ export default function Search() {
       setSelected(Math.min(sel + 1, Math.max(rows.length - 1, 0)));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
+      // Pull-to-refresh: Up while ALREADY at the top slot rolls a fresh set
+      // (the phone gesture). Only in the empty state, with rows to replace,
+      // and never while a fetch is in flight (would answer "busy").
+      if (!hasQuery && sel === 0 && !gated && rows.length > 0 && !refreshBusy.current) {
+        refreshCount.current += 1;
+        showNote("Fresh picks", 1600);
+        void refreshEmptyState(refreshCount.current);
+        return;
+      }
       setSelected(Math.max(sel - 1, 0));
     } else if (e.key === "Enter" && rows[sel] && !gated) {
       e.preventDefault();
@@ -392,7 +668,9 @@ export default function Search() {
             className="search-input min-w-0 flex-1 bg-transparent text-[18px] text-fg outline-none placeholder:text-muted focus-visible:[outline:none]"
           />
           {!gated && (
-            <span className="shrink-0 text-[11px] text-muted/85">↵ play · ⇧↵ queue</span>
+            <span className="shrink-0 text-[11px] text-muted/85">
+              ↵ play · ⇧↵ queue{!hasQuery ? " · ↑ more" : ""}
+            </span>
           )}
         </div>
 
@@ -406,30 +684,54 @@ export default function Search() {
             <p className="m-0 px-2.5 py-2.5 text-[13px] text-muted">Spotify unreachable</p>
           ) : (
             <>
-              {!hasQuery && rows.length > 0 && (
-                <p className="m-0 px-2.5 pb-1.5 pt-2 text-[11px] uppercase tracking-widest text-muted">
-                  From your history
-                </p>
-              )}
               {!hasQuery && rows.length === 0 && (
                 <p className="m-0 px-2.5 py-2.5 text-[13px] text-muted">
                   Type to search Spotify — tracks you play will gather here.
                 </p>
               )}
-              {hasQuery && searching && rows.length === 0 && (
-                <p className="m-0 px-2.5 py-2.5 text-[13px] text-muted">Searching…</p>
-              )}
+              {/* First results still in flight — the same ghost rows as the
+                  discovery wait (the glyph in the search row tints too), at
+                  the count results actually land with (3 ghosts → 8 rows was
+                  a vertical jump), and reason-less like real result rows. */}
+              {hasQuery &&
+                searching &&
+                rows.length === 0 &&
+                Array.from({ length: RESULT_LIMIT }, (_, i) => (
+                  <SkeletonRow key={i} index={i} />
+                ))}
               {hasQuery && !searching && rows.length === 0 && (
                 <p className="m-0 px-2.5 py-2.5 text-[13px] text-muted">No matches on Spotify</p>
               )}
               <div
                 id="search-list"
                 role="listbox"
-                aria-label={hasQuery ? "Search results" : "From your history"}
+                aria-label={hasQuery ? "Search results" : "Recommendations"}
               >
-                {rows.map((row, i) => (
+                {rows.map((row, i) => {
+                  // Section headers ride INSIDE the flat list so keyboard nav
+                  // spans both sections with one index; presentation role so a
+                  // reader skips them as options.
+                  const header =
+                    !hasQuery && i === 0 && resurfaced.length > 0
+                      ? "From your history"
+                      : !hasQuery && discovery.length > 0 && i === resurfaced.length
+                        ? "Something different"
+                        : null;
+                  return (
+                    // The tick prefix remounts the SET on a pull so the ripple
+                    // is uniform (partially-animating rows read as a bug, and
+                    // a class flip on survivors would replay anyway); headers
+                    // remount too but carry no animation — chrome holds still.
+                    <Fragment key={`${swapTick}:${row.key}`}>
+                      {header && (
+                        <p
+                          role="presentation"
+                          className="m-0 px-2.5 pb-1.5 pt-2 text-[11px] uppercase tracking-widest text-muted"
+                        >
+                          {header}
+                        </p>
+                      )}
                   <div
-                    key={row.key}
                     id={`search-opt-${i}`}
                     role="option"
                     aria-selected={i === sel}
@@ -440,60 +742,62 @@ export default function Search() {
                       if (prev) setSelected(i);
                     }}
                     onClick={() => void playRow(row)}
-                    className={`group/row flex h-[52px] cursor-pointer select-none items-center gap-3 rounded-md px-3 [transition:background-color_140ms_var(--ease-out-tk)] ${
+                    className={`flex h-[52px] cursor-pointer select-none items-center gap-3 rounded-md px-3 [transition:background-color_140ms_var(--ease-out-tk)] ${
                       flashKeys.has(row.key) ? "bg-accent/15" : i === sel ? "bg-fg/10" : ""
-                    }`}
+                    } ${!hasQuery && swapTick > 0 ? "row-swap-in" : ""}`}
+                    style={
+                      // Stagger is LOCAL to each section's landing moment:
+                      // history staggers from the pull commit; discovery rows
+                      // mount seconds later and stagger from their own arrival
+                      // — a flat-index delay left them invisible for 100ms+
+                      // AFTER the skeleton wait (design-eng pass, 2026-07-16).
+                      !hasQuery && swapTick > 0
+                        ? {
+                            animationDelay: `${(i < resurfaced.length ? i : i - resurfaced.length) * 20}ms`,
+                          }
+                        : undefined
+                    }
                   >
                     <RowThumb url={row.artUrl} size={32} />
                     <span className="flex min-w-0 flex-1 flex-col">
                       <span className="truncate text-[14px] font-medium leading-5 text-fg">{row.title}</span>
                       <span className="truncate text-[12px] leading-4 text-muted">{row.artist}</span>
                     </span>
-                    {/* Explicit verbs, revealed on hover (the history-row
-                        grammar) — the bare row click also plays, but nothing
-                        SAID so. Seated to the LEFT of the reason: at rest they
-                        hold their slot invisibly, so the reason stays anchored
-                        to the row's right edge instead of floating with the
-                        empty button space stranded past it (Thien, 2026-07-13).
-                        On hover they simply fill that gap; the reason holds. */}
-                    <button
-                      type="button"
-                      tabIndex={-1}
-                      aria-label={`Play ${row.title} now`}
-                      title="Play now (Enter)"
-                      onMouseDown={(e) => e.stopPropagation()}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void playRow(row);
-                      }}
-                      className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-md text-fg opacity-0 [transition:opacity_140ms_var(--ease-out-tk),background-color_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 active:scale-95 group-hover/row:opacity-100"
-                    >
-                      {PlayGlyph}
-                    </button>
-                    <button
-                      type="button"
-                      tabIndex={-1}
-                      aria-label={`Queue ${row.title}`}
-                      title="Add to queue (Shift+Enter)"
-                      onMouseDown={(e) => e.stopPropagation()}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void queueRow(row);
-                      }}
-                      className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-md text-fg opacity-0 [transition:opacity_140ms_var(--ease-out-tk),background-color_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 active:scale-95 group-hover/row:opacity-100"
-                    >
-                      {PlusGlyph}
-                    </button>
-                    {/* The pick's why — without it the resurfacing reads as a
-                        bug. Flush to the right edge; the hover controls slot in
-                        to its left. */}
+                    {/* The pick's why, flush to the right edge — without it the
+                        picks read as a bug (Thien, 2026-07-12). No per-row mouse
+                        buttons compete for the slot: this surface is
+                        keyboard-first (↵ plays, ⇧↵ queues; a row click also
+                        plays), so the reason stays perfectly aligned, nothing
+                        shifts row to row (Thien's call, 2026-07-16). Capped +
+                        truncated so a long "Because you played …" can't crush
+                        the title column. */}
                     {row.reason && (
-                      <span className="shrink-0 text-[11px] text-muted/85">
+                      <span className="max-w-[45%] shrink-0 truncate text-[11px] text-muted/85">
                         {row.reason}
                       </span>
                     )}
                   </div>
-                ))}
+                    </Fragment>
+                  );
+                })}
+                {/* Discovery in flight, nothing to show yet (summon-fill OR
+                    pull-refresh — same wait): the header appears at once with
+                    three ghost rows holding the exact space the picks will
+                    land in, so a multi-second Last.fm→Spotify walk never
+                    reads as broken and the swap is in-place. */}
+                {!hasQuery && discoveryPending && discovery.length === 0 && (
+                  <>
+                    <p
+                      role="presentation"
+                      className="m-0 px-2.5 pb-1.5 pt-2 text-[11px] uppercase tracking-widest text-muted"
+                    >
+                      Something different
+                    </p>
+                    {[0, 1, 2].map((i) => (
+                      <SkeletonRow key={i} index={i} reason />
+                    ))}
+                  </>
+                )}
               </div>
             </>
           )}

@@ -130,6 +130,69 @@ body {
   animation: resting-breathe 8s var(--ease-in-out-tk) infinite;
 }
 
+/* Skeleton ghost rows (Search.tsx SkeletonRow) — the "rows are coming"
+ * promise: content-shaped blocks breathing by opacity where real rows will
+ * land, so a multi-second fetch fills its space instead of leaving a void
+ * (tiny centered dots read as lost in the 3-row slot — Thien, 2026-07-16).
+ * Deliberately NOT the gradient shimmer: a translate sweep is motion
+ * vocabulary reserved for the waveform; ghosts breathe like the resting
+ * pulse. Per-row stagger via inline animation-delay; the reduced-motion
+ * block zeroes delay + iteration, reverting to this base — static dim
+ * ghosts, still an honest "pending". */
+@keyframes skeleton-breathe {
+  /* A NARROW crest (~20% of the cycle) with a long quiet tail: the per-column
+   * stagger (SKELETON_COL_DELAY_MS) only reads as a left→right sweep when the
+   * pulse is narrow relative to the offsets — a 50%-crest triangle lit every
+   * column at once, which read as desynchronized flicker, and its ±45-point
+   * swing at 1.6s throbbed for attention (design-eng pass, 2026-07-16). One
+   * soft beat passes through, then the rows rest. */
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  12% {
+    opacity: 0.85;
+  }
+  34% {
+    opacity: 0.5;
+  }
+}
+
+.skeleton-pulse {
+  /* Base = the keyframe trough (same reduced-motion contract as above).
+   * Cycle tuned to recur FASTER than a real discovery fetch (~1-2.5s): at
+   * 2200ms the ~1.9s rest gap meant most waits ended after a single pass and
+   * the loop read as play-once; 1600ms still felt slow — landed at 1300ms
+   * (Thien's feel-checks, 2026-07-16). */
+  opacity: 0.5;
+  animation: skeleton-breathe 1300ms var(--ease-in-out-tk) infinite;
+}
+
+/* Pull-refresh row swap (Search.tsx): on a user-invoked refresh the fresh
+ * picks resolve IN PLACE through a light blur — the house content-swap mask
+ * (the Phantom screen-enter idiom), NOT a re-entrance. The first cut faded
+ * rows up from opacity 0, which blanked every slot until its stagger elapsed
+ * — the panel visibly emptied then refilled, "clear-then-reload" instead of
+ * a swap — and the 3px rise spoke entrance grammar for content that never
+ * moved (design-eng pass, 2026-07-16). From-state stays 25% visible so with
+ * `both` holding it through the stagger delay, no slot is ever blank.
+ * Input-response feedback, NOT a new ambient license; summon-time fills stay
+ * plain (the window appearing IS that arrival). */
+@keyframes row-swap-in {
+  from {
+    opacity: 0.25;
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+.row-swap-in {
+  animation: row-swap-in 140ms var(--ease-out-tk) both;
+}
+
 /* The persistent widget shell (App.tsx): mode changes tween the box out of
  * the docked corner (a morph of an on-screen element → EASE.inOut); a
  * dock-corner change FLIPs `translate` back to 0 (a drag-release response →

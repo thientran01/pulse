@@ -157,7 +157,9 @@ src-tauri/src/
   search.rs     the summon Search's window — Palette's FIRST second webview
                 (multi-window pioneer; focus mode reuses the seams). Created
                 ONCE hidden at setup (WebView2 cold-create costs ~100s of
-                ms; a laggy summon is dead), 560×420 born-at-size, shown by
+                ms; a laggy summon is dead), 680×554 born-at-size (H seats the
+                empty state's 7 rows + 2 headers exactly — re-derive from the
+                search.rs comment if row/chrome sizes change), shown by
                 Ctrl+Alt+S centered high on the CURSOR's monitor, hidden on
                 blur (lib.rs Focused(false) handler) / Esc / background
                 click. Its show/hide ledger is deliberately OUTSIDE
