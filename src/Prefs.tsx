@@ -163,7 +163,7 @@ function Toggle({ on, onClick, label }: { on: boolean; onClick: () => void; labe
   );
 }
 
-/** A segmented control (seek amount, launch mode). Selected = fg/12 fill. */
+/** A segmented control (launch mode). Selected = fg/12 fill. */
 function Segmented<T extends string | number>({
   options,
   value,
