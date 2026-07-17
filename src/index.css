@@ -16,7 +16,11 @@
   --fg: 245 239 230; /* cream near-white — never #fff */
   --muted: 161 152 140; /* secondary text */
   --border: 245 239 230; /* = fg; always used at 5–15% alpha */
-  --accent: 232 122 90; /* the ONE brand hue; art palette may retint */
+  --accent: 168 140 250; /* twilight violet — the ONE brand hue; art palette may
+                            retint. Replaced the ember orange (232 122 90,
+                            Thien 2026-07-17): it shared --warn's salmon family
+                            and AM-red territory; the violet is maximally
+                            distinct from both and pairs with the warm cream */
   --warn: 214 142 116; /* desaturated warning — never red-red, never accent;
                           promoted from a Prefs-local literal once a second
                           surface (SpotifyConnectButton) needed it */
@@ -28,7 +32,7 @@
   --fg: 31 26 18;
   --muted: 110 102 92;
   --border: 31 26 18;
-  --accent: 184 66 38; /* same hue, darkened to ≥4.5:1 on light surface (accent carries lyric text in M3) */
+  --accent: 104 66 201; /* same twilight hue, darkened to ≥4.5:1 (measured 5.7:1) on light surface (accent carries lyric text in M3) */
   --warn: 168 84 52; /* same desaturated family, darkened for light surface */
 }
 

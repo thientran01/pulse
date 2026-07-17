@@ -7,8 +7,8 @@
  * Doctrine (hard rules, from CLAUDE.md + the handoff):
  * - Dark-only, monochrome chrome on semantic tokens (fg/muted on
  *   surface/surface-2).
- * - Accent (--accent, ember) appears in EXACTLY TWO places in this whole
- *   window: the live hotkey-capture ring and the Spotify "connected" dot.
+ * - Accent (--accent, twilight violet) appears in EXACTLY TWO places in this
+ *   whole window: the live hotkey-capture ring and the Spotify "connected" dot.
  * - Toggles fill cream (--fg) when on, never accent.
  * - Warnings/conflicts use the desaturated --warn token, never red-red,
  *   never accent.
