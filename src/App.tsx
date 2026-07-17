@@ -61,7 +61,12 @@ type Mode = "pill" | "card" | "expanded";
  * click-through hit rect (dock.rs). */
 const MODE_SIZES: Record<Mode, [number, number]> = {
   pill: [300, 48],
-  card: [380, 132], // anchored-cluster handoff: 52px art row, full-width progress, bottom transport
+  // anchored-cluster handoff: 52px art row, full-width progress, bottom
+  // transport. 138 = SHELL_CHROME 14 + the card column's sum: pt-3 12 +
+  // art 52 + gap 6 + progress 16 + gap 6 + h-7 transport 28 + pb-1 4 = 124.
+  // Re-derive when the column changes — 132 drifted 6px short after #46's
+  // pb-1 and #51's shell chrome, and the art overflowed its row for a week.
+  card: [380, 138],
   expanded: [380, 440], // lyrics home; big-art fallback gets breathing room
 };
 
@@ -1739,7 +1744,7 @@ function App() {
           the garment change; reveal is 140ms opacity with visibility
           deferred (always mounted — the scroll position and history feed
           survive closing). Max height re-derived from the REAL 440px window
-          (prototype frame was 520): pill 330, card 296. While open, the hit
+          (prototype frame was 520): pill 330, card 290. While open, the hit
           rect unions this box (see the footprint effect above). */}
       {!nothing && (
         <div
