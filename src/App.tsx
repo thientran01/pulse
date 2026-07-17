@@ -937,17 +937,21 @@ function ExpandedView({
             </p>
           </div>
           {/* The living separator at hero size, centered in the flex
-              remainder below the cluster so the resting dot sits EXACTLY
-              between the caption and the progress bar (translate-y-1 folds
-              in half of the root column's gap-2 below this region — without
-              it the dot rides 8px closer to the caption than the console).
-              The metadata line keeps a static middot so the reactive
-              surface isn't on screen twice. Mounted only while the album
-              view is active — one living Waveform per state (the header's
-              md carries lyrics + queue); lastAlive bridges the mount so the
-              toggle doesn't re-bloom it from the dot. */}
+              remainder below the cluster — then leaned UP (-translate-y-3)
+              so its center sits equidistant between the ARTIST/ALBUM line
+              and the console (Thien, 2026-07-17): the two reserved,
+              usually-invisible slots (device tag + lyrics caption, ~34px)
+              sit between the artist line and this region, and centering
+              against the slot bottom read as the wave sagging toward the
+              controls. A briefly-visible caption tightens its gap to the
+              wave to ~10px — transient, acceptable. The metadata line keeps
+              a static middot so the reactive surface isn't on screen twice.
+              Mounted only while the album view is active — one living
+              Waveform per state (the header's md carries lyrics + queue);
+              lastAlive bridges the mount so the toggle doesn't re-bloom it
+              from the dot. */}
           {active === "album" && (
-            <div className="flex min-h-0 flex-1 translate-y-1 items-center justify-center">
+            <div className="flex min-h-0 flex-1 -translate-y-3 items-center justify-center">
               <Waveform size="lg" />
             </div>
           )}
