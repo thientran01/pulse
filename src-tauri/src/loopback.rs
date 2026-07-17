@@ -21,20 +21,24 @@
 //!
 //! Second quirk, harder: an app can hold an ACTIVE render session that delivers
 //! only SILENCE (the AUDCLNT_BUFFERFLAGS_SILENT flag, or plain all-zero frames)
-//! while its AUDIBLE audio renders somewhere the process-tree join can't see.
-//! Apple Music is the case that bit us: it reportedly renders audio through a
-//! SIBLING agent process (AMPLibraryAgent.exe), NOT the GSMTC-named process
-//! (AppleMusic.exe) whose AUMID we resolve — so INCLUDE_TARGET_PROCESS_TREE
-//! anchored on the GSMTC process misses the audio and taps a silent keep-alive.
-//! (A spatial mixer, e.g. Dolby Atmos, renders outside the app entirely and
-//! produces the same silent-session symptom.) So "delivered a packet" is NOT
-//! proof the join is good — only "delivered a packet WITH SIGNAL" is.
-//! `last_data_ms` stamps on real energy alone (SILENCE_EPS), so a silent-only
-//! stream reads as no-data and the owner can demote it to the whole-mix device
-//! fallback (which taps the endpoint mix — it hears the app whichever process
-//! rendered it). When the audio is merely in a sibling process the better cure
-//! is to resolve the RIGHT pid (match the whole package family, not one AUMID);
-//! the live_probe's session dump is how we confirm which pid actually renders.
+//! while its AUDIBLE audio renders somewhere the process-tree join can't see —
+//! a spatial mixer (Dolby Atmos renders the PCM in the system spatial processor,
+//! outside the app's process) or a sibling process in the same package. So
+//! "delivered a packet" is NOT proof the join is good — only "delivered a packet
+//! WITH SIGNAL" is. `last_data_ms` stamps on real energy alone (SILENCE_EPS), so
+//! a silent-only stream reads as no-data and the owner can demote it to the
+//! whole-mix device fallback (which taps the endpoint mix, when the audio is in
+//! the shared mix at all).
+//!
+//! NOTE this is DISTINCT from the case that first sent us here. Apple Music's
+//! flat waveform was confirmed live to be WASAPI EXCLUSIVE-mode playback
+//! (bit-perfect lossless): it delivers NO packets at all — so the plain
+//! `!has_data()` demote already covers it, this silent-PACKET gate is not what
+//! rescues it — AND its audio bypasses the shared mix entirely, so NO loopback
+//! (process OR device) can capture it. That case has no capture-side fix; see
+//! docs/smtc-support-matrix.md finding 12. The silent-packet path here is the
+//! separate, defensive case. The live_probe's session dump + per-session
+//! capture is how we tell these apart (bypasses-shared-mix vs. wrong-pid).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

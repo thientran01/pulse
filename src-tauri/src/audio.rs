@@ -209,15 +209,17 @@ const SILENCE_AFTER_MS: u64 = 250;
 const UPGRADE_RETRY: Duration = Duration::from_secs(5);
 /// A process capture that has NEVER delivered a packet WITH SIGNAL this long
 /// into playback either joined the wrong process (multi-profile browsers can
-/// alias an AUMID) or joined a session that only ever renders SILENCE while
-/// the audible audio goes elsewhere (Apple Music renders through a sibling
-/// agent process, not the GSMTC process our AUMID resolves — loopback.rs's
-/// second quirk). The right join delivers real audio within the first beat of
-/// a playing track. Demote that AUMID to the Device fallback, stickily
-/// (re-resolving would pick the same silent PID and strand the bars at zero
-/// again), until the playing app changes — the whole-mix fallback still hears
-/// the app at the endpoint. A capture that has delivered signal is never
-/// demoted: its later silence is the target really rendering nothing.
+/// alias an AUMID) or joined a session that only renders SILENCE while the
+/// audible audio goes elsewhere (a spatial mixer, or a sibling process —
+/// loopback.rs's second quirk). The right join delivers real audio within the
+/// first beat of a playing track. Demote that AUMID to the Device fallback,
+/// stickily (re-resolving would pick the same silent PID and strand the bars at
+/// zero again), until the playing app changes — the whole-mix fallback captures
+/// the endpoint IF the audio is in the shared mix at all. It is NOT for
+/// exclusive-mode playback (Apple Music bit-perfect lossless): that bypasses the
+/// shared mix and is uncapturable by any loopback — see docs/smtc-support-matrix.md
+/// finding 12. A capture that has delivered signal is never demoted: its later
+/// silence is the target really rendering nothing.
 const DEMOTE_AFTER_MS: u64 = 10_000;
 
 /// Owner thread: opens/drops the capture as the switch flips, runs the
