@@ -24,7 +24,7 @@ import { WidgetMenu, WIDGET_MENU_W, WIDGET_MENU_H } from "./WidgetMenu";
 import { VOCAL_LEAD_MS } from "./lib/lrc";
 import { PlayPauseButton, ProgressBar, Transport, useProgressDom } from "./Transport";
 import { LyricsPanel, lyricsKeyOf, useLyrics, type LyricsState } from "./LyricsPanel";
-import { extractAccent } from "./lib/palette";
+import { useArt, useArtAccent } from "./lib/artAccent";
 import * as posClock from "./lib/posClock";
 import { initReactive, setReactiveEnabledSetting } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
@@ -90,30 +90,9 @@ function sameIdentity(a: NowPlaying | null, b: NowPlaying): boolean {
   return a !== null && IDENTITY_FIELDS.every((k) => a[k] === b[k]);
 }
 
-function useArt(artId: string | null): string | null {
-  const [url, setUrl] = useState<string | null>(null);
-  const lastId = useRef<string | null>(null);
-  useEffect(() => {
-    if (artId === lastId.current) return;
-    if (!artId) {
-      lastId.current = null;
-      setUrl(null);
-      return;
-    }
-    let alive = true;
-    void commands.art(artId).then((u) => {
-      if (!alive) return;
-      setUrl(u);
-      // Only latch on success — a null (cache already advanced past this id)
-      // retries on the next payload instead of leaving the cover blank.
-      if (u) lastId.current = artId;
-    });
-    return () => {
-      alive = false;
-    };
-  }, [artId]);
-  return artId ? url : null;
-}
+// useArt / useArtAccent moved to src/lib/artAccent.ts (2026-07-17) when
+// Search became the third realm needing them — one copy, every window
+// follows the song's color.
 
 /** Feed the history thumb cache (history.rs): downscale the current cover to
  * a 96px JPEG once per ART REVISION — a rev bump means the first capture had
@@ -161,26 +140,6 @@ function useHistoryThumb(artId: string | null): void {
 // LyricsState / lyricsKeyOf / useLyrics / useLyricIndex / LyricsPanel moved
 // to src/LyricsPanel.tsx (2026-07-11) so the focus window's realm imports
 // the lyric surface without importing the whole widget.
-
-/** Retint the accent layer from the current cover; house accent when absent. */
-function useArtAccent(artUrl: string | null): void {
-  useEffect(() => {
-    const root = document.documentElement;
-    if (!artUrl) {
-      root.style.removeProperty("--accent");
-      return;
-    }
-    let alive = true;
-    void extractAccent(artUrl).then((rgb) => {
-      if (!alive) return;
-      if (rgb) root.style.setProperty("--accent", rgb);
-      else root.style.removeProperty("--accent");
-    });
-    return () => {
-      alive = false;
-    };
-  }, [artUrl]);
-}
 
 /** Hover hold before the full-text tooltip shows — reading intent, not a
  * flyby. Native `title` waits about this long; this is the styled stand-in. */

@@ -40,8 +40,8 @@ import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { MorphIcon } from "./icons/MorphIcon";
 import { commands, onNowPlaying, onSpotifyJump, onSpotifyJumpCancel } from "./lib/backend";
+import { useArt, useArtAccent } from "./lib/artAccent";
 import { VOCAL_LEAD_MS } from "./lib/lrc";
-import { extractAccent } from "./lib/palette";
 import * as posClock from "./lib/posClock";
 import { initReactive } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
@@ -83,51 +83,9 @@ function sameIdentity(a: NowPlaying | null, b: NowPlaying): boolean {
   return a !== null && IDENTITY_FIELDS.every((k) => a[k] === b[k]);
 }
 
-/** App.tsx's useArt, realm-local (the hook is small and App's module is the
- * whole widget — not worth importing for 20 lines). */
-function useArt(artId: string | null): string | null {
-  const [url, setUrl] = useState<string | null>(null);
-  const lastId = useRef<string | null>(null);
-  useEffect(() => {
-    if (artId === lastId.current) return;
-    if (!artId) {
-      lastId.current = null;
-      setUrl(null);
-      return;
-    }
-    let alive = true;
-    void commands.art(artId).then((u) => {
-      if (!alive) return;
-      setUrl(u);
-      if (u) lastId.current = artId;
-    });
-    return () => {
-      alive = false;
-    };
-  }, [artId]);
-  return artId ? url : null;
-}
-
-/** Accent extraction for THIS window's document (each realm owns its own
- * --accent; the main widget's extraction doesn't reach here). */
-function useArtAccent(artUrl: string | null): void {
-  useEffect(() => {
-    const root = document.documentElement;
-    if (!artUrl) {
-      root.style.removeProperty("--accent");
-      return;
-    }
-    let alive = true;
-    void extractAccent(artUrl).then((rgb) => {
-      if (!alive) return;
-      if (rgb) root.style.setProperty("--accent", rgb);
-      else root.style.removeProperty("--accent");
-    });
-    return () => {
-      alive = false;
-    };
-  }, [artUrl]);
-}
+// useArt / useArtAccent live in src/lib/artAccent.ts (one copy for all
+// three realms — each window's own listener still owns its own document's
+// --accent; the main widget's extraction doesn't reach here).
 
 /** The identity stack: art + metadata + the reserved lyrics-status caption
  * slot (the Gatefold graft — the block never reflows when the state
