@@ -915,8 +915,11 @@ function ExpandedView({
           className={`absolute inset-0 flex flex-col items-center bg-surface pt-8 ${layer(active === "album")}`}
         >
           <Art url={artUrl} size={190} radiusPx={12} />
-          {/* mt-3 replaces the old column gap-3 (the wave region below owns
-              its own spacing now). */}
+          {/* Metadata: title + artist only. The device tag mounts inline
+              only when present — the art is TOP-PINNED (pt-8) here, so a
+              conditional row no longer shifts it (the reserved-slot rule was
+              for the old justify-center column) and the empty slot was just
+              dead space between the artist line and the caption. */}
           <div className="mt-3 min-w-0 self-stretch text-center">
             <p className="truncate text-sm font-medium text-fg">{np.title}</p>
             <p className="truncate text-xs text-muted">
@@ -924,64 +927,55 @@ function ExpandedView({
               {np.album && <SeparatorDot />}
               {np.album}
             </p>
-            {/* The device tag, with its name (the album view has room) — the
-                audio is on a non-PC device, which is why the hero waveform
-                below sits at rest. The slot is HEIGHT-RESERVED like the
-                caption below: a conditional mount inserted 16px into this
-                justify-center column and shifted the 190px cover 8px on
-                every device flip — the exact failure the caption slot
-                documents ("the art never moves"). */}
-            <div className="mt-1 flex h-3 items-center justify-center">
-              {remoteDevice && <DeviceTag device={remoteDevice} playing={playing} showName />}
-            </div>
-            {/* Height-reserved caption slot: the caption fading in must not
-                re-center the column and shift the art (it did — every lyrics
-                miss nudged the 190px cover ~7px). "Finding lyrics…" waits
-                400ms so fast fetches never flash it; the miss caption fades
-                back out once read (captionExpired), aria-hidden going with it
-                so AT doesn't announce a caption sighted users can't see.
-                11px/leading-4 in an h-4 slot (was 10px/15px): 10px sat below
-                the app's 11px prose floor for a line that answers "why art
-                instead of lyrics" — slot re-derived with it, still fixed. */}
-            <p className="mt-0.5 h-4 text-[11px] leading-4 text-muted">
-              {lyrics.status !== "synced" && (
-                <span
-                  key={lyrics.status}
-                  aria-hidden={captionExpired || undefined}
-                  className={`inline-block ${
-                    captionExpired
-                      ? "animate-[caption-out_260ms_var(--ease-out-tk)_both]"
-                      : `animate-[caption-in_200ms_var(--ease-out-tk)_both] ${
-                          lyrics.status === "loading" ? "[animation-delay:400ms]" : ""
-                        }`
-                  }`}
-                >
-                  {lyrics.status === "loading"
-                    ? "Finding lyrics…"
-                    : lyrics.status === "offline"
-                      ? "Lyrics unavailable — offline"
-                      : "No synced lyrics"}
-                </span>
-              )}
-            </p>
+            {remoteDevice && (
+              <div className="mt-1 flex justify-center">
+                <DeviceTag device={remoteDevice} playing={playing} showName />
+              </div>
+            )}
           </div>
-          {/* The living separator at hero size, centered in the flex
-              remainder below the cluster — then leaned UP (-translate-y-3)
-              so its center sits equidistant between the ARTIST/ALBUM line
-              and the console (Thien, 2026-07-17): the two reserved,
-              usually-invisible slots (device tag + lyrics caption, ~34px)
-              sit between the artist line and this region, and centering
-              against the slot bottom read as the wave sagging toward the
-              controls. A briefly-visible caption tightens its gap to the
-              wave to ~10px — transient, acceptable. The metadata line keeps
-              a static middot so the reactive surface isn't on screen twice.
-              Mounted only while the album view is active — one living
-              Waveform per state (the header's md carries lyrics + queue);
-              lastAlive bridges the mount so the toggle doesn't re-bloom it
-              from the dot. */}
+          {/* Caption + hero fill the flex remainder as THREE zones: an
+              upper flex-1 that CENTERS the caption, the wave at its natural
+              size, and a matching lower flex-1 spacer. The two equal
+              spacers center the WAVE between the metadata and the console
+              (its approved seat), while the caption floats centered in the
+              gap ABOVE it — so "No synced lyrics" sits ~equidistant between
+              the artist line and the wave instead of glued to the bars
+              (it crowded them before — Thien, 2026-07-17: "too close to the
+              waveform, looks like it's directly on top"; a single centered
+              caption+wave group left the caption pinned to the wave). The
+              caption keeps its height-reserved h-4 slot so its fade never
+              nudges anything; the metadata line keeps a static middot so the
+              reactive surface isn't on screen twice. Mounted only while the
+              album view is active — one living Waveform per state (the
+              header's md carries lyrics + queue); lastAlive bridges the
+              mount so the toggle doesn't re-bloom it from the dot. */}
           {active === "album" && (
-            <div className="flex min-h-0 flex-1 -translate-y-3 items-center justify-center">
+            <div className="flex min-h-0 flex-1 flex-col items-center">
+              <div className="flex flex-1 items-center">
+                <p className="h-4 text-[11px] leading-4 text-muted">
+                  {lyrics.status !== "synced" && (
+                    <span
+                      key={lyrics.status}
+                      aria-hidden={captionExpired || undefined}
+                      className={`inline-block ${
+                        captionExpired
+                          ? "animate-[caption-out_260ms_var(--ease-out-tk)_both]"
+                          : `animate-[caption-in_200ms_var(--ease-out-tk)_both] ${
+                              lyrics.status === "loading" ? "[animation-delay:400ms]" : ""
+                            }`
+                      }`}
+                    >
+                      {lyrics.status === "loading"
+                        ? "Finding lyrics…"
+                        : lyrics.status === "offline"
+                          ? "Lyrics unavailable — offline"
+                          : "No synced lyrics"}
+                    </span>
+                  )}
+                </p>
+              </div>
               <Waveform size="lg" playing={np.status === "playing"} />
+              <div className="flex-1" />
             </div>
           )}
         </div>
