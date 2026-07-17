@@ -871,15 +871,24 @@ function ExpandedView({
           )}
         </div>
 
-        {/* Album view — big cover centered in the full box (headerless, no pt);
-            the identity when lyrics are off or missing. Absolute inset-0, so it
-            never reflows regardless of the header's presence. */}
+        {/* Album view — the identity when lyrics are off or missing.
+            Absolute inset-0, so it never reflows regardless of the header's
+            presence. NOT justify-center (2026-07-17, Thien's live catch):
+            centering [art·meta·wave] as one column split the slack at the
+            column ends — the cluster floated high and the hero dot hugged
+            the console, orphaned ~40px from the caption it belongs to. Now
+            the cluster seats on a fixed pt-8 (the "cluster down" knob) and
+            the hero takes the flex REMAINDER with the dot centered in it —
+            equidistant between the caption and the progress bar (the focus
+            horizon's equidistant rule at widget scale). */}
         <div
           inert={active !== "album"}
-          className={`absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface ${layer(active === "album")}`}
+          className={`absolute inset-0 flex flex-col items-center bg-surface pt-8 ${layer(active === "album")}`}
         >
           <Art url={artUrl} size={190} radiusPx={12} />
-          <div className="min-w-0 self-stretch text-center">
+          {/* mt-3 replaces the old column gap-3 (the wave region below owns
+              its own spacing now). */}
+          <div className="mt-3 min-w-0 self-stretch text-center">
             <p className="truncate text-sm font-medium text-fg">{np.title}</p>
             <p className="truncate text-xs text-muted">
               {np.artist}
@@ -927,14 +936,18 @@ function ExpandedView({
               )}
             </p>
           </div>
-          {/* The living separator at hero size, filling the dead zone between
-              the metadata and the transport. The metadata line keeps a static
-              middot so the reactive surface isn't on screen twice. Mounted
-              only while the album view is active — one living Waveform per
-              state (the header's md carries lyrics + queue); lastAlive bridges
-              the mount so the toggle doesn't re-bloom it from the dot. */}
+          {/* The living separator at hero size, centered in the flex
+              remainder below the cluster so the resting dot sits EXACTLY
+              between the caption and the progress bar (translate-y-1 folds
+              in half of the root column's gap-2 below this region — without
+              it the dot rides 8px closer to the caption than the console).
+              The metadata line keeps a static middot so the reactive
+              surface isn't on screen twice. Mounted only while the album
+              view is active — one living Waveform per state (the header's
+              md carries lyrics + queue); lastAlive bridges the mount so the
+              toggle doesn't re-bloom it from the dot. */}
           {active === "album" && (
-            <div className="mt-3">
+            <div className="flex min-h-0 flex-1 translate-y-1 items-center justify-center">
               <Waveform size="lg" />
             </div>
           )}
