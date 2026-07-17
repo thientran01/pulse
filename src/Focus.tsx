@@ -294,7 +294,9 @@ export default function Focus() {
     // 2026-07-14: it lifts the art to meet the lyric cluster). Known,
     // accepted skew: the 146px metadata constant predates the DeviceTag
     // row (PR #109) — a remote-device session rides ~10px low.
-    <div className="group/focus room-in relative flex h-screen w-screen flex-col overflow-hidden bg-surface text-fg [--art:min(560px,46vh,100vh_-_660px,40vw_-_390px)] [--stack-top:calc(50vh_-_var(--art)/2_-_73px)]">
+    // --horizon-mb: the horizon's bottom margin, factored out so the
+    // no-lyrics cluster can anchor off the SAME geometry (see its seat).
+    <div className="group/focus room-in relative flex h-screen w-screen flex-col overflow-hidden bg-surface text-fg [--art:min(560px,46vh,100vh_-_660px,40vw_-_390px)] [--stack-top:calc(50vh_-_var(--art)/2_-_73px)] [--horizon-mb:calc((93vh_-_212px_-_var(--stack-top)_-_var(--art))/2)]">
       {/* Corner exit: hover-revealed + the has-[:focus-visible] keyboard
           reveal (the widget's contract). The contract-bracket verb, going
           home. */}
@@ -407,27 +409,31 @@ export default function Focus() {
                     pointerEvents: "none" as const,
                     transition: { duration: reducedMotion ? 0 : DUR[2] / 1000, ease: [...EASE.out] as [number, number, number, number] },
                   }}
-                  className="absolute inset-0 flex items-center justify-center"
+                  className="absolute inset-0 flex items-end justify-center"
                 >
-                  {/* No-lyrics fallback: the identity stack is CENTERED in the
-                      space above the horizon (items-center), not pinned to
-                      --stack-top like the split view. --stack-top centers the
-                      ART on the window midline, which hangs the metadata +
-                      caption ~146px below it — head-on into the horizon's band
-                      (in the split view the metadata is far-left and the
-                      horizon centered, so they clear; centered they collide,
-                      Thien's live catch 2026-07-17). Centering the whole
-                      cluster here seats the wave cleanly between the metadata
-                      and the console at any focus resolution. The
-                      loading⇄synced crossfade already slides the art
-                      center→left (the compositions differ), so this vertical
-                      shift rides the same opacity crossfade, not a new break.
-                      translate-y-[2.5vh]: the horizon (fixed band) sits in a
-                      sub-band below the upper room's center, so a pure center
-                      left the wave ~20-45px toward the console; the nudge
-                      equalizes the metadata→wave / wave→console gaps to within
-                      ~9px across 1080–1440 (measured). */}
-                  <div className="translate-y-[2.5vh]">
+                  {/* No-lyrics fallback: the identity stack is BOTTOM-anchored
+                      to the horizon's top with a margin that seats the ARTIST
+                      line equidistant from the wave and the console — not
+                      pinned to --stack-top like the split view (that centers
+                      the ART on the window midline, hanging the metadata +
+                      caption ~146px below it, head-on into the horizon's band;
+                      in split the metadata is far-left and the horizon
+                      centered, so they clear — the collision is centered-only,
+                      Thien's live catch 2026-07-17).
+
+                      The seat anchors off the SAME geometry the horizon uses
+                      (--horizon-mb): items-end pins the stack bottom to the
+                      horizon top, and mb pushes it up by (--horizon-mb + 1vh),
+                      mirroring the console's distance below the wave — then
+                      MINUS the caption slot (mt-1 4px + h-7 28px = 32px) so
+                      that reserved, usually-empty "No synced lyrics" line
+                      drops out of the reckoning and the visible ARTIST line
+                      lands on center — measured 139/141 @1080, 175/176 @1440
+                      (Thien: "the wave's a bit low — the No synced lyrics
+                      text"). The loading⇄synced crossfade already slides the
+                      art center→left, so this rides the same opacity
+                      crossfade, not a new "art slides" break. */}
+                  <div className="mb-[calc(var(--horizon-mb)_+_1vh_-_32px)]">
                     <IdentityStack np={np} artUrl={artUrl} caption={caption} captionExpired={captionExpired} centered device={remoteDevice} />
                   </div>
                 </motion.div>
@@ -478,7 +484,7 @@ export default function Focus() {
               column only the bottom margin positions the box — the flex-1
               region above absorbs the rest — so mb = half the free space
               (Thien, 2026-07-14: "even" gaps both sides). */}
-          <div className="mb-[calc((93vh_-_212px_-_var(--stack-top)_-_var(--art))/2)] flex shrink-0 items-center justify-center">
+          <div className="mb-(--horizon-mb) flex shrink-0 items-center justify-center">
             <Waveform
               size="room"
               announceKey={announceSuppressed ? undefined : (lyricsKeyOf(np) ?? undefined)}
