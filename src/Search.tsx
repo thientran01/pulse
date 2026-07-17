@@ -318,16 +318,55 @@ function SearchGlyph() {
  * ("↵ play · ⇧↵ queue") sat in the same 11px muted run as their labels and
  * read as compressed noise — you couldn't tell what to press (Thien,
  * 2026-07-16). First cut was a cream neutral-inversion fill; Thien's live
- * verdict: "looks really bad — needs to look a bit more elevated", with
- * Raycast's footer chips as the direction. So: a RAISED dark key — fill one
- * step above the bar, hairline top light + soft drop shadow for keycap
- * depth, glyph near-fg. Never accent. A one-off component because these
- * are single GLYPH caps, not chord strings (Keycaps.tsx). */
+ * verdicts shaped the rest: "needs to look a bit more elevated" (Raycast's
+ * footer chips as the direction) → a RAISED dark key — fill one step above
+ * the bar, hairline top light + soft drop shadow for keycap depth; then
+ * "the icons are too cramped" → the UNICODE arrows were the problem (font
+ * glyphs go mushy at 11px), so the keys draw their own stroke SVGs in the
+ * house icon language (1.5 stroke, round caps — the search glyph's
+ * grammar) inside a slightly wider chip. Never accent. A one-off because
+ * these are single GLYPH caps, not chord strings (Keycaps.tsx). */
 function HintKey({ children }: { children: React.ReactNode }) {
   return (
-    <kbd className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-[5px] border border-border/[0.08] bg-fg/[0.09] px-1 text-[11px] font-medium not-italic leading-none text-fg/90 shadow-[0_1px_2px_rgb(0_0_0/0.35),inset_0_1px_0_rgb(var(--fg)/0.07)]">
+    <kbd className="inline-flex h-[18px] min-w-[20px] items-center justify-center rounded-[5px] border border-border/[0.08] bg-fg/[0.09] px-[3px] not-italic text-fg/90 shadow-[0_1px_2px_rgb(0_0_0/0.35),inset_0_1px_0_rgb(var(--fg)/0.07)]">
       {children}
     </kbd>
+  );
+}
+
+/** The three hint glyphs, stroke-drawn (never font arrows — see HintKey). */
+const hintSvg = {
+  viewBox: "0 0 16 16",
+  width: 12,
+  height: 12,
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 1.5,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+  "aria-hidden": true,
+};
+function EnterGlyph() {
+  return (
+    <svg {...hintSvg}>
+      <path d="M 12.5,4 L 12.5,9 L 4.5,9" />
+      <path d="M 7.5,6 L 4.5,9 L 7.5,12" />
+    </svg>
+  );
+}
+function ShiftGlyph() {
+  return (
+    <svg {...hintSvg}>
+      <path d="M 8,3 L 12.8,8.4 L 9.9,8.4 L 9.9,12.5 L 6.1,12.5 L 6.1,8.4 L 3.2,8.4 Z" />
+    </svg>
+  );
+}
+function UpGlyph() {
+  return (
+    <svg {...hintSvg}>
+      <path d="M 8,12.5 L 8,3.5" />
+      <path d="M 4.5,7 L 8,3.5 L 11.5,7" />
+    </svg>
   );
 }
 
@@ -747,14 +786,14 @@ export default function Search() {
                   hairline, not middots. */}
               <span className="flex items-center gap-1.5">
                 play
-                <HintKey>↵</HintKey>
+                <HintKey><EnterGlyph /></HintKey>
               </span>
               <span className="h-3 w-px bg-border/10" />
               <span className="flex items-center gap-1.5">
                 queue
                 <span className="flex items-center gap-[3px]">
-                  <HintKey>⇧</HintKey>
-                  <HintKey>↵</HintKey>
+                  <HintKey><ShiftGlyph /></HintKey>
+                  <HintKey><EnterGlyph /></HintKey>
                 </span>
               </span>
               {!hasQuery && rows.length > 0 && (
@@ -762,7 +801,7 @@ export default function Search() {
                   <span className="h-3 w-px bg-border/10" />
                   <span className="flex items-center gap-1.5">
                     more
-                    <HintKey>↑</HintKey>
+                    <HintKey><UpGlyph /></HintKey>
                   </span>
                 </>
               )}
