@@ -4,10 +4,10 @@ import type { SpotifyDevice } from "./types";
  * of the morphing icon system (src/icons/) — that skeleton is for glyphs that
  * tween into each other; this one never morphs. currentColor inherits the
  * tag's text-muted. */
-function DeviceGlyph({ kind }: { kind: SpotifyDevice["kind"] }) {
+function DeviceGlyph({ kind, px = 12 }: { kind: SpotifyDevice["kind"]; px?: number }) {
   const common = {
-    width: 12,
-    height: 12,
+    width: px,
+    height: px,
     viewBox: "0 0 24 24",
     fill: "none",
     stroke: "currentColor",
@@ -54,16 +54,26 @@ function DeviceGlyph({ kind }: { kind: SpotifyDevice["kind"] }) {
 /** The device Spotify is playing on when it isn't this PC — a small, static,
  * neutral indicator that explains a quiet waveform (the audio is elsewhere,
  * not paused). Never accent, never animated. Icon-only by default (name in the
- * tooltip, for the tight card); pass showName in roomier views. */
+ * tooltip, for the tight card); pass showName in roomier views. Size is an
+ * explicit knob ("sm" widget / "lg" focus room) — the name span used to
+ * hardcode text-[11px], which silently defeated a className size override
+ * (Tailwind conflicting-utility order is load-order, not class-order). */
+const TAG_SIZE = {
+  sm: { glyph: 12, name: "text-[11px]" },
+  lg: { glyph: 16, name: "text-[15px]" },
+} as const;
+
 export function DeviceTag({
   device,
   playing = false,
   showName = false,
+  size = "sm",
   className = "",
 }: {
   device: SpotifyDevice;
   playing?: boolean;
   showName?: boolean;
+  size?: keyof typeof TAG_SIZE;
   className?: string;
 }) {
   // Screen readers get the device CATEGORY sighted users read from the glyph,
@@ -86,9 +96,9 @@ export function DeviceTag({
       aria-label={label}
       title={label}
     >
-      <DeviceGlyph kind={device.kind} />
+      <DeviceGlyph kind={device.kind} px={TAG_SIZE[size].glyph} />
       {showName && (
-        <span className="min-w-0 truncate text-[11px] leading-none">{device.name}</span>
+        <span className={`min-w-0 truncate ${TAG_SIZE[size].name} leading-none`}>{device.name}</span>
       )}
     </span>
   );

@@ -227,10 +227,17 @@ src-tauri/src/
                 timeline, and #102's song-block wave was too small — both
                 Thien live verdicts), the console. Horizon + console live
                 OUTSIDE the upper-room swap, so the horizon survives every
-                track change and runs the announcement. Track changes exit
+                track change and runs the announcement (jump-suppressed for
+                play_now intermediates, the pill's isAnnounceSuppressed
+                wiring). Track changes exit
                 through the fetch interlude (lyricsLive flips while lyrics
                 re-key) — anything that must survive one lives outside the
-                swap.
+                swap. The room's QUEUE (2026-07-16) is a content surface in
+                the lyric column's exact box — QueuePanel scale="room",
+                opaque bg-surface over the still-running lyrics, always
+                mounted outside the swap; an open queue FORCES the split
+                composition so the identity stack holds the left seat even
+                with no lyrics (Esc peels the queue first).
                 This is the removed P3's want with the correct trigger:
                 invoked, never guessed
   audio.rs      audio capture → FFT → smoothed auto-gained band energies at
@@ -269,30 +276,36 @@ src/            React widget: pill ↔ card ↔ expanded modes; lib/posClock.ts 
                 /?spotify=off forces the queue gate, ?jump=partial the jump
                 failure caption
 src/Queue.tsx   the 11a queue & history UI: Palette's up-next list + the
-                "Earlier" history feed, TWO garments off ONE queueOpen bit —
-                a 312px popover floating above the pill/card (corner-aware:
-                opens away from the docked side; rides the mode resize on
-                the shell's 200ms EASE.inOut; max-height from the REAL
-                440px window: pill 330 / card 296) and, inside expanded, one
-                of three PEER LAYERS (lyrics · album · queue) that crossfade
-                in place under a fixed absolute now-playing header — opacity
-                only (200ms in / 140ms out EASE.out, no scale: the earlier
-                .98-exhale scale-overlay read as a panel opening and let the
-                layer behind peek at the edges, and a flex-flow header
-                reflowed the album column, 2026-07-12), visibility deferred,
-                inert when hidden; still always-mounted so scroll + feed
-                survive the swap; the shared header (lyrics + queue) is
+                "Earlier" history feed, garments off ONE queueOpen bit per
+                window — a 312px popover floating above the pill/card
+                (corner-aware: opens away from the docked side; rides the
+                mode resize on the shell's 200ms EASE.inOut; max-height from
+                the REAL 440px window: pill 330 / card 296); inside expanded,
+                one of three PEER LAYERS (lyrics · album · queue) that
+                crossfade in place under a fixed absolute now-playing header
+                — opacity only (200ms in / 140ms out EASE.out, no scale: the
+                earlier .98-exhale scale-overlay read as a panel opening and
+                let the layer behind peek at the edges, and a flex-flow
+                header reflowed the album column, 2026-07-12), visibility
+                deferred, inert when hidden; still always-mounted so scroll +
+                feed survive the swap; the shared header (lyrics + queue) is
                 absolute so it never reflows the album column, and chrome +
-                toggles never move. The
+                toggles never move; and in the FOCUS ROOM, the same panel at
+                scale="room" (QSCALE: 56px rows, 40px thumbs, type one rung
+                up — drag/ghost math parameterized by rowH) seated IN the
+                lyric column's exact box (2026-07-16: the 380px popover read
+                as a widget lost in the room). The
                 garment follows effectiveMode, so continuity across the
                 ladder is free. WHILE THE POPOVER IS OPEN THE HIT RECT
                 UNIONS ITS BOX (App's footprint effect) — a consumer that
                 forgets this puts clicks through to the desktop, the worst
-                failure class. Rows: 44px, hover-revealed actions
+                failure class (the focus garment is exempt: its window is
+                fully interactive). Rows: 44px base, hover-revealed actions
                 (history: play-now/+, uri-gated on enrichment; queue:
-                grip/×), pointer reorder with ±26px live swap, history→queue
-                ghost-chip drag (history itself never reorders), accent/16
-                flash + 1.6s aria-live toast, keyboard ↑/↓/Delete/Enter.
+                grip/×), pointer reorder with live swap at ±just-past-half a
+                row, history→queue ghost-chip drag (history itself never
+                reorders), accent/16 flash + 1.6s aria-live toast, keyboard
+                ↑/↓/Delete/Enter.
                 play_now suppresses the pill announcement for intermediates
                 (isAnnounceSuppressed) — the target announces once. The
                 queue toggle left the bracket cluster (2026-07-11: brackets

@@ -175,10 +175,10 @@ const CASCADE_CAP = 10;
 /** Head start so the art view's exhale clears before rows land. */
 const CASCADE_BASE_MS = 90; // DUR[1]
 /** base + cap*step + row animation (200ms) + slack; also bounds the anchor
- * marker's ignite — keep in sync with the 600ms transition-delay in
- * index.css. The class is removed only AFTER every row animation has
- * finished — ripping it off mid-cascade would snap fill-mode-held rows to
- * full opacity in one frame. */
+ * marker's ignite — keep in sync with index.css's marker rule (600ms hold +
+ * 200ms caption-in = exactly this). The class is removed only AFTER every
+ * row animation has finished — ripping it off mid-cascade would snap
+ * fill-mode-held rows to full opacity in one frame. */
 const ENTRANCE_DONE_MS = 800;
 
 export type LyricsScale = "base" | "focus";
@@ -212,13 +212,15 @@ const SCALE = {
     // Forward context leans on tier-1's brightness (the next line reads
     // through the ramp's start).
     anchor: 0.46,
-    // Tuned to the ALIGNED box (Focus seats the lyric column's top on the
-    // album's top edge via --art-top, 2026-07-14): ~2 strong + 1 faint
-    // lines above the current line, ~2 + 1 faint below — Thien's live
-    // rounds settled here ("that line is barely visible anyway, it'd fade
-    // cleaner"). The knob if it wants more/less. The min() guards keep
-    // the stops from crossing on short viewports (26%+34% ≤ 60% always
-    // orders) — the ramps scale instead of inverting there.
+    // Tuned to the focus lyric box (#104's geometry: mt-[11vh] ladder top,
+    // bottom on the art's bottom line at --stack-top + --art — Focus.tsx):
+    // ~2 strong + 1 faint lines above the current line, ~2 + 1 faint below
+    // — Thien's live rounds settled here ("that line is barely visible
+    // anyway, it'd fade cleaner"). The knob if it wants more/less. The
+    // min() guards keep the stops from crossing on short viewports
+    // (26%+34% ≤ 60% always orders) — the ramps scale instead of
+    // inverting there; below ~925px box height the % terms govern and the
+    // strong-line count drops toward 1.
     mask: "[mask-image:linear-gradient(transparent,black_min(240px,26%),black_calc(100%-min(320px,34%)),transparent)]",
     chipTop: "top-64",
     chipBottom: "bottom-84",

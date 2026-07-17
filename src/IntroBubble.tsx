@@ -49,7 +49,13 @@ export function IntroBubble({
       role="dialog"
       aria-label="Welcome to Palette"
       onMouseDown={(e) => e.stopPropagation()}
-      className="absolute z-40 w-[300px] rounded-xl border border-border/12 bg-surface p-4 shadow-xl shadow-black/50 [transition:opacity_var(--transition-duration-2)_var(--ease-out-tk)]"
+      // animate-, not transition-: this bubble conditionally mounts, and a
+      // CSS transition never fires on initial mount — the old opacity
+      // transition was dead code and the once-ever first-run moment popped
+      // in at 0ms (motion pass, 2026-07-16). caption-in at DUR[2]/EASE.out
+      // = the family reveal (queue popover, tooltips). Dismiss stays
+      // instant: user-commanded exits don't linger.
+      className="absolute z-40 w-[300px] animate-[caption-in_140ms_var(--ease-out-tk)_both] rounded-xl border border-border/12 bg-surface p-4 shadow-xl shadow-black/40"
       style={pos}
     >
       <div className="mb-3 flex items-start gap-2">
@@ -58,7 +64,7 @@ export function IntroBubble({
           type="button"
           aria-label="Dismiss"
           onClick={onDismiss}
-          className="grid h-[22px] w-[22px] place-items-center rounded-md text-muted [transition:background-color_var(--transition-duration-2),color_var(--transition-duration-2)] hover:bg-fg/[0.08] hover:text-fg"
+          className="grid h-[22px] w-[22px] place-items-center rounded-md text-muted [transition:background-color_var(--transition-duration-2)_var(--ease-out-tk),color_var(--transition-duration-2)_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/[0.08] hover:text-fg active:scale-95"
         >
           <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
             <path d="M 4.5,4.5 L 11.5,11.5" />
@@ -76,7 +82,7 @@ export function IntroBubble({
       </div>
       <div className="mt-3.5 flex items-center gap-2 border-t border-border/[0.08] pt-3">
         <SpotifyConnectButton />
-        <span className="text-[11px] leading-tight text-fg/40">for queue &amp; playback control</span>
+        <span className="text-[11px] leading-tight text-muted">for queue &amp; playback control</span>
       </div>
       <span
         aria-hidden

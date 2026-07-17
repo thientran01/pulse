@@ -53,7 +53,12 @@ export function IconButton({
       // 90ms) while hover bg and the disabled fade keep DUR[2]. Tailwind v4's
       // scale-95 compiles to the native `scale` property, so that's the one
       // the shorthand names.
-      className={`grid place-items-center rounded-md text-fg [transition:background-color_140ms_var(--ease-out-tk),opacity_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 active:scale-95 disabled:pointer-events-none disabled:opacity-40 ${
+      // Press scale steps with the target: ~0.95 on the widget tiers, 0.97
+      // on the console's 56px buttons — a small-button scale on a large
+      // target reads as a lurch (the house size-proportional rule).
+      className={`grid place-items-center rounded-md text-fg [transition:background-color_140ms_var(--ease-out-tk),opacity_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 disabled:pointer-events-none disabled:opacity-40 ${
+        size === "lg" ? "active:scale-[0.97]" : "active:scale-95"
+      } ${
         size === "xs" ? "h-6 w-6" : size === "sm" ? "h-7 w-7" : size === "lg" ? "h-14 w-14" : "h-8 w-8"
       }`}
     >
@@ -197,8 +202,24 @@ export function useProgressDom(
       const pos = dragFrac !== null ? dragFrac * durationMs : posClock.now();
       const frac = durationMs > 0 ? Math.min(pos / durationMs, 1) : 0;
       if (fill.current && Math.abs(frac - lastFrac) > 0.0004) {
+        // A discontinuity SNAPS instead of gliding: the 90ms transform
+        // transition exists for playback/seek deltas, but riding it through
+        // a track-change reset visibly rewound the fill from the old song's
+        // position to 0 — "track changes exit fast and plain" (motion pass,
+        // 2026-07-16). >0.5 is far beyond any 90ms playback delta (a click
+        // far up the bar snaps too — landing instantly is the honest read);
+        // the first write after mount snaps for the same reason.
+        const jump = lastFrac === -1 || (Math.abs(frac - lastFrac) > 0.5 && dragFrac === null);
         lastFrac = frac;
-        fill.current.style.transform = `scaleX(${frac})`;
+        if (jump) {
+          const el = fill.current;
+          el.style.transitionProperty = "background-color";
+          el.style.transform = `scaleX(${frac})`;
+          void el.offsetWidth; // flush so the write lands untransitioned
+          el.style.transitionProperty = "";
+        } else {
+          fill.current.style.transform = `scaleX(${frac})`;
+        }
       }
       const sec = Math.floor(pos / 1000);
       if (sec !== lastSec) {

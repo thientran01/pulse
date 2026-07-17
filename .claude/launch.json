@@ -2,6 +2,12 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "tauri",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "tauri", "dev"],
+      "port": 1420
+    },
+    {
       "name": "pulse-frontend",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],

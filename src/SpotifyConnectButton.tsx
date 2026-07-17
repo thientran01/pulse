@@ -77,13 +77,13 @@ export function SpotifyConnectButton({
         type="button"
         onClick={onClick}
         disabled={busy}
-        className={`inline-flex h-[30px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-border/[0.14] bg-fg/[0.05] px-3 text-[12px] font-medium text-fg [transition:background-color_var(--transition-duration-2)] hover:bg-fg/[0.08] disabled:opacity-60 ${className}`}
+        className={`inline-flex h-[30px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-border/[0.14] bg-fg/[0.05] px-3 text-[12px] font-medium text-fg [transition:background-color_var(--transition-duration-2)_var(--ease-out-tk)] hover:bg-fg/[0.08] disabled:opacity-60 ${className}`}
       >
         <SpotifyGlyph />
         {text}
       </button>
       {state === "error" && msg && (
-        <span aria-live="polite" className="text-[11px]" style={{ color: "rgb(214,142,116)" }}>
+        <span aria-live="polite" className="text-warn text-[11px]">
           {msg}
         </span>
       )}

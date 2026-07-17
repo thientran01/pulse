@@ -24,7 +24,7 @@ import { WidgetMenu, WIDGET_MENU_W, WIDGET_MENU_H } from "./WidgetMenu";
 import { VOCAL_LEAD_MS } from "./lib/lrc";
 import { PlayPauseButton, ProgressBar, Transport, useProgressDom } from "./Transport";
 import { LyricsPanel, lyricsKeyOf, useLyrics, type LyricsState } from "./LyricsPanel";
-import { extractAccent } from "./lib/palette";
+import { useArt, useArtAccent } from "./lib/artAccent";
 import * as posClock from "./lib/posClock";
 import { initReactive, setReactiveEnabledSetting } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
@@ -90,30 +90,9 @@ function sameIdentity(a: NowPlaying | null, b: NowPlaying): boolean {
   return a !== null && IDENTITY_FIELDS.every((k) => a[k] === b[k]);
 }
 
-function useArt(artId: string | null): string | null {
-  const [url, setUrl] = useState<string | null>(null);
-  const lastId = useRef<string | null>(null);
-  useEffect(() => {
-    if (artId === lastId.current) return;
-    if (!artId) {
-      lastId.current = null;
-      setUrl(null);
-      return;
-    }
-    let alive = true;
-    void commands.art(artId).then((u) => {
-      if (!alive) return;
-      setUrl(u);
-      // Only latch on success — a null (cache already advanced past this id)
-      // retries on the next payload instead of leaving the cover blank.
-      if (u) lastId.current = artId;
-    });
-    return () => {
-      alive = false;
-    };
-  }, [artId]);
-  return artId ? url : null;
-}
+// useArt / useArtAccent moved to src/lib/artAccent.ts (2026-07-17) when
+// Search became the third realm needing them — one copy, every window
+// follows the song's color.
 
 /** Feed the history thumb cache (history.rs): downscale the current cover to
  * a 96px JPEG once per ART REVISION — a rev bump means the first capture had
@@ -161,26 +140,6 @@ function useHistoryThumb(artId: string | null): void {
 // LyricsState / lyricsKeyOf / useLyrics / useLyricIndex / LyricsPanel moved
 // to src/LyricsPanel.tsx (2026-07-11) so the focus window's realm imports
 // the lyric surface without importing the whole widget.
-
-/** Retint the accent layer from the current cover; house accent when absent. */
-function useArtAccent(artUrl: string | null): void {
-  useEffect(() => {
-    const root = document.documentElement;
-    if (!artUrl) {
-      root.style.removeProperty("--accent");
-      return;
-    }
-    let alive = true;
-    void extractAccent(artUrl).then((rgb) => {
-      if (!alive) return;
-      if (rgb) root.style.setProperty("--accent", rgb);
-      else root.style.removeProperty("--accent");
-    });
-    return () => {
-      alive = false;
-    };
-  }, [artUrl]);
-}
 
 /** Hover hold before the full-text tooltip shows — reading intent, not a
  * flyby. Native `title` waits about this long; this is the styled stand-in. */
@@ -245,8 +204,11 @@ function TruncateTip({ text, className }: { text: string; className: string }) {
             }}
             // w-max up to the window's width minus the header's left gutter
             // (44px art + gaps) — long strings wrap instead of truncating
-            // again inside their own tooltip.
-            className="absolute left-0 top-full z-20 mt-1.5 w-max max-w-[250px] whitespace-normal break-words rounded-md border border-border/10 bg-surface-2 px-2 py-1 text-xs leading-4 text-fg shadow-lg shadow-black/40"
+            // again inside their own tooltip. pointer-events-none: aria-hidden
+            // decoration must never hit-test — open (and through its exit) it
+            // sat over the artist line, eating that line's hover-hold and
+            // feeding mousedown to the window drag (motion pass, 2026-07-16).
+            className="pointer-events-none absolute left-0 top-full z-20 mt-1.5 w-max max-w-[250px] whitespace-normal break-words rounded-md border border-border/10 bg-surface-2 px-2 py-1 text-xs leading-4 text-fg shadow-lg shadow-black/40"
           >
             {text}
           </motion.span>
@@ -645,8 +607,11 @@ function ViewToggle({
   onToggle: () => void;
 }) {
   return (
+    // right-[7px] = the corner chrome's right rail (ModeCluster/QueueSeat's
+    // documented seat math): this 28px button and the bracket cluster below
+    // it share one vertical line on the right edge — right-2 sat it 1px off.
     <div
-      className="pointer-events-none absolute right-2 top-2 z-10 opacity-0 transition-opacity duration-2 ease-out-tk group-data-[hot]/widget:pointer-events-auto group-data-[hot]/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100"
+      className="pointer-events-none absolute right-[7px] top-2 z-10 opacity-0 transition-opacity duration-2 ease-out-tk group-data-[hot]/widget:pointer-events-auto group-data-[hot]/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100"
       onMouseDown={(e) => e.stopPropagation()}
     >
       <button
@@ -911,7 +876,10 @@ function ExpandedView({
                 </span>
               )}
             </div>
-            <TruncateTip text={np.artist} className="text-[13px] text-muted" />
+            {/* text-xs leading-4 = the card's metadata rung exactly, so the
+                artist line holds size through the card⇄expanded morph (the
+                15px title above already does; 13px here visibly stepped). */}
+            <TruncateTip text={np.artist} className="text-xs leading-4 text-muted" />
           </div>
         </div>
 
@@ -932,15 +900,24 @@ function ExpandedView({
           )}
         </div>
 
-        {/* Album view — big cover centered in the full box (headerless, no pt);
-            the identity when lyrics are off or missing. Absolute inset-0, so it
-            never reflows regardless of the header's presence. */}
+        {/* Album view — the identity when lyrics are off or missing.
+            Absolute inset-0, so it never reflows regardless of the header's
+            presence. NOT justify-center (2026-07-17, Thien's live catch):
+            centering [art·meta·wave] as one column split the slack at the
+            column ends — the cluster floated high and the hero dot hugged
+            the console, orphaned ~40px from the caption it belongs to. Now
+            the cluster seats on a fixed pt-8 (the "cluster down" knob) and
+            the hero takes the flex REMAINDER with the dot centered in it —
+            equidistant between the caption and the progress bar (the focus
+            horizon's equidistant rule at widget scale). */}
         <div
           inert={active !== "album"}
-          className={`absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface ${layer(active === "album")}`}
+          className={`absolute inset-0 flex flex-col items-center bg-surface pt-8 ${layer(active === "album")}`}
         >
           <Art url={artUrl} size={190} radiusPx={12} />
-          <div className="min-w-0 self-stretch text-center">
+          {/* mt-3 replaces the old column gap-3 (the wave region below owns
+              its own spacing now). */}
+          <div className="mt-3 min-w-0 self-stretch text-center">
             <p className="truncate text-sm font-medium text-fg">{np.title}</p>
             <p className="truncate text-xs text-muted">
               {np.artist}
@@ -949,19 +926,24 @@ function ExpandedView({
             </p>
             {/* The device tag, with its name (the album view has room) — the
                 audio is on a non-PC device, which is why the hero waveform
-                below sits at rest. */}
-            {remoteDevice && (
-              <div className="mt-1 flex justify-center">
-                <DeviceTag device={remoteDevice} playing={playing} showName />
-              </div>
-            )}
+                below sits at rest. The slot is HEIGHT-RESERVED like the
+                caption below: a conditional mount inserted 16px into this
+                justify-center column and shifted the 190px cover 8px on
+                every device flip — the exact failure the caption slot
+                documents ("the art never moves"). */}
+            <div className="mt-1 flex h-3 items-center justify-center">
+              {remoteDevice && <DeviceTag device={remoteDevice} playing={playing} showName />}
+            </div>
             {/* Height-reserved caption slot: the caption fading in must not
                 re-center the column and shift the art (it did — every lyrics
                 miss nudged the 190px cover ~7px). "Finding lyrics…" waits
                 400ms so fast fetches never flash it; the miss caption fades
                 back out once read (captionExpired), aria-hidden going with it
-                so AT doesn't announce a caption sighted users can't see. */}
-            <p className="mt-0.5 h-[15px] text-[10px] text-muted">
+                so AT doesn't announce a caption sighted users can't see.
+                11px/leading-4 in an h-4 slot (was 10px/15px): 10px sat below
+                the app's 11px prose floor for a line that answers "why art
+                instead of lyrics" — slot re-derived with it, still fixed. */}
+            <p className="mt-0.5 h-4 text-[11px] leading-4 text-muted">
               {lyrics.status !== "synced" && (
                 <span
                   key={lyrics.status}
@@ -983,14 +965,22 @@ function ExpandedView({
               )}
             </p>
           </div>
-          {/* The living separator at hero size, filling the dead zone between
-              the metadata and the transport. The metadata line keeps a static
-              middot so the reactive surface isn't on screen twice. Mounted
-              only while the album view is active — one living Waveform per
-              state (the header's md carries lyrics + queue); lastAlive bridges
-              the mount so the toggle doesn't re-bloom it from the dot. */}
+          {/* The living separator at hero size, centered in the flex
+              remainder below the cluster — then leaned UP (-translate-y-3)
+              so its center sits equidistant between the ARTIST/ALBUM line
+              and the console (Thien, 2026-07-17): the two reserved,
+              usually-invisible slots (device tag + lyrics caption, ~34px)
+              sit between the artist line and this region, and centering
+              against the slot bottom read as the wave sagging toward the
+              controls. A briefly-visible caption tightens its gap to the
+              wave to ~10px — transient, acceptable. The metadata line keeps
+              a static middot so the reactive surface isn't on screen twice.
+              Mounted only while the album view is active — one living
+              Waveform per state (the header's md carries lyrics + queue);
+              lastAlive bridges the mount so the toggle doesn't re-bloom it
+              from the dot. */}
           {active === "album" && (
-            <div className="mt-3">
+            <div className="flex min-h-0 flex-1 -translate-y-3 items-center justify-center">
               <Waveform size="lg" playing={np.status === "playing"} />
             </div>
           )}
@@ -1006,7 +996,19 @@ function ExpandedView({
           onMouseDown={(e) => e.stopPropagation()}
           className={`absolute inset-0 flex flex-col bg-surface pt-[52px] ${layer(active === "queue")}`}
         >
-          <QueuePanel np={np} connected={spotifyConnected} open={queueOpen} />
+          {/* -mx-2 cancels the rows'/labels' px-2, seating the row thumbs and
+              section labels on the header art's left line — one vertical
+              line, cover over cover (Thien, 2026-07-16). Hover washes keep
+              their 8px overhang, now bleeding into the px-3 gutter (all
+              bg-surface, no seam). Popover/room garments keep the inset —
+              they have no header art to answer to. The sparkle nudge
+              (-mr-1 via data-sparkle) puts the persistent more-like-this
+              button's center on the 21px corner-chrome rail (ViewToggle
+              above, expand bracket below — Thien, 2026-07-16); row actions
+              stay on the content column, they're transient hover reveals. */}
+          <div className="-mx-2 flex min-h-0 flex-1 flex-col [&_[data-sparkle]]:-mr-1">
+            <QueuePanel np={np} connected={spotifyConnected} open={queueOpen} />
+          </div>
         </div>
       </div>
       {/* Hoisted chrome, like progress/transport below: the toggle keeps its
@@ -1735,9 +1737,12 @@ function App() {
           shell inside the never-resizing window (never inside it: the shell
           clips). Right-aligned to the docked corner's side; opens away from
           the shell (above when docked bottom, below when docked top — the
-          prototype only modeled bottom-right). Its `bottom`/`top` ride the
-          mode resize on the shell's own 200ms EASE.inOut so it glides with
-          the garment change; reveal is 140ms opacity with visibility
+          prototype only modeled bottom-right). Its `bottom`/`top` AND
+          `max-height` ride the mode resize on the shell's own 200ms
+          EASE.inOut so it glides with the garment change (max-height was
+          missing from the list — with a content-full list, stepping the
+          ladder glided the near edge while the far edge snapped 34px,
+          motion pass 2026-07-16); reveal is 140ms opacity with visibility
           deferred (always mounted — the scroll position and history feed
           survive closing). Max height re-derived from the REAL 440px window
           (prototype frame was 520): pill 330, card 296. While open, the hit
@@ -1750,8 +1755,8 @@ function App() {
             corner.endsWith("right") ? "right-1.5" : "left-1.5"
           } ${
             popoverVisible
-              ? "visible opacity-100 [transition:opacity_140ms_var(--ease-out-tk),top_200ms_var(--ease-in-out-tk),bottom_200ms_var(--ease-in-out-tk)]"
-              : "invisible opacity-0 [transition:opacity_140ms_var(--ease-out-tk),top_200ms_var(--ease-in-out-tk),bottom_200ms_var(--ease-in-out-tk),visibility_0s_140ms]"
+              ? "visible opacity-100 [transition:opacity_140ms_var(--ease-out-tk),top_200ms_var(--ease-in-out-tk),bottom_200ms_var(--ease-in-out-tk),max-height_200ms_var(--ease-in-out-tk)]"
+              : "invisible opacity-0 [transition:opacity_140ms_var(--ease-out-tk),top_200ms_var(--ease-in-out-tk),bottom_200ms_var(--ease-in-out-tk),max-height_200ms_var(--ease-in-out-tk),visibility_0s_140ms]"
           }`}
           style={{
             width: POPOVER_W,
