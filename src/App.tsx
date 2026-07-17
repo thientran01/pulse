@@ -939,8 +939,11 @@ function ExpandedView({
                 miss nudged the 190px cover ~7px). "Finding lyrics…" waits
                 400ms so fast fetches never flash it; the miss caption fades
                 back out once read (captionExpired), aria-hidden going with it
-                so AT doesn't announce a caption sighted users can't see. */}
-            <p className="mt-0.5 h-4 text-[11px] text-muted">
+                so AT doesn't announce a caption sighted users can't see.
+                11px/leading-4 in an h-4 slot (was 10px/15px): 10px sat below
+                the app's 11px prose floor for a line that answers "why art
+                instead of lyrics" — slot re-derived with it, still fixed. */}
+            <p className="mt-0.5 h-4 text-[11px] leading-4 text-muted">
               {lyrics.status !== "synced" && (
                 <span
                   key={lyrics.status}
@@ -990,8 +993,12 @@ function ExpandedView({
               line, cover over cover (Thien, 2026-07-16). Hover washes keep
               their 8px overhang, now bleeding into the px-3 gutter (all
               bg-surface, no seam). Popover/room garments keep the inset —
-              they have no header art to answer to. */}
-          <div className="-mx-2 flex min-h-0 flex-1 flex-col">
+              they have no header art to answer to. The sparkle nudge
+              (-mr-1 via data-sparkle) puts the persistent more-like-this
+              button's center on the 21px corner-chrome rail (ViewToggle
+              above, expand bracket below — Thien, 2026-07-16); row actions
+              stay on the content column, they're transient hover reveals. */}
+          <div className="-mx-2 flex min-h-0 flex-1 flex-col [&_[data-sparkle]]:-mr-1">
             <QueuePanel np={np} connected={spotifyConnected} open={queueOpen} />
           </div>
         </div>

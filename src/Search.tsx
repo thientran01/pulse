@@ -314,18 +314,18 @@ function SearchGlyph() {
   );
 }
 
-/** One bright keycap for the search-row hint. The old inline glyphs
+/** One elevated keycap for the search-row hint. The old inline glyphs
  * ("↵ play · ⇧↵ queue") sat in the same 11px muted run as their labels and
  * read as compressed noise — you couldn't tell what to press (Thien,
- * 2026-07-16). Each key gets a cream face (the house neutral-inversion
- * fill at /90 — a half-step below the prefs Toggle's full bg-fg so three
- * caps in a row don't outshine the input text; never accent) so the
- * glyph reads at a glance while the verb labels stay muted text. Geometry
- * echoes Keycaps sm; a one-off component because these are single GLYPH
- * caps, not chord strings. */
+ * 2026-07-16). First cut was a cream neutral-inversion fill; Thien's live
+ * verdict: "looks really bad — needs to look a bit more elevated", with
+ * Raycast's footer chips as the direction. So: a RAISED dark key — fill one
+ * step above the bar, hairline top light + soft drop shadow for keycap
+ * depth, glyph near-fg. Never accent. A one-off component because these
+ * are single GLYPH caps, not chord strings (Keycaps.tsx). */
 function HintKey({ children }: { children: React.ReactNode }) {
   return (
-    <kbd className="inline-flex h-4 min-w-[16px] items-center justify-center rounded-[4px] bg-fg/90 px-[3px] text-[10px] font-semibold not-italic leading-none text-surface">
+    <kbd className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-[5px] border border-border/[0.08] bg-fg/[0.09] px-1 text-[11px] font-medium not-italic leading-none text-fg/90 shadow-[0_1px_2px_rgb(0_0_0/0.35),inset_0_1px_0_rgb(var(--fg)/0.07)]">
       {children}
     </kbd>
   );
@@ -731,28 +731,43 @@ export default function Search() {
             className="search-input min-w-0 flex-1 bg-transparent text-[18px] text-fg outline-none placeholder:text-muted focus-visible:[outline:none]"
           />
           {!gated && (
-            <span className="flex shrink-0 items-center gap-2.5 text-[11px] text-muted/85">
+            <>
+              {/* AT mirror: the visual chips are glyph soup to a reader
+                  ("return symbol upwards arrow…") — hide them and say it in
+                  words, the skeletons' aria-hidden pattern. */}
+              <span className="sr-only">
+                Enter plays. Shift+Enter queues.
+                {!hasQuery && rows.length > 0 ? " Up arrow refreshes suggestions." : ""}
+              </span>
+              <span aria-hidden className="flex shrink-0 items-center gap-2 text-[11px] text-muted/85">
               {/* "↑ more" only when there ARE rows to re-roll — the Up guard
                   requires rows, and an empty-history user was being promised
-                  a no-op (quick-review catch). Keys as bright caps (HintKey),
-                  verbs as muted labels; the gap does the separating (the old
-                  middots earned their keep between plain-text runs). */}
+                  a no-op (quick-review catch). Raycast's footer grammar:
+                  verb label first, then its key(s); groups separated by a
+                  hairline, not middots. */}
               <span className="flex items-center gap-1.5">
-                <HintKey>↵</HintKey>play
+                play
+                <HintKey>↵</HintKey>
               </span>
+              <span className="h-3 w-px bg-border/10" />
               <span className="flex items-center gap-1.5">
+                queue
                 <span className="flex items-center gap-[3px]">
                   <HintKey>⇧</HintKey>
                   <HintKey>↵</HintKey>
                 </span>
-                queue
               </span>
               {!hasQuery && rows.length > 0 && (
-                <span className="flex items-center gap-1.5">
-                  <HintKey>↑</HintKey>more
-                </span>
+                <>
+                  <span className="h-3 w-px bg-border/10" />
+                  <span className="flex items-center gap-1.5">
+                    more
+                    <HintKey>↑</HintKey>
+                  </span>
+                </>
               )}
-            </span>
+              </span>
+            </>
           )}
         </div>
 

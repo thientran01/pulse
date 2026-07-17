@@ -10,7 +10,7 @@
  * - Accent (--accent, ember) appears in EXACTLY TWO places in this whole
  *   window: the live hotkey-capture ring and the Spotify "connected" dot.
  * - Toggles fill cream (--fg) when on, never accent.
- * - Warnings/conflicts use the desaturated rgb(214,142,116), never red-red,
+ * - Warnings/conflicts use the desaturated --warn token, never red-red,
  *   never accent.
  * - Motion on EASE/DUR tokens; the global reduced-motion kill (index.css)
  *   collapses every animation/transition here to instant.

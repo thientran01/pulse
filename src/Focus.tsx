@@ -275,8 +275,11 @@ export default function Focus() {
   const entranceSpent = useRef(false);
   const entrance = lyricsLive && !entranceSpent.current;
   useEffect(() => {
-    if (lyricsLive) entranceSpent.current = true;
-  }, [lyricsLive]);
+    // Queue-gated spend: the panel doesn't mount while the queue owns the
+    // column, and a resolve behind it must not burn the cascade unseen —
+    // the user's first actual sighting (queue close) earns it instead.
+    if (lyricsLive && !queueOpen) entranceSpent.current = true;
+  }, [lyricsLive, queueOpen]);
 
   const caption = lyricsLive
     ? null
@@ -417,10 +420,15 @@ export default function Focus() {
                       bottom fade dissolves exactly at the art's bottom line
                       (Thien, 2026-07-14). */}
                   <div className="flex h-[calc(var(--stack-top)_+_var(--art)_-_11vh)] min-h-0 min-w-0 flex-1 flex-col mt-[11vh]">
-                    {/* Guarded: the seat also mounts queue-forced (queue open,
-                        no lyrics) — the column stays empty under the queue
-                        surface then. */}
-                    {lyricsLive && (
+                    {/* Unmounted while the queue owns the column (not just
+                        covered): the queue box is art-width, narrower than
+                        this column, so live lyric lines would peek out past
+                        its right edge — and a first-lyrics resolve behind
+                        the cover would burn the once-per-takeover cascade
+                        unseen (its spend is queue-gated below to match).
+                        Closing the queue mounts lyrics fresh; the panel
+                        re-anchors itself. */}
+                    {lyricsLive && !queueOpen && (
                       <LyricsPanel
                         lines={lyrics.lines}
                         seekable={seekable}
@@ -472,7 +480,7 @@ export default function Focus() {
             <div className="w-(--art) shrink-0" />
             <div
               inert={!queueOpen}
-              className={`pointer-events-auto mt-[11vh] flex h-[calc(var(--stack-top)_+_var(--art)_-_11vh)] w-full min-w-0 max-w-[560px] flex-col bg-surface ${
+              className={`pointer-events-auto mt-[11vh] flex h-[calc(var(--stack-top)_+_var(--art)_-_11vh)] w-full min-w-0 max-w-(--art) flex-col bg-surface ${
                 queueOpen
                   ? "opacity-100 [transition:opacity_200ms_var(--ease-out-tk)]"
                   : "invisible opacity-0 [transition:opacity_140ms_var(--ease-out-tk),visibility_0s_140ms]"

@@ -913,6 +913,11 @@ export function QueuePanel({
         {hasKey && (
           <button
             type="button"
+            // The expanded garment nudges this onto the corner-chrome rail
+            // via [&_[data-sparkle]] (App.tsx queue layer) — the sparkle is
+            // persistent chrome there and must share the ViewToggle/bracket
+            // vertical line (Thien, 2026-07-16).
+            data-sparkle
             aria-label={np?.title ? `More like ${np.title}` : "More like this"}
             title={np?.title ? `More like ${np.title}` : "More like this"}
             aria-disabled={!queueLive || !np?.title || seeding || undefined}
