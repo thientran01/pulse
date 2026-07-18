@@ -132,6 +132,14 @@ export function useHistoryFeed(active: boolean): {
   const [seedTick, setSeedTick] = useState(0);
   const seeded = useRef(false);
   const loading = useRef(false);
+  // Generation stamp for in-flight page reads: the history-cleared reset
+  // must beat any promise fired BEFORE it — a pre-wipe page resolving after
+  // the reset would re-adopt the erased rows onto the emptied list (the
+  // seed merge sees cur=[] and takes the page wholesale) and its short
+  // length would re-latch exhausted, exactly the stale state the reset
+  // exists to prevent. Every fetch captures the stamp; the clear handler
+  // bumps it; a resolution whose stamp went stale drops on the floor.
+  const gen = useRef(0);
   // Updater functions must stay PURE (StrictMode double-invokes them — a
   // fetch inside one paged twice and duplicated rows); reads go through a
   // ref instead.
@@ -142,9 +150,11 @@ export function useHistoryFeed(active: boolean): {
   useEffect(() => {
     if (!active || seeded.current) return;
     seeded.current = true;
+    const g = gen.current;
     void commands
       .historyPage(null, HISTORY_PAGE)
       .then((page) => {
+        if (g !== gen.current) return; // cleared mid-flight — pre-wipe rows
         // A live append can land while the seed is in flight — merge, don't
         // clobber (the page includes it too; dedupe).
         setEntries((cur) =>
@@ -153,6 +163,7 @@ export function useHistoryFeed(active: boolean): {
         if (page.length < HISTORY_PAGE) setExhausted(true);
       })
       .catch(() => {
+        if (g !== gen.current) return; // the clear already re-virgined the latch
         // Release the latch so a failed seed retries on the next activation
         // (the panel stays mounted, so nothing else resets it).
         seeded.current = false;
@@ -182,6 +193,7 @@ export function useHistoryFeed(active: boolean): {
         // that are gone.
         seeded.current = false;
         loading.current = false;
+        gen.current += 1; // strand any in-flight page read on the old stamp
         setEntries([]);
         setExhausted(false);
         thumbCache.clear();
@@ -193,10 +205,12 @@ export function useHistoryFeed(active: boolean): {
   const loadMore = useCallback(() => {
     if (loading.current || exhausted) return;
     loading.current = true;
+    const g = gen.current;
     const oldest = entriesRef.current[entriesRef.current.length - 1];
     void commands
       .historyPage(oldest ? oldest.started_at_ms : null, HISTORY_PAGE)
       .then((page) => {
+        if (g !== gen.current) return; // cleared mid-flight — pre-wipe rows
         loading.current = false;
         if (page.length < HISTORY_PAGE) setExhausted(true);
         if (page.length > 0) {
@@ -204,6 +218,7 @@ export function useHistoryFeed(active: boolean): {
         }
       })
       .catch(() => {
+        if (g !== gen.current) return; // the clear already dropped the latch
         // Release the latch so a transient history_page failure doesn't jam
         // pagination for the rest of the session.
         loading.current = false;

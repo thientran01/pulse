@@ -538,10 +538,14 @@ export default function Prefs() {
       window.removeEventListener("blur", blur);
       // EVERY capture exit funnels through this cleanup — commit, Esc, the
       // esc chip, window blur, reset, unmount mid-capture: resume the
-      // suspended global shortcuts (a commit's rebind_hotkey already ran
-      // register_all; the extra resume is an idempotent no-op) and restore
-      // focus. The button is re-queried by id, not a stashed element — the
-      // exit remounted it, and a detached element's focus() is a silent no-op.
+      // suspended global shortcuts and restore focus. On a commit/reset this
+      // resume runs CONCURRENTLY with rebind_hotkey/reset_hotkeys (separate
+      // un-awaited invokes, separate tokio tasks) — safe only because the
+      // backend serializes registration (lib.rs REG_LOCK): serialized, every
+      // order lands the fresh table; unserialized, the interleaved loops
+      // could register a ghost of the old chord. The button is re-queried by
+      // id, not a stashed element — the exit remounted it, and a detached
+      // element's focus() is a silent no-op.
       void commands.setHotkeysCapture(false);
       const id = captureReturnId.current;
       if (id) document.querySelector<HTMLElement>(`[data-chord-btn="${id}"]`)?.focus();
@@ -573,10 +577,12 @@ export default function Prefs() {
   const closePrefs = async () => {
     flushLastfm();
     // The × can land mid-capture, and close DESTROYS this webview — the
-    // capture effect's cleanup invoke would race the teardown and could lose,
-    // leaving the global shortcuts suspended system-wide until the next
-    // rebind. Await the resume so register_all provably ran first (the
-    // cleanup's own resume then double-fires harmlessly).
+    // capture effect's cleanup invoke would race the teardown and could
+    // lose. Await the resume so register_all provably ran first (the
+    // cleanup's own resume then double-fires harmlessly — serialized by
+    // REG_LOCK). Belt: the Rust Destroyed handler also resumes on ANY prefs
+    // teardown (Alt+F4, taskbar Close, a crash — paths no JS here can
+    // catch), so a lost invoke can no longer strand the shortcuts.
     if (captureRef.current) await commands.setHotkeysCapture(false).catch(() => {});
     commands.closePrefs();
   };

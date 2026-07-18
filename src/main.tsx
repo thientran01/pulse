@@ -1,8 +1,9 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import App, { WINDOW_MAX } from "./App";
+import App from "./App";
 import ErrorBoundary from "./ErrorBoundary";
 import { commands } from "./lib/backend";
+import { WINDOW_MAX } from "./lib/sizes";
 import "./index.css";
 
 // Make silent failures observable. Fire-and-forget backend calls (void

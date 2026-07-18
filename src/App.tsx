@@ -27,6 +27,7 @@ import { LyricsPanel, lyricsKeyOf, useLyrics, type LyricsState } from "./LyricsP
 import { useArt, useArtAccent } from "./lib/artAccent";
 import * as posClock from "./lib/posClock";
 import { initReactive, setReactiveEnabledSetting } from "./lib/reactive";
+import { MODE_SIZES, WINDOW_MAX, type Mode } from "./lib/sizes";
 import { DUR, EASE } from "./lib/tokens";
 import {
   armSuppression,
@@ -49,28 +50,9 @@ import {
 } from "./types";
 
 
-type Mode = "pill" | "card" | "expanded";
-
-/** Each mode's FOOTPRINT (shell + gutter), in logical px. The native window
- * itself never resizes: it lives at WINDOW_MAX from birth (tauri.conf.json)
- * and every mode change is the shell's 200ms EASE.inOut CSS glide inside it,
- * clip-revealing the incoming mode's already-final ModeContent plane while
- * the content layers crossfade. (Resizing a WebView2 window at all costs one
- * wrong frame: per-frame animation shakes, a snap blinks — measured live
- * 2026-07-09/10.) These sizes still drive the shell/plane boxes and the
- * click-through hit rect (dock.rs). */
-const MODE_SIZES: Record<Mode, [number, number]> = {
-  pill: [300, 48],
-  card: [380, 132], // anchored-cluster handoff: 52px art row, full-width progress, bottom transport
-  expanded: [380, 440], // lyrics home; big-art fallback gets breathing room
-};
-
-/** The window's permanent size = the largest mode. Keep in sync with
- * tauri.conf.json width/height (the window must be BORN at this size —
- * matching them means the launch dock is pure positioning, no resize, no
- * first-frame artifact). Exported for main.tsx's crash-fallback hit-rect
- * widen — the one consumer outside this file; never duplicate the numbers. */
-export const WINDOW_MAX: [number, number] = MODE_SIZES.expanded;
+// Mode/MODE_SIZES/WINDOW_MAX live in lib/sizes.ts (2026-07-18) — main.tsx's
+// crash-fallback import needed WINDOW_MAX, and a non-component export here
+// would break Fast Refresh for this whole module.
 
 
 /** Fields that change what the React tree shows — position fields excluded,
@@ -1446,6 +1428,15 @@ function App() {
   // seed the next open.
   const popoverRef = useRef<HTMLDivElement>(null);
   const [popMeasuredH, setPopMeasuredH] = useState<number | null>(null);
+  // The open's FIRST footprint command rides the full-cap fallback; the
+  // measured command one commit later shrinks past nothing visible (the band
+  // above a content-sized popover never painted), so that ONE shrink skips
+  // the glide defer below — deferred, the dead band the measurement exists
+  // to remove stayed drag-interactive for DUR[3]+80 after every open. Holds
+  // the mode|overlay context of a just-commanded fallback rect: if either
+  // moved by the time the measurement lands, the shrink is no longer purely
+  // the measurement and takes the normal defer.
+  const popFallbackKey = useRef<string | null>(null);
   useEffect(() => {
     const el = popoverRef.current;
     if (!popoverVisible || !el) {
@@ -1477,6 +1468,9 @@ function App() {
     // to the desktop. Max'd with the popover extent so it never shrinks below it.
     const w1 = overlayOpen ? Math.max(pw, WINDOW_MAX[0]) : pw;
     const h1 = overlayOpen ? Math.max(ph, WINDOW_MAX[1]) : ph;
+    const ctxKey = `${mode}|${overlayOpen}`;
+    const firstMeasure = popMeasuredH !== null && popFallbackKey.current === ctxKey;
+    popFallbackKey.current = popoverVisible && popMeasuredH === null ? ctxKey : null;
     const [cw, ch] = hitCommanded.current ?? [w1, h1];
     const uw = Math.max(w1, cw);
     const uh = Math.max(h1, ch);
@@ -1489,7 +1483,7 @@ function App() {
           hitCommanded.current = [w1, h1];
           commands.setHitSize(w1, h1);
         },
-        reducedMotion ? 0 : DUR[3] + 80,
+        reducedMotion || firstMeasure ? 0 : DUR[3] + 80,
       );
     }
     return () => window.clearTimeout(timer);
