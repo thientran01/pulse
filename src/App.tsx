@@ -68,8 +68,9 @@ const MODE_SIZES: Record<Mode, [number, number]> = {
 /** The window's permanent size = the largest mode. Keep in sync with
  * tauri.conf.json width/height (the window must be BORN at this size —
  * matching them means the launch dock is pure positioning, no resize, no
- * first-frame artifact). */
-const WINDOW_MAX: [number, number] = MODE_SIZES.expanded;
+ * first-frame artifact). Exported for main.tsx's crash-fallback hit-rect
+ * widen — the one consumer outside this file; never duplicate the numbers. */
+export const WINDOW_MAX: [number, number] = MODE_SIZES.expanded;
 
 
 /** Fields that change what the React tree shows — position fields excluded,
@@ -1258,6 +1259,24 @@ function App() {
   // change must announce).
   useEffect(() => onSpotifyJump(armSuppression), []);
   useEffect(() => onSpotifyJumpCancel(clearSuppression), []);
+  // The track-change announcement's AT twin: the visual choreography is all
+  // aria-hidden (the Waveform ladder, the pill title fade), so identity
+  // changes reach a screen reader only through this text. Ref-gated — the
+  // first identity after mount seeds silently (launch is not a change) — and
+  // held by the SAME suppression the visual ladder rides (a play_now jump's
+  // intermediates stay silent; the landing's unsuppressed render announces
+  // once). No parallel suppression machinery: announceSuppressed above IS
+  // the gate.
+  const [announceText, setAnnounceText] = useState("");
+  const announcedKey = useRef<string | null>(null);
+  useEffect(() => {
+    const key = lyricsKeyOf(np);
+    if (!np || !key || key === announcedKey.current || announceSuppressed) return;
+    const first = announcedKey.current === null;
+    announcedKey.current = key;
+    if (first) return;
+    setAnnounceText(np.artist ? `${np.title} — ${np.artist}` : np.title);
+  }, [np, announceSuppressed]);
 
   // Which work-area corner the window docks to (dock.rs owns the derivation;
   // bottom-right until it reports). ModeContent pins the content plane there.
@@ -1411,12 +1430,42 @@ function App() {
   const hitCommanded = useRef<[number, number] | null>(null);
   // The popover extends the interactive footprint past the mode box — the
   // hit rect must union it while open or its clicks fall through to the
-  // desktop (the worst failure class in this app). Height derived from the
-  // real 440px window: shell inset (6) + gap (12) + popover + inset (6).
+  // desktop (the worst failure class in this app).
   const popoverVisible = queueOpen && mode !== "expanded" && !nothing;
+  // The popover CONTENT-sizes under its max-height cap (a 2-row list ends
+  // far short of the pill's 330 cap), so the union must use its REAL box:
+  // a full-cap union put the dead band above a short popover inside the hit
+  // rect, and the root mousedown there (which excludes only
+  // button/[role=slider]) started a native window drag from what looked
+  // like bare desktop. Measured off the wrapper via ResizeObserver — live as
+  // rows load/collapse, and through the mode glide's max-height ride. null
+  // until the first measurement lands: the union falls back to the full-cap
+  // formula then, because the hit rect must NEVER be narrower than anything
+  // visible (one over-tall frame is invisible; a hole over a visible surface
+  // is the failure class above). Cleared on close so a stale height can't
+  // seed the next open.
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const [popMeasuredH, setPopMeasuredH] = useState<number | null>(null);
+  useEffect(() => {
+    const el = popoverRef.current;
+    if (!popoverVisible || !el) {
+      setPopMeasuredH(null);
+      return;
+    }
+    // offsetHeight: border-box, integral CSS px — the same logical-px space
+    // set_hit_size speaks.
+    const measure = () => setPopMeasuredH(el.offsetHeight);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [popoverVisible]);
   useEffect(() => {
     const [mw, mh] = MODE_SIZES[mode];
-    const popH = Math.min(330, WINDOW_MAX[1] - mh - POPOVER_GAP);
+    // Measured real height once known, else the max-height cap it renders
+    // under (a FULL popover measures exactly that cap, so the full-list
+    // numbers are unchanged: pill 318×384, card's 296 band).
+    const popH = popMeasuredH ?? Math.min(330, WINDOW_MAX[1] - mh - POPOVER_GAP);
     // Popover extent from the docked corner: the 6px near-side inset + its
     // box (NOT the full 12px both-sides gutter — a fatter rect would let the
     // widget capture a 6px band of desktop past the popover's far edge).
@@ -1444,7 +1493,7 @@ function App() {
       );
     }
     return () => window.clearTimeout(timer);
-  }, [mode, reducedMotion, popoverVisible, overlayOpen]);
+  }, [mode, reducedMotion, popoverVisible, popMeasuredH, overlayOpen]);
 
   const morph = {
     // Opacity ONLY — no scale. The shell's size glide is the mode swap's
@@ -1740,9 +1789,11 @@ function App() {
           deferred (always mounted — the scroll position and history feed
           survive closing). Max height re-derived from the REAL 440px window
           (prototype frame was 520): pill 330, card 296. While open, the hit
-          rect unions this box (see the footprint effect above). */}
+          rect unions this box's MEASURED height (the footprint effect above
+          holds the ref — content-sized, not the cap). */}
       {!nothing && (
         <div
+          ref={popoverRef}
           inert={!popoverVisible}
           onMouseDown={(e) => e.stopPropagation()}
           className={`absolute z-30 flex flex-col rounded-xl border border-border/10 bg-surface p-1.5 shadow-xl shadow-black/40 ${
@@ -1812,6 +1863,13 @@ function App() {
           onClose={() => setMenu(null)}
         />
       )}
+      {/* The AT announcement region — OUTSIDE the mode-keyed swap so a mode
+          change never remounts (and re-fires) it; sr-only, so nothing
+          paints. Content set only on a real, unsuppressed identity change
+          (the effect above). */}
+      <span className="sr-only" aria-live="polite">
+        {announceText}
+      </span>
       {/* Broken-art detector — OUTSIDE the mode-keyed subtree so the data URL
           isn't re-decoded on every mode switch, only per track. */}
       {artUrl && artUrl !== brokenArtUrl && (

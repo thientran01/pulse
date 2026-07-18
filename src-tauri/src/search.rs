@@ -31,8 +31,8 @@ pub const LABEL: &str = "search";
 /// rows (4 history + 3 discovery) + 2 section headers, no clipped 7th row
 /// (Thien's live call, 2026-07-16); measured chrome: 24 gutter + 2 border
 /// + 60 search row + 12 list padding + 2×31 headers + 7×52 rows + 30 note
-/// = 554. Search results (8×52 = 416 + 12) fit inside the same 438px list
-/// budget. Re-derive if Search.tsx row/header/chrome sizes change.
+///   = 554. Search results (8×52 = 416 + 12) fit inside the same 438px list
+///   budget. Re-derive if Search.tsx row/header/chrome sizes change.
 const W: f64 = 680.0;
 const H: f64 = 554.0;
 

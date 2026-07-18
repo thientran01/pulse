@@ -670,7 +670,10 @@ mod tests {
                 s.pid, s.exe, s.active, s.aumid
             );
         }
-        if !sessions.iter().any(|s| s.active && s.pid != 0 && s.pid != me) {
+        if !sessions
+            .iter()
+            .any(|s| s.active && s.pid != 0 && s.pid != me)
+        {
             eprintln!(
                 "probe: NO ACTIVE non-self render session on the default endpoint. If the app is playing + audible, its audio is NOT on this endpoint's SHARED mix — WASAPI exclusive-mode (bit-perfect) or a DIFFERENT output device. Neither process nor device loopback can capture that."
             );
@@ -678,11 +681,7 @@ mod tests {
 
         // What Palette's AUMID join resolves to today (the current behavior).
         match resolve_target(&aumid) {
-            Some(t) => eprintln!(
-                "probe: AUMID join → pid={} exe={:?}",
-                t.pid,
-                pid_exe(t.pid)
-            ),
+            Some(t) => eprintln!("probe: AUMID join → pid={} exe={:?}", t.pid, pid_exe(t.pid)),
             None => eprintln!("probe: AUMID join → NO MATCH (rides the device-mix fallback)"),
         }
 
@@ -695,7 +694,10 @@ mod tests {
         // NO loopback can see it.
         eprintln!("probe: direct process-capture of each ACTIVE session (2s each):");
         let mut any_real = false;
-        for s in sessions.iter().filter(|s| s.active && s.pid != 0 && s.pid != me) {
+        for s in sessions
+            .iter()
+            .filter(|s| s.active && s.pid != 0 && s.pid != me)
+        {
             match capture_pid_rms(s.pid, 2) {
                 Some((packets, rms)) => {
                     let real = rms > SILENCE_EPS;

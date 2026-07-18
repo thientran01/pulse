@@ -43,7 +43,10 @@ const STALE_PAIR_MS = 30_000;
  * from the target a sample may land while still confirming it. The grace must
  * outlive a full Spotify push cycle (~5s) — a pre-seek pair can be re-pushed
  * that late, and adopting one snaps the UI back by the whole seek distance.
- * A genuinely failed seek (rare; can_seek-gated) corrects once, at expiry. */
+ * A genuinely failed seek (rare; can_seek-gated) corrects once, at expiry.
+ * The confirm distance alone can't cover seeks SHORTER than it — a straggler
+ * then lands inside the confirm radius; the seekFrom guard in ingest tells
+ * those apart by where the sample sits, not how far it is from the target. */
 const SEEK_GRACE_MS = 6000;
 const SEEK_CONFIRM_MS = 2000;
 
@@ -66,6 +69,10 @@ let anchorAt = 0;
 let lastSeq = 0;
 let seekTarget: number | null = null;
 let seekGraceUntil = 0;
+/** The shown position when seekTo ran + its performance.now() stamp — the
+ * pre-seek clock's anchor, projected forward by ingest's straggler guard. */
+let seekFrom = 0;
+let seekFromAt = 0;
 const subs = new Set<() => void>();
 
 function notify(): void {
@@ -162,6 +169,36 @@ export function ingest(np: NowPlaying): boolean {
       notify();
       return true;
     }
+    // SMALL seeks (distance under SEEK_CONFIRM_MS) have a hole the test
+    // above can't see: a re-pushed PRE-seek pair lands within the confirm
+    // radius of the target, "confirms" the seek, and the band rule below
+    // then adopts the pre-seek position — display and lyric highlight flash
+    // backward, then forward on the next real push (reachable from lyric
+    // click-to-seek on Spotify for jumps between the band and ~2s; re-pushes
+    // carry fresh seqs, so the seq gate can't help). Tell straggler from
+    // confirmation by WHERE the sample sits: the pre-seek clock's span runs
+    // from seekFrom (a re-stamped straggler projects back onto it) to its
+    // playing projection at now (an old-stamp straggler's staleness
+    // projection lands there). A sample within a band of that span and
+    // beyond a band of the target is a straggler — hold, KEEP the seek
+    // armed, and let the genuine pair (or grace expiry, for a genuinely
+    // failed seek) resolve it. Seeks within one band of seekFrom are
+    // ambiguous by construction and keep the plain confirm-or-expire path.
+    if (inGrace && usable) {
+      const band = JITTER_BAND_MS[np.player];
+      if (Math.abs(seekTarget - seekFrom) > band) {
+        const ghost = seekFrom + (playing ? performance.now() - seekFromAt : 0);
+        if (
+          projected >= seekFrom - band &&
+          projected <= ghost + band &&
+          Math.abs(projected - seekTarget) > band
+        ) {
+          rebase(shown);
+          notify();
+          return true;
+        }
+      }
+    }
     seekTarget = null; // confirmed, or grace expired — normal rules resume
   }
 
@@ -211,6 +248,11 @@ export function ingest(np: NowPlaying): boolean {
 export function seekTo(targetMs: number): number | null {
   if (!canSeek) return null;
   const target = Math.min(Math.max(targetMs, 0), durationMs || Infinity);
+  // Where the clock WAS is as load-bearing as where it's going: ingest's
+  // straggler guard needs the pre-seek anchor to recognize a re-pushed
+  // pre-seek pair that lands inside the confirm radius of a small seek.
+  seekFrom = now();
+  seekFromAt = performance.now();
   rebase(target);
   seekTarget = target;
   seekGraceUntil = performance.now() + SEEK_GRACE_MS;

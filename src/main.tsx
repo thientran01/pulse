@@ -1,7 +1,8 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import App from "./App";
+import App, { WINDOW_MAX } from "./App";
 import ErrorBoundary from "./ErrorBoundary";
+import { commands } from "./lib/backend";
 import "./index.css";
 
 // Make silent failures observable. Fire-and-forget backend calls (void
@@ -16,6 +17,17 @@ window.addEventListener("unhandledrejection", (event) => {
 });
 
 const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
+
+// The MAIN window's crash hook — the sanctioned exception to the boundary's
+// no-backend-calls rule (see ErrorBoundary's header): on a render crash the
+// fallback paints full-window, but Rust still holds the crashed mode's hit
+// rect (pill 300×48 / card 380×132 — dock.rs makes everything outside it
+// click-through), so the centered Reload button sits click-through in every
+// mode but expanded and clicks land on the desktop. Widen the rect to the
+// full window BEFORE the fallback needs clicks. Fire-and-forget (setHitSize
+// is already void-invoke; a no-op in the browser mock); other windows are
+// fully interactive and keep the no-op default.
+const widenHitToWindow = () => commands.setHitSize(WINDOW_MAX[0], WINDOW_MAX[1]);
 
 // Window routing: each webview window carries its identity in the builder
 // URL's query (?window=search — see src-tauri/src/search.rs), and the same
@@ -38,10 +50,11 @@ if (import.meta.env.DEV && params.has("lab")) {
       );
     })
     .catch(() => {
-      // Failed lab chunk load must not strand a blank page.
+      // Failed lab chunk load must not strand a blank page. Main-window App
+      // instance, so it carries the crash hook like the default branch.
       root.render(
         <React.StrictMode>
-          <ErrorBoundary>
+          <ErrorBoundary onCrash={widenHitToWindow}>
             <App />
           </ErrorBoundary>
         </React.StrictMode>,
@@ -96,7 +109,7 @@ if (import.meta.env.DEV && params.has("lab")) {
 } else {
   root.render(
     <React.StrictMode>
-      <ErrorBoundary>
+      <ErrorBoundary onCrash={widenHitToWindow}>
         <App />
       </ErrorBoundary>
     </React.StrictMode>,

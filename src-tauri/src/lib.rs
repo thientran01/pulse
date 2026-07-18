@@ -256,6 +256,31 @@ async fn reset_hotkeys(app: AppHandle) -> Vec<HotkeyInfo> {
     hotkey_snapshot(&app)
 }
 
+/// Suspend (true) / resume (false) the global shortcuts around the prefs
+/// hotkey capture. While capture listens, a registered chord never reaches
+/// the prefs webview — RegisterHotKey swallows it system-wide — so pressing
+/// a BOUND Palette chord during capture fired its action instead (Ctrl+Alt+S
+/// summoned Search over the prefs window, whose blur then cancelled the
+/// capture) and the UI's registered-duplicate conflict branch was
+/// unreachable. Suspend uses the same per-shortcut unregister loop
+/// register_all opens with — NEVER unregister_all (the cross-thread deadlock
+/// documented there) — and never holds HotkeyState across a gs call
+/// (hotkey_snapshot clones out of the lock). HotkeyState itself is left
+/// intact so resume's register_all resolves the same table. Idempotent both
+/// ways: a re-suspend unregisters already-gone chords (errors ignored), and
+/// a resume after commit's own register_all just rebuilds the same set.
+#[tauri::command]
+async fn set_hotkeys_capture(app: AppHandle, active: bool) {
+    if active {
+        let gs = app.global_shortcut();
+        for prev in hotkey_snapshot(&app) {
+            let _ = gs.unregister(prev.chord.as_str());
+        }
+    } else {
+        register_all(&app);
+    }
+}
+
 // Every command that touches GSMTC (or the network) is `async` — NOT for
 // concurrency, but to move it OFF the main thread. Tauri runs sync commands
 // on the webview IPC (main/STA) thread, where WinRT's blocking `.get()` can
@@ -1073,6 +1098,7 @@ pub fn run() {
             prefs::open_repo,
             rebind_hotkey,
             reset_hotkeys,
+            set_hotkeys_capture,
             set_start_at_login,
             set_hide_on_fullscreen,
             check_for_updates,
