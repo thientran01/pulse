@@ -164,11 +164,33 @@ fn resolve_chord(app: &AppHandle, id: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
+/// Serializes every registration mutation — register_all and the capture
+/// suspend loop. Unserialized, two in-flight register_alls interleave per
+/// main-thread hop (each per-shortcut call is its own hop), and the commit
+/// path provably runs two: commitRebind's rebind_hotkey and the capture
+/// cleanup's resume are separate un-awaited invokes, each a tokio task. The
+/// interleavings are all bad — the loser of a duplicate on_shortcut records
+/// a working row as registered=false, and a resume whose resolve_chord reads
+/// pre-write settings registers the OLD chord as a ghost the winning table
+/// doesn't know, so no future register_all ever unregisters it. Hotkey
+/// DISPATCH never takes this lock, so the unregister_all deadlock documented
+/// below doesn't apply — but a MAIN-THREAD caller must never wait on it
+/// while a worker holds it (the worker's per-shortcut hops need the main
+/// thread free): setup's call is safe (the event loop isn't serving
+/// commands yet, nothing can hold the lock), and the prefs-Destroyed resume
+/// spawns off-main for exactly this reason.
+static REG_LOCK: Mutex<()> = Mutex::new(());
+
 /// Unregister everything and register the resolved chords fresh — the ONE
-/// registration path (setup, a rebind, a reset). Records each shortcut's
-/// OS-registration result into HotkeyState and emits "hotkeys-changed" so an
-/// open prefs window reflects the new table (and any registration failure).
+/// registration path (setup, a rebind, a reset, the capture resume, the
+/// prefs-Destroyed backstop), serialized under REG_LOCK. Records each
+/// shortcut's OS-registration result into HotkeyState and emits
+/// "hotkeys-changed" so an open prefs window reflects the new table (and any
+/// registration failure).
 pub(crate) fn register_all(app: &AppHandle) {
+    let _reg = REG_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let gs = app.global_shortcut();
     // Unregister the PREVIOUS set one-by-one — deliberately NOT
     // gs.unregister_all(). In tauri-plugin-global-shortcut 2.3.2,
@@ -254,6 +276,37 @@ async fn reset_hotkeys(app: AppHandle) -> Vec<HotkeyInfo> {
     );
     register_all(&app);
     hotkey_snapshot(&app)
+}
+
+/// Suspend (true) / resume (false) the global shortcuts around the prefs
+/// hotkey capture. While capture listens, a registered chord never reaches
+/// the prefs webview — RegisterHotKey swallows it system-wide — so pressing
+/// a BOUND Palette chord during capture fired its action instead (Ctrl+Alt+S
+/// summoned Search over the prefs window, whose blur then cancelled the
+/// capture) and the UI's registered-duplicate conflict branch was
+/// unreachable. Suspend uses the same per-shortcut unregister loop
+/// register_all opens with — NEVER unregister_all (the cross-thread deadlock
+/// documented there) — and never holds HotkeyState across a gs call
+/// (hotkey_snapshot clones out of the lock). HotkeyState itself is left
+/// intact so resume's register_all resolves the same table. Idempotent both
+/// ways: a re-suspend unregisters already-gone chords (errors ignored), and
+/// a resume after commit's own register_all just rebuilds the same set —
+/// idempotence that holds CONCURRENTLY too, because both the suspend loop
+/// and register_all serialize under REG_LOCK (an in-flight resume finishing
+/// second would otherwise re-register chords INTO the capture).
+#[tauri::command]
+async fn set_hotkeys_capture(app: AppHandle, active: bool) {
+    if active {
+        let _reg = REG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let gs = app.global_shortcut();
+        for prev in hotkey_snapshot(&app) {
+            let _ = gs.unregister(prev.chord.as_str());
+        }
+    } else {
+        register_all(&app);
+    }
 }
 
 // Every command that touches GSMTC (or the network) is `async` — NOT for
@@ -1136,6 +1189,7 @@ pub fn run() {
             prefs::open_repo,
             rebind_hotkey,
             reset_hotkeys,
+            set_hotkeys_capture,
             set_start_at_login,
             set_hide_on_fullscreen,
             check_for_updates,
@@ -1186,6 +1240,23 @@ pub fn run() {
                     }
                     if window.label() == focus::LABEL {
                         focus::on_destroyed(window.app_handle());
+                    }
+                    // Prefs can die NATIVELY mid-capture — Alt+F4, the
+                    // taskbar Close, a webview crash — teardown paths where
+                    // the capture cleanup's resume invoke never runs (React
+                    // cleanups don't fire on webview destruction), which
+                    // would leave every global shortcut suspended
+                    // system-wide until the next rebind or relaunch. Resume
+                    // unconditionally: register_all is idempotent (a
+                    // no-capture close rebuilds the same table) and
+                    // REG_LOCK-serialized against closePrefs' awaited
+                    // resume. Spawned OFF this main-thread handler —
+                    // register_all blocks on per-shortcut main-thread hops
+                    // and can wait on REG_LOCK, either of which would
+                    // deadlock if run inline here (see REG_LOCK).
+                    if window.label() == prefs::LABEL {
+                        let app = window.app_handle().clone();
+                        tauri::async_runtime::spawn_blocking(move || register_all(&app));
                     }
                 }
                 _ => {}

@@ -19,6 +19,7 @@ import { MorphIcon } from "./icons/MorphIcon";
 import {
   commands,
   onHistoryAppended,
+  onHistoryCleared,
   onSettingsChanged,
   onSpotifyDevice,
   onSpotifyStatus,
@@ -117,7 +118,8 @@ export function useUpNext(): QueueTrack[] {
 
 /** The Earlier feed: seeds a page when first activated, live-prepends
  * finalized listens, and pages backwards on demand. Inert until `active` —
- * a closed queue UI costs nothing. */
+ * a closed queue UI costs nothing. "history-cleared" (prefs' Erase) resets
+ * everything, module caches included, and re-seeds an open panel. */
 export function useHistoryFeed(active: boolean): {
   entries: HistoryEntry[];
   loadMore: () => void;
@@ -125,8 +127,19 @@ export function useHistoryFeed(active: boolean): {
 } {
   const [entries, setEntries] = useState<HistoryEntry[]>([]);
   const [exhausted, setExhausted] = useState(false);
+  // Bumped by the history-cleared reset below so an OPEN panel re-seeds —
+  // the seed effect otherwise only fires on activation edges.
+  const [seedTick, setSeedTick] = useState(0);
   const seeded = useRef(false);
   const loading = useRef(false);
+  // Generation stamp for in-flight page reads: the history-cleared reset
+  // must beat any promise fired BEFORE it — a pre-wipe page resolving after
+  // the reset would re-adopt the erased rows onto the emptied list (the
+  // seed merge sees cur=[] and takes the page wholesale) and its short
+  // length would re-latch exhausted, exactly the stale state the reset
+  // exists to prevent. Every fetch captures the stamp; the clear handler
+  // bumps it; a resolution whose stamp went stale drops on the floor.
+  const gen = useRef(0);
   // Updater functions must stay PURE (StrictMode double-invokes them — a
   // fetch inside one paged twice and duplicated rows); reads go through a
   // ref instead.
@@ -137,9 +150,11 @@ export function useHistoryFeed(active: boolean): {
   useEffect(() => {
     if (!active || seeded.current) return;
     seeded.current = true;
+    const g = gen.current;
     void commands
       .historyPage(null, HISTORY_PAGE)
       .then((page) => {
+        if (g !== gen.current) return; // cleared mid-flight — pre-wipe rows
         // A live append can land while the seed is in flight — merge, don't
         // clobber (the page includes it too; dedupe).
         setEntries((cur) =>
@@ -148,11 +163,12 @@ export function useHistoryFeed(active: boolean): {
         if (page.length < HISTORY_PAGE) setExhausted(true);
       })
       .catch(() => {
+        if (g !== gen.current) return; // the clear already re-virgined the latch
         // Release the latch so a failed seed retries on the next activation
         // (the panel stays mounted, so nothing else resets it).
         seeded.current = false;
       });
-  }, [active]);
+  }, [active, seedTick]);
   useEffect(
     () =>
       onHistoryAppended((e) => {
@@ -161,13 +177,40 @@ export function useHistoryFeed(active: boolean): {
       }),
     [],
   );
+  useEffect(
+    () =>
+      onHistoryCleared(() => {
+        // Prefs' "Erase history" wiped the backend log (its own window — this
+        // one keeps running): every latch here now describes rows that no
+        // longer exist, and un-reset they showed the erased feed until
+        // relaunch with the cursor latched exhausted. Back to the virgin
+        // state; the seedTick bump re-seeds an OPEN panel immediately (it
+        // reads the now-empty log, latches exhausted honestly, and live
+        // appends flow again) — a closed one re-seeds on next activation.
+        // The module caches go with the log: the thumb files were deleted
+        // from disk (a cached data URL would keep showing art the user asked
+        // to erase), and the uri cache is a per-entry sidecar for entries
+        // that are gone.
+        seeded.current = false;
+        loading.current = false;
+        gen.current += 1; // strand any in-flight page read on the old stamp
+        setEntries([]);
+        setExhausted(false);
+        thumbCache.clear();
+        uriCache.clear();
+        setSeedTick((t) => t + 1);
+      }),
+    [],
+  );
   const loadMore = useCallback(() => {
     if (loading.current || exhausted) return;
     loading.current = true;
+    const g = gen.current;
     const oldest = entriesRef.current[entriesRef.current.length - 1];
     void commands
       .historyPage(oldest ? oldest.started_at_ms : null, HISTORY_PAGE)
       .then((page) => {
+        if (g !== gen.current) return; // cleared mid-flight — pre-wipe rows
         loading.current = false;
         if (page.length < HISTORY_PAGE) setExhausted(true);
         if (page.length > 0) {
@@ -175,6 +218,7 @@ export function useHistoryFeed(active: boolean): {
         }
       })
       .catch(() => {
+        if (g !== gen.current) return; // the clear already dropped the latch
         // Release the latch so a transient history_page failure doesn't jam
         // pagination for the rest of the session.
         loading.current = false;

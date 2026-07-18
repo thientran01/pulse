@@ -328,8 +328,10 @@ export function onUpNextChanged(cb: (list: QueueTrack[]) => void): () => void {
   };
 }
 
-/** Fires when play history is wiped (prefs Data → Clear play history). Live
- * feed surfaces (queue/search) reset on it. Mock: never fires. */
+/** Fires when play history is wiped (prefs Data → Clear play history). The
+ * queue's Earlier feed resets on it (useHistoryFeed — entries, paging
+ * latches, and the module thumb/uri caches); Search doesn't subscribe — it
+ * recomputes its resurfacing rows on every summon. Mock: never fires. */
 export function onHistoryCleared(cb: () => void): () => void {
   if (!IN_TAURI) return () => {};
   const un = listen("history-cleared", () => cb());
@@ -1137,6 +1139,16 @@ export const commands = {
       return snap;
     }
     return invoke<HotkeyInfo[]>("rebind_hotkey", { id, chord });
+  },
+  /** Suspend (true) / resume (false) the global shortcuts while the prefs
+   * hotkey capture listens: registered chords are swallowed system-wide by
+   * RegisterHotKey, so an un-suspended capture can never SEE a bound chord —
+   * pressing one fired its action instead (Ctrl+Alt+S summoned Search over
+   * the prefs window). Awaitable so capture starts only after the OS truly
+   * released the chords; idempotent both directions. Mock: no OS registry —
+   * every chord already reaches the page. */
+  async setHotkeysCapture(active: boolean): Promise<void> {
+    if (IN_TAURI) await invoke("set_hotkeys_capture", { active });
   },
   /** Clear all overrides + re-register defaults. Returns the fresh table. */
   async resetHotkeys(): Promise<HotkeyInfo[]> {

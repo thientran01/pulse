@@ -34,6 +34,9 @@ jobs:
 
       - run: npm run build
 
+      # Frontend unit tests (vitest — the posClock kernel net).
+      - run: npm test
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

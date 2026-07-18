@@ -198,6 +198,22 @@ export default function Focus() {
   const announceSuppressed = isAnnounceSuppressed(np);
   useEffect(() => onSpotifyJump(armSuppression), []);
   useEffect(() => onSpotifyJumpCancel(clearSuppression), []);
+  // The AT twin of the horizon's announcement (App.tsx's wiring, own realm —
+  // each webview owns its live regions): the room's choreography is all
+  // aria-hidden, so identity changes reach AT only through this text.
+  // Ref-gated (the first identity after open seeds silently — the takeover
+  // opened ON this track) and held by the same suppression the horizon
+  // rides; the jump landing announces once.
+  const [announceText, setAnnounceText] = useState("");
+  const announcedKey = useRef<string | null>(null);
+  useEffect(() => {
+    const key = lyricsKeyOf(np);
+    if (!np || !key || key === announcedKey.current || announceSuppressed) return;
+    const first = announcedKey.current === null;
+    announcedKey.current = key;
+    if (first) return;
+    setAnnounceText(np.artist ? `${np.title} — ${np.artist}` : np.title);
+  }, [np, announceSuppressed]);
   // The room's queue/history surface — same QueuePanel at room scale, this
   // realm's own open bit (the widget's queueOpen is another window's state).
   // Closed when no session, like the widget (the toggle that opens it is
@@ -327,6 +343,13 @@ export default function Focus() {
           <MorphIcon name="contract" size={15} dur={DUR[3]} ease={EASE.inOut} />
         </button>
       </div>
+
+      {/* The AT announcement region — outside the upper-room swap (like the
+          horizon) so track changes never remount it; sr-only, content set
+          only on a real, unsuppressed identity change. */}
+      <span className="sr-only" aria-live="polite">
+        {announceText}
+      </span>
 
       {nothing ? (
         <div className="grid h-full w-full place-items-center">

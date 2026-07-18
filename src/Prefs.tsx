@@ -17,10 +17,14 @@
  *
  * Hotkey capture reproduces the handoff's state machine: click a chord → the
  * row goes "listening" (accent ring) → modifiers collect live → a non-modifier
- * key WITH ≥1 modifier forms + auto-commits (persist + live re-register +
- * toast); no modifier → "Add a modifier"; a duplicate blocks and names the
- * clashing action; Esc/blur cancels. A chord that the OS rejects registers as
- * a persistent per-row "not registered" note.
+ * key WITH ≥1 NON-SHIFT modifier forms + auto-commits (persist + live
+ * re-register + toast); no modifier, or shift alone → "Add a modifier"; a
+ * duplicate blocks and names the clashing action; Esc/blur cancels. A chord
+ * that the OS rejects registers as a persistent per-row "not registered" note.
+ * The global shortcuts are SUSPENDED for the capture's duration
+ * (set_hotkeys_capture) — RegisterHotKey swallows registered chords
+ * system-wide, so without the suspension a bound chord fired its action
+ * instead of ever reaching the listener; every exit path resumes them.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -497,8 +501,12 @@ export default function Prefs() {
       }
       const main = mainKeyToken(e);
       if (!main) return; // unsupported key — keep listening
-      if (mods.length === 0) {
-        setCapture({ ...cap, live: [main], conflict: null, needMod: true });
+      // ≥1 NON-shift modifier required: shift+letter is just typing a capital
+      // — shift+s registers fine and then swallows every capital S
+      // system-wide — so a shift-only chord routes to the same "add a
+      // modifier" note as a bare key.
+      if (!mods.some((m) => m !== "shift")) {
+        setCapture({ ...cap, live: [...mods, main], conflict: null, needMod: true });
         return;
       }
       const chord = [...mods, main].join("+");
@@ -515,6 +523,10 @@ export default function Prefs() {
   onKeyRef.current = onKey;
 
   const capturing = capture !== null;
+  // The row that entered capture — focus returns to its chord button on exit.
+  // Entering capture unmounts the focused button (the listening chip replaces
+  // it), which otherwise drops focus to <body> and strands keyboard users.
+  const captureReturnId = useRef<string | null>(null);
   useEffect(() => {
     if (!capturing) return;
     const kd = (e: KeyboardEvent) => onKeyRef.current(e);
@@ -524,6 +536,19 @@ export default function Prefs() {
     return () => {
       window.removeEventListener("keydown", kd, true);
       window.removeEventListener("blur", blur);
+      // EVERY capture exit funnels through this cleanup — commit, Esc, the
+      // esc chip, window blur, reset, unmount mid-capture: resume the
+      // suspended global shortcuts and restore focus. On a commit/reset this
+      // resume runs CONCURRENTLY with rebind_hotkey/reset_hotkeys (separate
+      // un-awaited invokes, separate tokio tasks) — safe only because the
+      // backend serializes registration (lib.rs REG_LOCK): serialized, every
+      // order lands the fresh table; unserialized, the interleaved loops
+      // could register a ghost of the old chord. The button is re-queried by
+      // id, not a stashed element — the exit remounted it, and a detached
+      // element's focus() is a silent no-op.
+      void commands.setHotkeysCapture(false);
+      const id = captureReturnId.current;
+      if (id) document.querySelector<HTMLElement>(`[data-chord-btn="${id}"]`)?.focus();
     };
   }, [capturing]);
 
@@ -549,8 +574,16 @@ export default function Prefs() {
       lastfmPending.current = null;
     }, 400);
   };
-  const closePrefs = () => {
+  const closePrefs = async () => {
     flushLastfm();
+    // The × can land mid-capture, and close DESTROYS this webview — the
+    // capture effect's cleanup invoke would race the teardown and could
+    // lose. Await the resume so register_all provably ran first (the
+    // cleanup's own resume then double-fires harmlessly — serialized by
+    // REG_LOCK). Belt: the Rust Destroyed handler also resumes on ANY prefs
+    // teardown (Alt+F4, taskbar Close, a crash — paths no JS here can
+    // catch), so a lost invoke can no longer strand the shortcuts.
+    if (captureRef.current) await commands.setHotkeysCapture(false).catch(() => {});
     commands.closePrefs();
   };
   const testKey = async () => {
@@ -744,7 +777,7 @@ export default function Prefs() {
                 listening && capture.conflict
                   ? `Already used by ${capture.conflict} — press a different combination.`
                   : listening && capture.needMod
-                    ? "Add a modifier like Ctrl or Alt."
+                    ? "Add a modifier like Ctrl or Alt — Shift alone isn't enough."
                     : null;
               const showNote = !listening && !h.registered;
               return (
@@ -769,7 +802,11 @@ export default function Prefs() {
                     </div>
                     {listening ? (
                       // Accent spot #2 of 2: the live capture ring.
+                      // role="status": the chip's states ("Press keys…", the
+                      // collected caps) announce to AT — capture is otherwise
+                      // a purely visual state machine.
                       <div
+                        role="status"
                         className="prefs-cap-listen inline-flex items-center gap-2 rounded-lg border border-accent/50 bg-accent/[0.06] py-[5px] pl-3 pr-1.5"
                       >
                         {caps.length === 0 ? (
@@ -797,7 +834,22 @@ export default function Prefs() {
                         type="button"
                         aria-label={`Change shortcut for ${h.label}`}
                         title={`Change shortcut for ${h.label}`}
-                        onClick={() => setCapture({ id: h.id, live: [], conflict: null, needMod: false })}
+                        data-chord-btn={h.id}
+                        onClick={async () => {
+                          // Suspend the global shortcuts BEFORE listening:
+                          // RegisterHotKey swallows registered chords
+                          // system-wide, so an un-suspended capture never SEES
+                          // a bound chord — pressing one fired its action
+                          // (Ctrl+Alt+S summoned Search over this window,
+                          // whose blur then cancelled the capture) and the
+                          // duplicate-conflict branch above was unreachable
+                          // for exactly the registered-duplicate case. The
+                          // await orders the OS release ahead of the first
+                          // keydown; the capture-exit cleanup resumes.
+                          captureReturnId.current = h.id;
+                          await commands.setHotkeysCapture(true).catch(() => {});
+                          setCapture({ id: h.id, live: [], conflict: null, needMod: false });
+                        }}
                         className="inline-flex items-center gap-1 rounded-md p-1 [transition:background-color_var(--transition-duration-2)_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/[0.05] active:scale-[0.97]"
                       >
                         {caps.map((c, k) => (
@@ -811,8 +863,11 @@ export default function Prefs() {
                       </button>
                     )}
                   </div>
+                  {/* role="status", same reason as the chip: the clash /
+                      needs-a-modifier verdicts are the capture's answers and
+                      must announce, not just tint. */}
                   {conflict && (
-                    <p className="px-4 pb-2.5 text-[11.5px]" style={{ color: WARN }}>
+                    <p role="status" className="px-4 pb-2.5 text-[11.5px]" style={{ color: WARN }}>
                       {conflict}
                     </p>
                   )}
