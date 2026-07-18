@@ -207,6 +207,19 @@ const SILENCE_AFTER_MS: u64 = 250;
 /// often — the player's audio session often appears a beat after playback
 /// starts, and a missed join at open time shouldn't stick for the session.
 const UPGRADE_RETRY: Duration = Duration::from_secs(5);
+/// Device-fallback stall watchdog: first reopen after this long without a
+/// callback frame — the one-off "default device changed / stream silently
+/// died" case recovers at this latency.
+const STALL_BASE: Duration = Duration::from_secs(2);
+/// A reopen the endpoint answers with ZERO frames is FRUITLESS, and WASAPI
+/// device loopback legitimately delivers no callbacks while nothing renders
+/// locally (GSMTC playing with the audio on a phone/speaker — the DeviceTag
+/// case): reopening can't help, so consecutive fruitless reopens double the
+/// next stall threshold (2s → 4s → 8s …) up to this cap instead of cycling
+/// the device open/close every 2s all session. Any real frame progress, a
+/// target change, or a landed process join resets to STALL_BASE, so genuine
+/// device-swap recovery keeps its first-reopen latency.
+const STALL_CAP: Duration = Duration::from_secs(60);
 /// A process capture that has NEVER delivered a packet WITH SIGNAL this long
 /// into playback either joined the wrong process (multi-profile browsers can
 /// alias an AUMID) or joined a session that only renders SILENCE while the
@@ -265,6 +278,16 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
         let frames = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let mut last_frames = 0u64;
         let mut last_progress = std::time::Instant::now();
+        // Fruitless-reopen backoff (see STALL_CAP) + one-warn-per-episode
+        // gates: a silent endpoint otherwise wrote the stall warn AND the
+        // no-join warn every ~2s cycle (~3.6k lines/hour). An "episode" ends
+        // when frames progress, the target AUMID moves, or a process-scoped
+        // join lands — each resets all three so the next episode warns once
+        // again at Warn level and starts at the base first-reopen latency.
+        let mut stall_threshold = STALL_BASE;
+        let mut stall_warned = false;
+        let mut fallback_warned = false;
+        let mut stall_target = String::new();
 
         loop {
             let want = switch.load(Ordering::Relaxed);
@@ -284,6 +307,17 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                 if demoted.as_deref().is_some_and(|d| d != aumid) {
                     demoted = None;
                 }
+                if aumid != stall_target {
+                    // A fresh target opening = a fresh episode: base stall
+                    // latency, warns re-armed. (The Device arm's identical
+                    // reset covers a target that moves mid-capture; this one
+                    // covers an episode that STARTS here — it must not
+                    // inherit the previous target's backoff.)
+                    stall_target = aumid.clone();
+                    stall_threshold = STALL_BASE;
+                    stall_warned = false;
+                    fallback_warned = false;
+                }
                 let process = if aumid.is_empty() || demoted.is_some() {
                     None
                 } else {
@@ -293,12 +327,30 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                 };
                 if let Some(cap) = process {
                     let rate = cap.sample_rate;
+                    // A landed join ends any stall episode: the Device-arm
+                    // resets can't run while a Process capture holds the
+                    // slot, so without this a later same-AUMID fall back to
+                    // Device inherits a capped threshold + pre-suppressed
+                    // warns from BEFORE the interlude.
+                    stall_threshold = STALL_BASE;
+                    stall_warned = false;
+                    fallback_warned = false;
                     active = Some((Capture::Process(cap, aumid), rate, ring));
                 } else if let Some((stream, rate)) = open_loopback(ring.clone(), frames.clone()) {
                     if !aumid.is_empty() {
-                        log::warn!(
-                            "audio: no process-loopback join for {aumid:?} — device-mix fallback"
-                        );
+                        // Warn once per fallback episode: a silent-endpoint
+                        // reopen cycle re-enters here every pass, and each
+                        // cycle re-missing the same join is not news.
+                        if !fallback_warned {
+                            fallback_warned = true;
+                            log::warn!(
+                                "audio: no process-loopback join for {aumid:?} — device-mix fallback"
+                            );
+                        } else {
+                            log::debug!(
+                                "audio: still no process-loopback join for {aumid:?} — device-mix fallback"
+                            );
+                        }
                     }
                     last_upgrade = std::time::Instant::now();
                     active = Some((Capture::Device(stream), rate, ring));
@@ -346,15 +398,44 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                         if now_frames != last_frames {
                             last_frames = now_frames;
                             last_progress = std::time::Instant::now();
+                            // Real packets: the endpoint is audible — restore
+                            // the first-reopen latency and re-arm the
+                            // per-episode warns.
+                            stall_threshold = STALL_BASE;
+                            stall_warned = false;
+                            fallback_warned = false;
                         }
-                        if last_progress.elapsed() > Duration::from_secs(2) {
-                            log::warn!(
-                                "audio loopback stalled — reopening against current default device"
-                            );
+                        let aumid = target_aumid();
+                        if aumid != stall_target {
+                            // Target moved (player change): a fresh endpoint
+                            // deserves the base latency and a fresh warn.
+                            stall_target = aumid.clone();
+                            stall_threshold = STALL_BASE;
+                            stall_warned = false;
+                            fallback_warned = false;
+                        }
+                        if last_progress.elapsed() > stall_threshold {
+                            // Fire the reopen and pre-double the next wait:
+                            // a reopen that delivers frames resets to base
+                            // above, so only a FRUITLESS one (silent
+                            // endpoint) keeps the doubled threshold — the
+                            // cadence decays 2s→4s→…→cap instead of
+                            // churning.
+                            stall_threshold = (stall_threshold * 2).min(STALL_CAP);
+                            if !stall_warned {
+                                stall_warned = true;
+                                log::warn!(
+                                    "audio loopback stalled — reopening against current default device"
+                                );
+                            } else {
+                                log::debug!(
+                                    "audio loopback still silent — reopen backoff now {}s",
+                                    stall_threshold.as_secs()
+                                );
+                            }
                             Act::Reopen
                         } else if last_upgrade.elapsed() > UPGRADE_RETRY {
                             last_upgrade = std::time::Instant::now();
-                            let aumid = target_aumid();
                             if aumid.is_empty() || demoted.as_deref() == Some(&aumid) {
                                 Act::Keep
                             } else {
@@ -396,6 +477,13 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                                     active = Some((Capture::Process(cap, aumid), rate, ring));
                                     last_frames = frames.load(Ordering::Relaxed);
                                     last_progress = std::time::Instant::now();
+                                    // Same episode-end as the open-branch
+                                    // join: the upgrade proves the target
+                                    // deliverable, so a later Device
+                                    // fallback is a NEW episode.
+                                    stall_threshold = STALL_BASE;
+                                    stall_warned = false;
+                                    fallback_warned = false;
                                 } else {
                                     log::warn!("audio: process activation failed for {aumid:?} — staying on device mix");
                                     demoted = Some(aumid);
