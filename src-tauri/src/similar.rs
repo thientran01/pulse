@@ -52,13 +52,20 @@ static DISCOVERY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// genre discovery, not artist radio), then same-artist backfill only when the
 /// different-artist pool runs dry. Below-floor different-artist entries are the
 /// mush tail — dropped entirely.
-fn ordered<'a>(seed_artist: &str, similars: &'a [lastfm::SimilarTrack]) -> Vec<&'a lastfm::SimilarTrack> {
+fn ordered<'a>(
+    seed_artist: &str,
+    similars: &'a [lastfm::SimilarTrack],
+) -> Vec<&'a lastfm::SimilarTrack> {
     let seed = seed_artist.trim().to_lowercase();
     let same = |s: &lastfm::SimilarTrack| s.artist.trim().to_lowercase() == seed;
     similars
         .iter()
         .filter(|s| s.score >= MATCH_FLOOR && !same(s))
-        .chain(similars.iter().filter(|s| s.score >= MATCH_FLOOR && same(s)))
+        .chain(
+            similars
+                .iter()
+                .filter(|s| s.score >= MATCH_FLOOR && same(s)),
+        )
         .collect()
 }
 
@@ -186,7 +193,11 @@ pub struct DiscoveryResult {
 /// | "offline" (transport/5xx) | "no_data" (every seed dry) | "busy". Blocking
 /// (Last.fm + Spotify hops) on the dedicated pool.
 #[tauri::command]
-pub async fn discovery_picks(app: AppHandle, seeds: Vec<Seed>, exclude: Vec<String>) -> DiscoveryResult {
+pub async fn discovery_picks(
+    app: AppHandle,
+    seeds: Vec<Seed>,
+    exclude: Vec<String>,
+) -> DiscoveryResult {
     tauri::async_runtime::spawn_blocking(move || run_discovery(&app, seeds, exclude))
         .await
         .unwrap_or_else(|e| {

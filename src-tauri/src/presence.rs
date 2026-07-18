@@ -400,10 +400,21 @@ pub fn spawn(app: AppHandle) {
             {
                 let mut last = presence.last.lock().unwrap_or_else(PoisonError::into_inner);
                 if *last != Some(state) {
+                    // Verdicts only at Info: pulse.log is the support bundle
+                    // (release level = Info), and the foreground exe name
+                    // there would make it a timestamped what-was-fullscreen
+                    // timeline. The identifying detail (exe, rect, quns)
+                    // stays one level down at Debug — dev builds print it
+                    // (their level is Debug), release builds never do; the
+                    // dev overlay's presence-debug stream carries it live
+                    // either way.
                     log::info!(
-                        "presence: fullscreen={} concealed={} (fg={} rect={} quns={})",
+                        "presence: fullscreen={} concealed={}",
                         state.fullscreen,
                         state.concealed,
+                    );
+                    log::debug!(
+                        "presence: fg={} rect={} quns={}",
                         dbg.fg_exe,
                         dbg.rect_verdict,
                         dbg.quns_name
