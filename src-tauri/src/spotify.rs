@@ -10,12 +10,14 @@
 //! tradeoff: the file is user-profile-scoped and holds a refresh token
 //! limited to this app's scopes.
 //!
-//! Token-destruction policy (quick-review hardening, 2026-07-10): tokens are
-//! cleared ONLY on evidence the session itself is dead — a 400-class answer
-//! from the token endpoint (invalid_grant/invalid_client), or a fresh
-//! access token still answering 401. Transport failures, 5xx, and 403s
-//! (which Spotify also serves for non-scope reasons, e.g. Premium-required)
-//! never destroy a session a re-consent couldn't improve.
+//! Token-destruction policy (quick-review hardening, 2026-07-10; narrowed
+//! 2026-07-18): tokens are cleared ONLY on proof the session itself is dead —
+//! the token endpoint answering exactly 400 or 401 (the invalid_grant/
+//! invalid_client class), or a fresh access token still answering 401. Every
+//! other token-endpoint status (403/408/429, 5xx) and every transport failure
+//! takes the hand-back-the-old-token/offline path: none of those is evidence
+//! a re-consent could improve on, and the old blanket 4xx match destroyed a
+//! healthy session on a stray 429.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
@@ -609,9 +611,9 @@ fn exchange_code(code: &str, redirect: &str, verifier: &str) -> Result<Tokens, S
 /// through `refresh_gate`; the state lock is never held across HTTP. On a
 /// refresh that CAN'T run (offline, 5xx) the old token is returned — callers
 /// distinguish "refresh actually happened" by the token changing.
-/// Err = "disconnected" (no/dead session) — 400-class token-endpoint answers
-/// (invalid_grant, invalid_client) clear the session, transient failures
-/// never do.
+/// Err = "disconnected" (no/dead session) — ONLY token-endpoint 400/401
+/// (invalid_grant, invalid_client) clear the session; every other status and
+/// every transient failure never does (module-header policy).
 fn ensure_access(app: &AppHandle) -> Result<String, &'static str> {
     let auth = app.state::<SpotifyAuth>();
     {
@@ -669,18 +671,25 @@ fn ensure_access(app: &AppHandle) -> Result<String, &'static str> {
             save_tokens(&inner);
             Ok(access)
         }
-        // 400-class served answer: the grant itself is dead (revoked,
-        // rotated away, bad client) — only a re-consent heals it. Clearing
-        // here also heals the "stale tokens presented as connected forever"
-        // restart state.
-        Err(e) if e.starts_with("token endpoint 4") => {
+        // 400/401 served answer — the dead-grant PROOF class (invalid_grant,
+        // invalid_client): the grant itself is dead (revoked, rotated away,
+        // bad client) and only a re-consent heals it. Clearing here also
+        // heals the "stale tokens presented as connected forever" restart
+        // state. Exactly these two codes: the old blanket 4xx match also
+        // caught 403/408/429, destroying a healthy session on a stray
+        // rate-limit (token_request formats every non-2xx as
+        // "token endpoint {code}: {body}", and nothing on the token path
+        // honors Retry-After — api_call_impl's 429 arm covers only
+        // api.spotify.com).
+        Err(e) if e.starts_with("token endpoint 400:") || e.starts_with("token endpoint 401:") => {
             log::warn!("spotify refresh rejected: {e}");
             clear_tokens(app);
             emit_status(app);
             Err("disconnected")
         }
-        // Transport failure or 5xx: the session may be fine — hand back the
-        // old token and let the caller treat a repeat 401 as offline.
+        // Everything else — transport failure, 403/408/429, 5xx: the session
+        // may be fine — hand back the old token and let the caller treat a
+        // repeat 401 as offline.
         Err(e) => {
             log::warn!("spotify refresh unavailable: {e}");
             Ok(old_access)

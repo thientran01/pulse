@@ -261,34 +261,65 @@ async fn reset_hotkeys(app: AppHandle) -> Vec<HotkeyInfo> {
 // on the webview IPC (main/STA) thread, where WinRT's blocking `.get()` can
 // never observe its completion (the STA is parked in the wait) — a cold-cache
 // snapshot there deadlocks the whole app. Async commands run on the async
-// runtime's worker pool, where blocking waits complete normally.
+// runtime's worker pool — but that pool is the tokio CORE workers, which
+// blocking work must ALSO leave; off_core below is the second hop.
+
+/// Run a command body's sync GSMTC/WinRT work on the DEDICATED blocking pool
+/// (the defer_main_action discipline), never on the tokio core worker the
+/// async command body lands on. Core workers are a small fixed pool that does
+/// NOT replenish: one wedged `.get()` eats a worker permanently — invisibly,
+/// because the media-loop stage watchdog's telemetry (media set_stage) is
+/// loop-thread-gated and never sees command-path calls — and a few repeated
+/// presses exhaust the pool, silently killing ALL webview IPC while hotkeys
+/// (already on the blocking pool via defer_main_action) keep working.
+/// spawn_blocking threads replenish, so a wedge costs one thread, not the
+/// runtime. JoinError = the closure panicked; degrade to `default` instead of
+/// a dead IPC call — loudly, or a release build swallows the panic invisibly
+/// (the media_lyrics rule).
+async fn off_core<T: Send + 'static>(default: T, f: impl FnOnce() -> T + Send + 'static) -> T {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .unwrap_or_else(|e| {
+            log::error!("command blocking work panicked: {e}");
+            default
+        })
+}
 
 #[tauri::command]
 async fn media_play_pause(app: AppHandle) -> bool {
-    let ok = media::play_pause();
-    emit_now(&app);
-    ok
+    off_core(false, move || {
+        let ok = media::play_pause();
+        emit_now(&app);
+        ok
+    })
+    .await
 }
 
 #[tauri::command]
 async fn media_next(app: AppHandle) -> bool {
-    // Queue-aware: a next pressed in Pulse lands on the up-next front when
-    // there is one (upnext::try_queue_skip) — the mid-song skip is the one
-    // transition the feed-late model missed. Falls through to the plain
-    // GSMTC skip otherwise.
-    if upnext::try_queue_skip(&app) {
-        return true;
-    }
-    let ok = media::next();
-    emit_now(&app);
-    ok
+    off_core(false, move || {
+        // Queue-aware: a next pressed in Pulse lands on the up-next front when
+        // there is one (upnext::try_queue_skip) — the mid-song skip is the one
+        // transition the feed-late model missed. Falls through to the plain
+        // GSMTC skip otherwise.
+        if upnext::try_queue_skip(&app) {
+            return true;
+        }
+        let ok = media::next();
+        emit_now(&app);
+        ok
+    })
+    .await
 }
 
 #[tauri::command]
 async fn media_prev(app: AppHandle) -> bool {
-    let ok = media::prev();
-    emit_now(&app);
-    ok
+    off_core(false, move || {
+        let ok = media::prev();
+        emit_now(&app);
+        ok
+    })
+    .await
 }
 
 // The seek commands deliberately do NOT snapshot afterwards: the player hasn't
@@ -298,12 +329,12 @@ async fn media_prev(app: AppHandle) -> bool {
 
 #[tauri::command]
 async fn media_seek_rel(delta_ms: i64) -> bool {
-    media::seek_rel_ms(delta_ms)
+    off_core(false, move || media::seek_rel_ms(delta_ms)).await
 }
 
 #[tauri::command]
 async fn media_seek_abs(position_ms: i64) -> bool {
-    media::seek_abs_ms(position_ms)
+    off_core(false, move || media::seek_abs_ms(position_ms)).await
 }
 
 /// Per-window frontend votes on audio reactivity (false under OS
@@ -381,28 +412,44 @@ async fn media_art(app: AppHandle, art_id: String) -> Option<String> {
 /// the next real emit.
 #[tauri::command]
 async fn now_playing(app: AppHandle) -> Stamped {
-    let my_seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let np = media::snapshot(&app.state::<ArtCache>());
-    let last = app.state::<LastEmit>();
-    let mut st = last
-        .0
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if my_seq >= st.published_seq {
-        st.published_seq = my_seq;
-        return Stamped {
-            seq: my_seq,
-            now: np,
-        };
-    }
-    // Outrun: a snapshot that STARTED after ours already published. Hand back
-    // the freshest published payload instead; fall back to our own read when
-    // nothing has ever been emitted (only reachable seed-vs-seed, where the
-    // winner's data went to a different webview's clock).
-    Stamped {
-        seq: st.published_seq,
-        now: st.payload.clone().unwrap_or(np),
-    }
+    // The whole claim→snapshot→publish sequence rides off_core as ONE
+    // closure: seq is still claimed immediately before the snapshot with no
+    // lock held across it (the #103 ordering — seq order == snapshot-START
+    // order), just on a blocking-pool thread instead of a core worker. The
+    // JoinError default (seq 0, empty payload) is below every live seq, so
+    // posClock discards it and the seed degrades to "no data", not bad data.
+    off_core(
+        Stamped {
+            seq: 0,
+            now: media::NowPlaying::default(),
+        },
+        move || {
+            let my_seq = SEQ.fetch_add(1, Ordering::Relaxed);
+            let np = media::snapshot(&app.state::<ArtCache>());
+            let last = app.state::<LastEmit>();
+            let mut st = last
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if my_seq >= st.published_seq {
+                st.published_seq = my_seq;
+                return Stamped {
+                    seq: my_seq,
+                    now: np,
+                };
+            }
+            // Outrun: a snapshot that STARTED after ours already published.
+            // Hand back the freshest published payload instead; fall back to
+            // our own read when nothing has ever been emitted (only reachable
+            // seed-vs-seed, where the winner's data went to a different
+            // webview's clock).
+            Stamped {
+                seq: st.published_seq,
+                now: st.payload.clone().unwrap_or(np),
+            }
+        },
+    )
+    .await
 }
 
 /// Monotonic stamp on every now-playing payload — the frontend position
@@ -772,10 +819,12 @@ async fn set_start_at_login(app: AppHandle, enabled: bool) -> bool {
     app.autolaunch().is_enabled().unwrap_or(enabled)
 }
 
-/// Prefs "Hide on fullscreen" toggle — mirrors the tray.
+/// Prefs "Hide on fullscreen" toggle — mirrors the tray. Rides off_core:
+/// switching OFF during a live conceal releases it through apply_visibility,
+/// whose show path runs emit_now — a sync GSMTC snapshot.
 #[tauri::command]
 async fn set_hide_on_fullscreen(app: AppHandle, enabled: bool) {
-    set_companion(&app, enabled);
+    off_core((), move || set_companion(&app, enabled)).await
 }
 
 /// Frontend-initiated connect (the queue UI's gate state, PR 4) — same flow
