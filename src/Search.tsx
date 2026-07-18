@@ -736,6 +736,14 @@ export default function Search() {
       setSelected(Math.max(sel - 1, 0));
     } else if (e.key === "Enter" && rows[sel] && !gated) {
       e.preventDefault();
+      // A HELD Enter/Shift+Enter key-repeats, and the busy gate frees in a
+      // microtask (resolveUri resolves synchronously for enriched rows)
+      // before the next repeat keydown — so a repeat slips the gate and
+      // upnext_add, which has no dedupe, double-queues (audit A6-5). One
+      // physical press = one action: ignore auto-repeat outright. The play
+      // path dismisses on its first fire, but a held repeat still reached
+      // playNow twice before the hide landed — this covers both verbs.
+      if (e.repeat) return;
       if (e.shiftKey) void queueRow(rows[sel]);
       else void playRow(rows[sel]);
     }
@@ -755,7 +763,18 @@ export default function Search() {
       {/* The queue popover's shadow recipe (App.tsx) — not a third invented
           elevation; it also stays inside the 12px gutter, the transparent-
           window clip budget the card shadow once overflowed. */}
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border/10 bg-surface shadow-xl shadow-black/40">
+      <div
+        // Keep focus in the input: the root onKeyDown (Esc/arrows/Enter) lives
+        // on a non-focusable div, so a mousedown on non-interactive panel
+        // content moves focus to <body> and the pane goes keyboard-dead until
+        // the next click (audit A6-9). preventDefault suppresses the focus
+        // shift without touching click, so row clicks still play and the input
+        // keeps its native caret/selection.
+        onMouseDown={(e) => {
+          if (e.target !== inputRef.current) e.preventDefault();
+        }}
+        className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border/10 bg-surface shadow-xl shadow-black/40"
+      >
         {/* Search row — the search's one verb. */}
         <div className="flex items-center gap-3 border-b border-border/10 px-5 py-4">
           <span className={searching ? "text-fg" : "text-muted"}>

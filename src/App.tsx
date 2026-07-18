@@ -367,7 +367,7 @@ function EmptyState({ mode, searchChord }: { mode: Mode; searchChord: string }) 
   return (
     <div className="flex h-full w-full flex-col items-center justify-center gap-2">
       {restingRow}
-      <p className="flex items-center gap-1.5 text-[12px] text-muted/80">
+      <p className="flex items-center gap-1.5 text-[12px] text-muted/85">
         Press <Keycaps chord={searchChord} size="sm" /> to play something
       </p>
     </div>
@@ -898,11 +898,15 @@ function ExpandedView({
           className={`absolute inset-0 flex flex-col items-center bg-surface pt-8 ${layer(active === "album")}`}
         >
           <Art url={artUrl} size={190} radiusPx={12} />
-          {/* Metadata: title + artist only. The device tag mounts inline
-              only when present — the art is TOP-PINNED (pt-8) here, so a
-              conditional row no longer shifts it (the reserved-slot rule was
-              for the old justify-center column) and the empty slot was just
-              dead space between the artist line and the caption. */}
+          {/* Metadata: title + artist, then a HEIGHT-RESERVED device-tag slot.
+              The tag mounts only when a non-PC device is playing, but the slot
+              holds its row height whether or not it's present: the tag
+              refreshes on track change and a LATE "spotify-device" event lands
+              after the view settled — an un-reserved conditional row nudged the
+              centered hero wave ~8px on that flip (98337fd dropped the reserve
+              reasoning only about the top-pinned art). Reserved, nothing below
+              shifts on device flips (the art is TOP-PINNED at pt-8, so it never
+              moved — this restores the same guarantee for the wave). */}
           <div className="mt-3 min-w-0 self-stretch text-center">
             <p className="truncate text-sm font-medium text-fg">{np.title}</p>
             <p className="truncate text-xs text-muted">
@@ -910,11 +914,9 @@ function ExpandedView({
               {np.album && <SeparatorDot />}
               {np.album}
             </p>
-            {remoteDevice && (
-              <div className="mt-1 flex justify-center">
-                <DeviceTag device={remoteDevice} playing={playing} showName />
-              </div>
-            )}
+            <div className="mt-1 flex h-4 justify-center">
+              {remoteDevice && <DeviceTag device={remoteDevice} playing={playing} showName />}
+            </div>
           </div>
           {/* Caption + hero fill the flex remainder as THREE zones: an
               upper flex-1 that CENTERS the caption, the wave at its natural
@@ -928,39 +930,44 @@ function ExpandedView({
               caption+wave group left the caption pinned to the wave). The
               caption keeps its height-reserved h-4 slot so its fade never
               nudges anything; the metadata line keeps a static middot so the
-              reactive surface isn't on screen twice. Mounted only while the
-              album view is active — one living Waveform per state (the
-              header's md carries lyrics + queue); lastAlive bridges the
-              mount so the toggle doesn't re-bloom it from the dot. */}
-          {active === "album" && (
-            <div className="flex min-h-0 flex-1 flex-col items-center">
-              <div className="flex flex-1 items-center">
-                <p className="h-4 text-[11px] leading-4 text-muted">
-                  {lyrics.status !== "synced" && (
-                    <span
-                      key={lyrics.status}
-                      aria-hidden={captionExpired || undefined}
-                      className={`inline-block ${
-                        captionExpired
-                          ? "animate-[caption-out_260ms_var(--ease-out-tk)_both]"
-                          : `animate-[caption-in_200ms_var(--ease-out-tk)_both] ${
-                              lyrics.status === "loading" ? "[animation-delay:400ms]" : ""
-                            }`
-                      }`}
-                    >
-                      {lyrics.status === "loading"
-                        ? "Finding lyrics…"
-                        : lyrics.status === "offline"
-                          ? "Lyrics unavailable — offline"
-                          : "No synced lyrics"}
-                    </span>
-                  )}
-                </p>
-              </div>
-              <Waveform size="lg" playing={np.status === "playing"} />
-              <div className="flex-1" />
+              reactive surface isn't on screen twice.
+              This container is ALWAYS mounted — only the hero Waveform below
+              is gated to the active view. Gating the whole block (98337fd
+              swept the caption inside the Waveform's gate) re-mounted an
+              already-EXPIRED caption on every album re-entry (e.g. a queue
+              close) and replayed its 260ms caption-out ghost; a persistently
+              mounted span lets aria-hidden/opacity settle it once and hold. */}
+          <div className="flex min-h-0 flex-1 flex-col items-center">
+            <div className="flex flex-1 items-center">
+              <p className="h-4 text-[11px] leading-4 text-muted">
+                {lyrics.status !== "synced" && (
+                  <span
+                    key={lyrics.status}
+                    aria-hidden={captionExpired || undefined}
+                    className={`inline-block ${
+                      captionExpired
+                        ? "animate-[caption-out_260ms_var(--ease-out-tk)_both]"
+                        : `animate-[caption-in_200ms_var(--ease-out-tk)_both] ${
+                            lyrics.status === "loading" ? "[animation-delay:400ms]" : ""
+                          }`
+                    }`}
+                  >
+                    {lyrics.status === "loading"
+                      ? "Finding lyrics…"
+                      : lyrics.status === "offline"
+                        ? "Lyrics unavailable — offline"
+                        : "No synced lyrics"}
+                  </span>
+                )}
+              </p>
             </div>
-          )}
+            {/* Gated to the active view — one living Waveform per state (the
+                header's md carries lyrics + queue; two mounted ran two
+                rAF/bands loops). lastAlive bridges the mount/unmount so the
+                album toggle doesn't re-bloom the capsules from the dot. */}
+            {active === "album" && <Waveform size="lg" playing={np.status === "playing"} />}
+            <div className="flex-1" />
+          </div>
         </div>
 
         {/* Queue view — the same fixed header sits above it; the list is the

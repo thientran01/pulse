@@ -9,7 +9,7 @@
  * dismiss scrim, so a click-away lands (the click-through gutter would swallow
  * it otherwise) and never starts a window drag.
  */
-import type { CSSProperties } from "react";
+import { useEffect, useRef, type CSSProperties } from "react";
 import { commands } from "./lib/backend";
 import { Keycaps } from "./Keycaps";
 
@@ -65,9 +65,40 @@ export function WidgetMenu({
     fn();
     onClose();
   };
+  const menuRef = useRef<HTMLDivElement>(null);
+  // role=menu contract: focus the first item on open and rove focus with the
+  // arrows / Home / End (Esc is App's, wired at the window level). Without
+  // this the menu advertised menu semantics with ZERO keyboard behavior
+  // (audit A7-3). Items are native <button> stops; focus is driven
+  // imperatively so Item needn't forward a ref.
+  useEffect(() => {
+    menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+  }, []);
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    const items = menuRef.current
+      ? Array.from(menuRef.current.querySelectorAll<HTMLElement>('[role="menuitem"]'))
+      : [];
+    if (items.length === 0) return;
+    const i = items.indexOf(document.activeElement as HTMLElement);
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      items[(i + 1) % items.length].focus(); // wrap; i=-1 → first
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      items[i <= 0 ? items.length - 1 : i - 1].focus(); // wrap; i≤0 → last
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      items[0].focus();
+    } else if (e.key === "End") {
+      e.preventDefault();
+      items[items.length - 1].focus();
+    }
+  };
   return (
     <div
       role="menu"
+      ref={menuRef}
+      onKeyDown={onKeyDown}
       onMouseDown={(e) => e.stopPropagation()}
       // The popover recipe verbatim (rounded-xl border-border/10 shadow-xl
       // shadow-black/40, App.tsx) — this menu had drifted into a third

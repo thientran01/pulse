@@ -1040,7 +1040,7 @@ export default function Prefs() {
           );
         })}
         <div className="flex-1" />
-        <p className="mx-2.5 text-[11px] tabular-nums text-muted/70">Palette {version || "…"}</p>
+        <p className="mx-2.5 text-[11px] tabular-nums text-muted/85">Palette {version || "…"}</p>
       </div>
 
       {/* DETAIL */}
@@ -1065,6 +1065,12 @@ export default function Prefs() {
       {/* TOAST */}
       <div
         aria-live="polite"
+        // The div stays mounted at opacity-0 rendering the last toast text (so
+        // the fade-out keeps its words) — but that leaves a phantom node in the
+        // a11y tree between toasts (audit A7-7). aria-hidden while empty pulls
+        // it from the tree; the polite announcement already fired before the
+        // hide lands, so nothing is lost.
+        aria-hidden={!toastMsg || undefined}
         className={`pointer-events-none absolute bottom-[18px] left-1/2 z-30 rounded-full border border-border/12 bg-surface-2 px-4 py-2 text-[12px] text-fg shadow-lg shadow-black/40 [transition:opacity_var(--transition-duration-2)_var(--ease-out-tk),transform_var(--transition-duration-2)_var(--ease-out-tk)] ${
           toastMsg ? "translate-x-[-50%] translate-y-0 opacity-100" : "translate-x-[-50%] translate-y-2 opacity-0"
         }`}

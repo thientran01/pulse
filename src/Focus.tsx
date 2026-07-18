@@ -114,6 +114,13 @@ function IdentityStack({
   device: SpotifyDevice | null;
 }) {
   const align = centered ? "items-center text-center" : "items-start text-left";
+  // Broken art (a CDN 403/404, or AM's lagged first read) degrades to the note
+  // glyph — App and the queue rows already do this; the fullscreen room showed
+  // the ~560px broken-image icon otherwise (audit A6-7). Failure is keyed to
+  // the url itself (RowThumb's pattern): the img never remounts on an art-
+  // revision flip, so a new url simply stops matching failedUrl and retries.
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const showArt = artUrl !== null && artUrl !== failedUrl;
   return (
     // Width = var(--art), defined ONCE on each seat in Focus's return
     // (both seats set it identically) — the seats' stack-top math, this
@@ -121,8 +128,14 @@ function IdentityStack({
     // same value, which is what makes the aligned edges exact.
     <div className={`flex w-(--art) flex-col ${align}`}>
       <div className="grid aspect-square w-full place-items-center overflow-hidden rounded-3xl bg-surface-2 text-muted">
-        {artUrl ? (
-          <img src={artUrl} alt="" className="h-full w-full object-cover" draggable={false} />
+        {showArt ? (
+          <img
+            src={artUrl}
+            alt=""
+            className="h-full w-full object-cover"
+            draggable={false}
+            onError={() => setFailedUrl(artUrl)}
+          />
         ) : (
           <MorphIcon name="note" size={44} />
         )}
@@ -147,7 +160,7 @@ function IdentityStack({
       </div>
       {/* Reserved slot — "Finding lyrics…" answers the wait, the miss stays
           quiet, and the fixed height means resolution never moves the art. */}
-      <p className="mt-1 h-7 w-full truncate text-[17px] leading-7 text-muted/70">
+      <p className="mt-1 h-7 w-full truncate text-[17px] leading-7 text-muted/85">
         {caption && (
           <span
             key={caption}

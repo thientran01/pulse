@@ -2,16 +2,19 @@ import type { SpotifyDevice } from "./types";
 
 /** A small static glyph for the playback device's kind. Deliberately NOT part
  * of the morphing icon system (src/icons/) — that skeleton is for glyphs that
- * tween into each other; this one never morphs. currentColor inherits the
- * tag's text-muted. */
+ * tween into each other; this one never morphs. Drawn on the house 16-grid at
+ * 1.5 stroke (every other static one-off glyph — SearchGlyph, the Queue row
+ * verbs — shares that grid; these had drifted to a 24-viewBox at stroke 2,
+ * audit A7-11). Coordinates are the mechanical ×2/3 of the old 24-grid, so the
+ * silhouettes are unchanged. currentColor inherits the tag's text-muted. */
 function DeviceGlyph({ kind, px = 12 }: { kind: SpotifyDevice["kind"]; px?: number }) {
   const common = {
     width: px,
     height: px,
-    viewBox: "0 0 24 24",
+    viewBox: "0 0 16 16",
     fill: "none",
     stroke: "currentColor",
-    strokeWidth: 2,
+    strokeWidth: 1.5,
     strokeLinecap: "round" as const,
     strokeLinejoin: "round" as const,
     "aria-hidden": true,
@@ -20,32 +23,32 @@ function DeviceGlyph({ kind, px = 12 }: { kind: SpotifyDevice["kind"]; px?: numb
     case "phone":
       return (
         <svg {...common}>
-          <rect x="7" y="2" width="10" height="20" rx="2.5" />
-          <line x1="10.5" y1="18.5" x2="13.5" y2="18.5" />
+          <rect x="4.67" y="1.33" width="6.67" height="13.33" rx="1.67" />
+          <line x1="7" y1="12.33" x2="9" y2="12.33" />
         </svg>
       );
     case "speaker":
       return (
         <svg {...common}>
-          <rect x="6" y="2" width="12" height="20" rx="2.5" />
-          <circle cx="12" cy="14" r="3.5" />
-          <line x1="12" y1="6" x2="12" y2="6" />
+          <rect x="4" y="1.33" width="8" height="13.33" rx="1.67" />
+          <circle cx="8" cy="9.33" r="2.33" />
+          <line x1="8" y1="4" x2="8" y2="4" />
         </svg>
       );
     case "tv":
       return (
         <svg {...common}>
-          <rect x="2" y="4" width="20" height="13" rx="2" />
-          <line x1="8" y1="21" x2="16" y2="21" />
+          <rect x="1.33" y="2.67" width="13.33" height="8.67" rx="1.33" />
+          <line x1="5.33" y1="14" x2="10.67" y2="14" />
         </svg>
       );
     default:
       // car / other → a generic "casting" mark (screen + signal arcs).
       return (
         <svg {...common}>
-          <rect x="3" y="4" width="18" height="12" rx="2" />
-          <path d="M4 20a4 4 0 0 1 4 4" transform="translate(0 -4)" />
-          <line x1="6.5" y1="20" x2="6.5" y2="20" />
+          <rect x="2" y="2.67" width="12" height="8" rx="1.33" />
+          <path d="M2.67 10.67a2.67 2.67 0 0 1 2.67 2.67" />
+          <line x1="4.33" y1="13.33" x2="4.33" y2="13.33" />
         </svg>
       );
   }

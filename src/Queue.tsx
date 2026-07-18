@@ -520,8 +520,12 @@ const HistoryRowBase = function HistoryRow({
     <div
       role="listitem"
       tabIndex={0}
-      aria-label={`${entry.title} — ${entry.artist}`}
-      aria-keyshortcuts={actionable ? "Enter" : undefined}
+      aria-label={
+        actionable
+          ? `${entry.title} — ${entry.artist}. Enter to queue, Shift+Enter to play now`
+          : `${entry.title} — ${entry.artist}`
+      }
+      aria-keyshortcuts={actionable ? "Enter Shift+Enter" : undefined}
       onPointerDown={actionable ? (ev) => onGhostStart(ev, entry) : undefined}
       onKeyDown={(ev) => onKeyDown(ev, entry)}
       className={`group/row flex ${s.row} select-none items-center [transition:background-color_140ms_var(--ease-out-tk)] hover:bg-fg/5 ${
@@ -712,7 +716,11 @@ export function QueuePanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [upnext, seeding]);
   const moreLikeThis = () => {
-    if (!np || !np.title || seeding) return;
+    // queueLive matches the button's aria-disabled gate: the control stays
+    // keyboard-focusable (a real <button>; pointer-events-none blocks the
+    // mouse but not Enter/Space), so without this a keyboard user could fire
+    // a real backend seed on a visually-disabled control (audit A7-8).
+    if (!queueLive || !np || !np.title || seeding) return;
     setSeeding(true);
     // Held past the default clear — the run takes seconds and a blank chip
     // mid-run reads as a stall; the result toast replaces it.
@@ -958,10 +966,15 @@ export function QueuePanel({
   };
 
   const onHistoryKeyDown = (e: React.KeyboardEvent, entry: HistoryEntry) => {
-    if (e.key === "Enter" && queueLive) {
-      e.preventDefault();
-      addResolved(entry);
-    }
+    if (e.key !== "Enter" || !queueLive) return;
+    e.preventDefault();
+    // Enter queues (the row's default verb); Shift+Enter plays now — the
+    // pointer play-now button is out of the Tab order (the ROW is the
+    // keyboard stop), so without this there was NO keyboard path to play-now
+    // (audit A6-8). Both gated on queueLive, exactly like the pointer
+    // actions — mirrors the Search pane's two-Enter grammar.
+    if (e.shiftKey) playResolved(entry);
+    else addResolved(entry);
   };
 
   // Infinite scroll: page when the scroll bottom nears.

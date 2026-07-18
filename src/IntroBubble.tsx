@@ -10,7 +10,7 @@
  * Chords are the LIVE resolved ones (App passes them from the hotkey table), so
  * a rebind is reflected — the handoff's hardcoded chords were backwards.
  */
-import type { CSSProperties } from "react";
+import { useEffect, useRef, type CSSProperties } from "react";
 import { Keycaps } from "./Keycaps";
 import { SpotifyConnectButton } from "./SpotifyConnectButton";
 import type { DockCorner } from "./lib/backend";
@@ -32,6 +32,15 @@ export function IntroBubble({
 }) {
   const right = corner.endsWith("right");
   const above = corner.startsWith("bottom");
+
+  // role=dialog needs a focus target on mount, or a keyboard/SR user who
+  // never tabs in loses the once-ever onboarding (seenIntro persists on show,
+  // so it never returns) — audit A7-4. The dismiss button is the natural
+  // landing (Esc, already App's, is the other exit).
+  const dismissRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    dismissRef.current?.focus();
+  }, []);
 
   const pos: CSSProperties = {};
   pos[right ? "right" : "left"] = 6;
@@ -61,6 +70,7 @@ export function IntroBubble({
       <div className="mb-3 flex items-start gap-2">
         <p className="flex-1 text-[14px] font-semibold text-fg">Nice — Palette is listening</p>
         <button
+          ref={dismissRef}
           type="button"
           aria-label="Dismiss"
           onClick={onDismiss}

@@ -369,7 +369,8 @@ export function Waveform({
     // Status flipped while a settle timer pends: restart it on the new
     // window (pause mid-grace → the prompt SLEEP_MS from the pause; resume
     // before audio arrives → the playing grace). Fired by the [playing]
-    // effect above.
+    // effect above, and by the quiet-payload branch on a reactive-off flip
+    // (audit A5-2) to shorten a 5s grace that just lost its reactive stream.
     rearmRef.current = () => {
       if (sleepTimer === null) return;
       window.clearTimeout(sleepTimer);
@@ -483,7 +484,18 @@ export function Waveform({
         // Only arm from "alive" — zero payloads keep arriving while paused,
         // and re-arming mid-collapse would restart the sequence. A quiet
         // payload landing mid-bloom is caught by the bloom's final beat.
-        if (phaseRef.current === "alive") armSettle();
+        if (phaseRef.current === "alive") {
+          if (sleepTimer === null) armSettle();
+          // A pending timer normally stands (steady quiet must not push the
+          // settle out forever). BUT a reactive-off flip — reduced motion on,
+          // or the separator pref off — mid-in-song-silence sends its single
+          // zero payload here with reactiveOn() now false, and the pending
+          // timer was armed on the 5s SLEEP_PLAYING_MS grace with nothing
+          // left to correct it: the bars would sit static ~5s (audit A5-2;
+          // #115 only covered a timer armed AFTER the flip). Re-arm on the
+          // now-false window (→ the prompt SLEEP_MS) so it collapses at once.
+          else if (playingRef.current && !reactiveOn()) rearmRef.current();
+        }
         if (b.level > 0.001) start();
       }
     });
