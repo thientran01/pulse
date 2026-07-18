@@ -17,13 +17,20 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege: this workflow only builds and tests — it never writes to the
+# repo, releases, or any other resource, so the GITHUB_TOKEN needs read-only.
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      # Actions pinned to full commit SHAs (not mutable tags) for supply-chain
+      # safety; trailing comment = the version the SHA resolved to when pinned.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -37,11 +44,14 @@ jobs:
       # Frontend unit tests (vitest — the posClock kernel net).
       - run: npm test
 
-      - uses: dtolnay/rust-toolchain@stable
+      # dtolnay/rust-toolchain reads the toolchain from its @ref, so a SHA pin
+      # must name the toolchain explicitly (the SHA is not "stable").
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # 'stable' branch @ 2026-07-18
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: src-tauri
 

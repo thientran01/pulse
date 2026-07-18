@@ -1,6 +1,6 @@
 # spikes/ — feasibility probes
 
-Before Pulse built anything on top of Windows' media and presence APIs, it needed to know
+Before Palette built anything on top of Windows' media and presence APIs, it needed to know
 what those APIs *actually* report — not what the docs claim. These two crates are the
 throwaway instruments that measured it.
 
