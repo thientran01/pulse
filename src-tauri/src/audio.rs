@@ -246,25 +246,46 @@ const DEMOTE_AFTER_MS: u64 = 10_000;
 /// A demote is sticky but NOT permanent (it used to clear only on an AUMID
 /// change — so a single transient activation blip, or >10s of digital silence
 /// at open, stranded a player on whole-mix Discord-bleed capture for the whole
-/// session). After this long the AUMID is retried with a process-scoped join;
-/// the window is wide enough that a genuinely-uncapturable target (exclusive
-/// mode, sibling-process render) isn't re-resolved every loop.
+/// session). After this BASE window the AUMID is retried with a process-scoped
+/// join; it's wide enough that a genuinely-uncapturable target (exclusive mode,
+/// sibling-process render) isn't re-resolved every loop.
 const DEMOTE_EXPIRY: Duration = Duration::from_secs(90);
+/// Backoff ceiling for a PERMANENT mis-join. Without it, a target whose process
+/// capture activates but never delivers packets retries every DEMOTE_EXPIRY
+/// forever — each retry opens the silent capture and flattens the waveform for
+/// DEMOTE_AFTER_MS (~10s flat every 90s). Each consecutive silent re-demote of
+/// the same AUMID instead doubles its retry window (90s → 180s → … → this cap;
+/// stamp_demote), so a permanent mis-join settles to one brief flat per ~10min.
+/// A target that changes, or a retry that actually delivers signal, resets to
+/// the base window — so transient failures still recover at DEMOTE_EXPIRY.
+const DEMOTE_EXPIRY_CAP: Duration = Duration::from_secs(600);
 
-/// True while `aumid` is under an UNEXPIRED demote (see DEMOTE_EXPIRY). Clears a
-/// stale stamp in passing so the next open retries the process join.
-fn is_demoted(demoted: &mut Option<(String, Instant)>, aumid: &str) -> bool {
+/// True while `aumid` is under an UNEXPIRED demote — its stored window (which
+/// grows with the backoff, see stamp_demote) hasn't elapsed. Expired → false,
+/// so the next open retries the process join; the stamp is deliberately LEFT in
+/// place (not cleared) so a re-demote reads its window as the doubling base. A
+/// target change or a genuine recovery clears it (see the demoted decl).
+fn is_demoted(demoted: &Option<(String, Instant, Duration)>, aumid: &str) -> bool {
     match demoted {
-        Some((d, since)) if d == aumid => {
-            if since.elapsed() >= DEMOTE_EXPIRY {
-                *demoted = None;
-                false
-            } else {
-                true
-            }
-        }
-        _ => false,
+        Some((d, since, expiry)) => d == aumid && since.elapsed() < *expiry,
+        None => false,
     }
+}
+
+/// Stamp (or re-stamp) the sticky demote for `aumid`. Re-demoting the SAME
+/// target — a consecutive expiry-retry that opened the process capture and it
+/// still never delivered — doubles the retry window (capped at
+/// DEMOTE_EXPIRY_CAP); a first demote, or one after the target changed/
+/// recovered (`prev` None or a different AUMID), starts at the base window.
+fn stamp_demote(
+    prev: &Option<(String, Instant, Duration)>,
+    aumid: String,
+) -> (String, Instant, Duration) {
+    let expiry = match prev {
+        Some((d, _, e)) if *d == aumid => (*e * 2).min(DEMOTE_EXPIRY_CAP),
+        _ => DEMOTE_EXPIRY,
+    };
+    (aumid, Instant::now(), expiry)
 }
 
 /// Owner thread: opens/drops the capture as the switch flips, runs the
@@ -295,10 +316,14 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
 
         let mut active: Option<(Capture, f32, Arc<Mutex<Ring>>)> = None;
         let mut last_upgrade = std::time::Instant::now();
-        // The one AUMID currently demoted to Device capture, stamped when the
-        // demote was applied (see DEMOTE_AFTER_MS / DEMOTE_EXPIRY). Cleared when
-        // the target moves off it OR the stamp expires (is_demoted).
-        let mut demoted: Option<(String, Instant)> = None;
+        // The one AUMID currently demoted to Device capture: (aumid, stamped-at,
+        // retry window that applies). The window is the base DEMOTE_EXPIRY,
+        // doubled per consecutive silent re-demote up to DEMOTE_EXPIRY_CAP
+        // (stamp_demote). Cleared when the target moves off it (open branch) or
+        // a retry genuinely recovers (the Process health arm's has_data reset).
+        // An EXPIRED stamp is left in place — its window is the next backoff's
+        // base, and is_demoted already reads it as not-demoted.
+        let mut demoted: Option<(String, Instant, Duration)> = None;
         let mut smoothed = [0.0f32; 3];
         let mut gain_ref = [1e-4f32; 3];
         let spec_edges = spectrum_edges();
@@ -339,7 +364,7 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                 // whole-mix device loopback as the fallback.
                 let ring = Arc::new(Mutex::new(Ring::new()));
                 let aumid = target_aumid();
-                if demoted.as_ref().is_some_and(|(d, _)| *d != aumid) {
+                if demoted.as_ref().is_some_and(|(d, _, _)| *d != aumid) {
                     demoted = None; // target moved off the demoted AUMID
                 }
                 if aumid != stall_target {
@@ -353,7 +378,7 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                     stall_warned = false;
                     fallback_warned = false;
                 }
-                let process = if aumid.is_empty() || is_demoted(&mut demoted, &aumid) {
+                let process = if aumid.is_empty() || is_demoted(&demoted, &aumid) {
                     None
                 } else {
                     loopback::resolve_target(&aumid).and_then(|t| {
@@ -414,6 +439,13 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                     // plus the wrong-join demote (a real player is never
                     // THIS silent mid-playback).
                     Capture::Process(p, aumid) => {
+                        // A capture now delivering signal is a genuine recovery
+                        // — drop any lingering demote for this target so a
+                        // future mis-join retries at the base window (the
+                        // backoff is for CONSECUTIVE silent re-demotes only).
+                        if p.has_data() && demoted.as_ref().is_some_and(|(d, _, _)| d == aumid) {
+                            demoted = None;
+                        }
                         // A capture that died having NEVER delivered is a
                         // broken join — demote, don't reopen: a plain reopen
                         // would re-run the full resolution+activation at
@@ -471,7 +503,7 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                             Act::Reopen
                         } else if last_upgrade.elapsed() > UPGRADE_RETRY {
                             last_upgrade = std::time::Instant::now();
-                            if aumid.is_empty() || is_demoted(&mut demoted, &aumid) {
+                            if aumid.is_empty() || is_demoted(&demoted, &aumid) {
                                 Act::Keep
                             } else {
                                 Act::TryUpgrade(aumid)
@@ -489,7 +521,7 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                     }
                     Act::Demote(aumid) => {
                         log::warn!("audio: process capture for {aumid:?} never delivered — device-mix fallback");
-                        demoted = Some((aumid, Instant::now()));
+                        demoted = Some(stamp_demote(&demoted, aumid));
                         active = None; // reopens demoted (Device) next iteration
                         continue;
                     }
@@ -521,7 +553,7 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                                     fallback_warned = false;
                                 } else {
                                     log::warn!("audio: process activation failed for {aumid:?} — staying on device mix");
-                                    demoted = Some((aumid, Instant::now()));
+                                    demoted = Some(stamp_demote(&demoted, aumid));
                                 }
                             }
                         }

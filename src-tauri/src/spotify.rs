@@ -304,6 +304,18 @@ fn emit_device(app: &AppHandle) {
     let _ = app.emit("spotify-device", device);
 }
 
+/// Serializes ALL mutations of the token file (commit_token_write's atomic
+/// replace and clear_tokens' remove/neutralize). settings::write_atomic is only
+/// concurrency-safe when callers serialize their own writes — it uses a FIXED
+/// per-target temp name, so two concurrent writers to spotify_tokens.json would
+/// race the same temp/final path and could corrupt or resurrect the file.
+/// settings.json is covered by settings.rs's WRITE_GATE; this is the token
+/// file's equivalent (the A2-3 fix moved these writes OFF the `inner` lock,
+/// which was the only thing serializing them before). Taken ONLY around the
+/// file I/O, AFTER `inner` is dropped — never held while acquiring `inner` or
+/// `refresh_gate` — so it can't deadlock (the whole point of the off-lock move).
+static TOKEN_WRITE_GATE: Mutex<()> = Mutex::new(());
+
 /// Serialize the current tokens to (path, bytes) for an UNLOCKED write. Called
 /// under the inner lock; `commit_token_write` performs the returned write after
 /// the guard drops — the media loop's per-beat `connected()`/feeder must never
@@ -316,9 +328,14 @@ fn stage_token_write(inner: &Inner) -> Option<(PathBuf, Vec<u8>)> {
 
 /// Perform a staged token write off the lock. Atomic replace: a crash
 /// mid-write must not blank a valid session to default (which reads as
-/// "disconnected" and forces a re-consent).
+/// "disconnected" and forces a re-consent). Serialized against clear_tokens'
+/// file ops by TOKEN_WRITE_GATE so a concurrent disconnect can't race the
+/// shared temp/final path (both run on the blocking pool).
 fn commit_token_write(staged: Option<(PathBuf, Vec<u8>)>) {
     if let Some((path, bytes)) = staged {
+        let _gate = TOKEN_WRITE_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Err(e) = crate::settings::write_atomic(&path, &bytes) {
             log::warn!("spotify: token save failed: {e}");
         }
@@ -340,6 +357,13 @@ fn clear_tokens(app: &AppHandle) {
         path
     };
     let Some(path) = path else { return };
+    // Serialize the file ops against a concurrent commit_token_write (an
+    // in-flight refresh's save) — both run on the blocking pool and race the
+    // same temp/final path otherwise (TOKEN_WRITE_GATE; taken after `inner`
+    // dropped, so no lock-order hazard).
+    let _gate = TOKEN_WRITE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // A swallowed delete failure (the old `let _ =`) leaves the token file on
     // disk, and init() RESURRECTS the disconnected session next launch. If the
     // unlink can't land (locked file, EPERM), neutralize the file instead: `{}`
@@ -439,10 +463,14 @@ pub fn start_connect(app: &AppHandle) {
     }
     let app = app.clone();
     std::thread::spawn(move || {
+        // RAII reset (the jump/enrich/feed/reconcile family): a panic in
+        // run_consent (port bind, HTTP, parse) unwinds this spawned thread, and
+        // the old straight-line `store(false)` after it was then skipped —
+        // leaking connect_in_flight SET forever blocks every reconnect this
+        // session. The guard resets on the normal AND the unwind path.
+        let auth = app.state::<SpotifyAuth>();
+        let _flag = FlagGuard::new(&auth.connect_in_flight);
         let outcome = run_consent(&app);
-        app.state::<SpotifyAuth>()
-            .connect_in_flight
-            .store(false, Ordering::SeqCst);
         match outcome {
             Ok(()) => emit_status(&app),
             Err(msg) => {

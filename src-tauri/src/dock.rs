@@ -487,6 +487,45 @@ fn animate_to(window: &WebviewWindow, from: (i32, i32), target: (i32, i32)) {
     });
 }
 
+/// Decrements the `animating` counter on drop, so EVERY exit of a
+/// spawn_animation thread — normal landing, superseded-return, AND a panic in
+/// the `frame` closure — resets the count. A panic that leaked the count ≥1
+/// would make on_moved read every real user drag as self-inflicted and refuse
+/// to re-dock until a restart. The matching fetch_add stays in spawn_animation
+/// BEFORE the epoch bump (so the count never dips to 0 between add and a
+/// superseded thread's sub); this guard owns only the decrement. Mirrors
+/// spotify.rs's FlagGuard / loopback.rs's CaptureExit.
+struct AnimGuard<'a>(&'a AtomicI32);
+
+impl Drop for AnimGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// RAII 1ms system timer resolution (timeBeginPeriod/timeEndPeriod). Restores
+/// it on drop, so a panic in the animation frame can't leak the elevated
+/// resolution process-wide — and the two exit paths (superseded-return, normal
+/// end) no longer each need a manual timeEndPeriod.
+struct TimerPeriod;
+
+impl TimerPeriod {
+    fn new() -> Self {
+        unsafe {
+            let _ = timeBeginPeriod(1);
+        }
+        TimerPeriod
+    }
+}
+
+impl Drop for TimerPeriod {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = timeEndPeriod(1);
+        }
+    }
+}
+
 /// Drive `frame(window, eased_fraction)` at FRAME_MS over SNAP_MS with the
 /// given easing. The frame closure applies the geometry for its fraction;
 /// `frame(_, 1.0)` must land exactly on the target. Dies mid-flight (no
@@ -508,6 +547,10 @@ fn spawn_animation(
         .name("dock-anim".into())
         .spawn(move || {
             let dock = window.state::<Dock>();
+            // RAII: the fetch_add ran in spawn_animation (before the epoch
+            // bump); this guard owns the matching sub for EVERY exit — normal
+            // landing, superseded-return, and a panic in `frame`.
+            let _anim = AnimGuard(&dock.animating);
             if snap_animation_enabled() {
                 // Default Windows timer resolution rounds thread::sleep(8ms) up
                 // to ~15.6ms, landing ~13 UNEVEN frames across the 200ms window —
@@ -515,21 +558,17 @@ fn spawn_animation(
                 // the motion reads as lunge-then-settle instead of one glide.
                 // 1ms resolution for the animation's lifetime makes the 8ms
                 // cadence real; wall-clock progress below stays the correctness
-                // backstop for any frame the OS still delays.
-                unsafe {
-                    let _ = timeBeginPeriod(1);
-                }
+                // backstop for any frame the OS still delays. RAII so a frame
+                // panic can't leak the elevated resolution.
+                let _timer = TimerPeriod::new();
                 let start = Instant::now();
                 loop {
                     std::thread::sleep(Duration::from_millis(FRAME_MS));
                     if dock.epoch.load(Ordering::SeqCst) != my_epoch {
                         // Superseded by a drag or resize — stop where we are.
-                        // Sub only OUR contribution; the newer op's increment keeps
-                        // the count >0 so its glide stays flagged self-inflicted.
-                        dock.animating.fetch_sub(1, Ordering::SeqCst);
-                        unsafe {
-                            let _ = timeEndPeriod(1);
-                        }
+                        // The guards sub only OUR contribution + restore the
+                        // timer on drop; the newer op's increment keeps the
+                        // count >0 so its glide stays flagged self-inflicted.
                         return;
                     }
                     // Progress from wall-clock, not frame count: a delayed frame
@@ -540,13 +579,9 @@ fn spawn_animation(
                         break;
                     }
                 }
-                unsafe {
-                    let _ = timeEndPeriod(1);
-                }
             } else {
                 frame(&window, 1.0);
             }
-            dock.animating.fetch_sub(1, Ordering::SeqCst);
         })
         .expect("spawn dock-anim thread");
 }
