@@ -1789,7 +1789,7 @@ function App() {
           motion pass 2026-07-16); reveal is 140ms opacity with visibility
           deferred (always mounted — the scroll position and history feed
           survive closing). Max height re-derived from the REAL 440px window
-          (prototype frame was 520): pill 330, card 296. While open, the hit
+          (prototype frame was 520): pill 330, card 290. While open, the hit
           rect unions this box's MEASURED height (the footprint effect above
           holds the ref — content-sized, not the cap). */}
       {!nothing && (

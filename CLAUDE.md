@@ -330,7 +330,7 @@ src/Queue.tsx   the 11a queue & history UI: Palette's up-next list + the
                 window — a 312px popover floating above the pill/card
                 (corner-aware: opens away from the docked side; rides the
                 mode resize on the shell's 200ms EASE.inOut; max-height from
-                the REAL 440px window: pill 330 / card 296); inside expanded,
+                the REAL 440px window: pill 330 / card 290); inside expanded,
                 one of three PEER LAYERS (lyrics · album · queue) that
                 crossfade in place under a fixed absolute now-playing header
                 — opacity only (200ms in / 140ms out EASE.out, no scale: the

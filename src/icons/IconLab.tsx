@@ -178,7 +178,7 @@ function ModeDemo() {
       <MorphIcon name={to} size={13} slot={slot} dur={DUR[3]} ease={EASE.inOut} />
     </motion.button>
   );
-  const size = { pill: [300, 48], card: [380, 132], expanded: [380, 240] }[mode];
+  const size = { pill: [300, 48], card: [380, 138], expanded: [380, 240] }[mode];
   return (
     <motion.div
       key={mode}
