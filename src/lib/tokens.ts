@@ -8,12 +8,6 @@ export const EASE = {
   inOut: [0.65, 0, 0.35, 1],
 } as const;
 
-export const EASE_CSS = {
-  out: "cubic-bezier(0.16,1,0.3,1)",
-  inOut: "cubic-bezier(0.65,0,0.35,1)",
-  hover: "ease",
-} as const;
-
 /** Durations in ms — everything under 300ms. 5 exists for the seek spin:
  * a full revolution needs more room than a state morph. */
 export const DUR = { 1: 90, 2: 140, 3: 200, 4: 220, 5: 260 } as const;

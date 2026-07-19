@@ -13,7 +13,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { type AudioBands } from "./lib/backend";
-import { Envelope, subscribeBands } from "./lib/reactive";
+import { Envelope, reactiveOn, subscribeBands } from "./lib/reactive";
 
 /** Four renditions of the same instrument: "sm" is the pill's inline text
  * separator (5 bars); "md" is the card and lyrics-header separator (7 bars,
@@ -89,7 +89,17 @@ function roomPeak(i: number, n: number): number {
 const IDLE_EPS = 0.004;
 /** Level above which the separator wakes; falls asleep after quiet holds. */
 const WAKE_LEVEL = 0.02;
+/** Quiet-hold before the settle fires, by playback status. Paused settles
+ * promptly. Playing gets a long grace: a quiet passage while the track is
+ * still PLAYING is the song's own dynamics (a breakdown, a quiet outro, a
+ * process-loopback packet gap), not a pause — running the settle/bloom
+ * choreography for it reads as the widget glitching. The window must stay
+ * FINITE though: remote-device playback (Spotify on a phone/speaker — PR
+ * #109) is silent-while-playing indefinitely, and the resting dot plus the
+ * DeviceTag is the blessed rendering there — the dot just arrives ~4.5s
+ * later than it used to. SLEEP_PLAYING_MS is the feel knob. */
 const SLEEP_MS = 500;
+const SLEEP_PLAYING_MS = 5000;
 
 /**
  * Settle phases, in order. "alive" is the audio-reactive waveform; the rest
@@ -205,6 +215,7 @@ export function Waveform({
   trailing,
   size = "sm",
   announceKey,
+  playing,
 }: {
   trailing?: boolean;
   size?: Size;
@@ -213,11 +224,25 @@ export function Waveform({
    * gray, and ignite last in the incoming track's accent. The pill's
    * track-change "notice me" beat; card/expanded instances don't pass it. */
   announceKey?: string;
+  /** GSMTC playback status: true stretches the settle debounce to
+   * SLEEP_PLAYING_MS so in-song silence doesn't collapse the bars (audio
+   * level alone can't tell a quiet passage from a pause). Undefined = false
+   * (the prompt SLEEP_MS window). */
+  playing?: boolean;
 }) {
   const barsRef = useRef<Array<HTMLSpanElement | null>>([]);
   const [phase, setPhase] = useState<Phase>(lastAlive ? "alive" : "rest");
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
+  const playingRef = useRef(playing);
+  playingRef.current = playing;
+  // Bridge into the []-deps effect below (the announceRef pattern): a status
+  // flip while a settle timer pends must re-arm it with the NEW window —
+  // otherwise pausing mid-grace would take the remaining ~5s to settle.
+  const rearmRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    rearmRef.current();
+  }, [playing]);
   // Gates for the collapse/reveal stagger, each raised only by its own
   // choreographed ladder (read in render; set imperatively before the phase
   // change so the render sees it). The settle earns the OUTSIDE-IN drop
@@ -331,7 +356,26 @@ export function Waveform({
             setPhase("rest");
           }, DOTS_MS + DROP_MS + DOTS_MS),
         );
-      }, SLEEP_MS);
+        // The playing grace is for the SONG's own quiet, and only while the
+        // reactive layer is live: when the pref toggles off or reduced motion
+        // flips on mid-track, reactive.ts sends ONE zero payload and stops the
+        // stream with `playing` still true — without the reactiveOn() term
+        // that zero would arm the 5s grace nothing can ever correct, and a
+        // user who just asked for less motion watches static bars for 5s
+        // (quick-review catch, PR #115).
+      }, playingRef.current && reactiveOn() ? SLEEP_PLAYING_MS : SLEEP_MS);
+    };
+
+    // Status flipped while a settle timer pends: restart it on the new
+    // window (pause mid-grace → the prompt SLEEP_MS from the pause; resume
+    // before audio arrives → the playing grace). Fired by the [playing]
+    // effect above, and by the quiet-payload branch on a reactive-off flip
+    // (audit A5-2) to shorten a 5s grace that just lost its reactive stream.
+    rearmRef.current = () => {
+      if (sleepTimer === null) return;
+      window.clearTimeout(sleepTimer);
+      sleepTimer = null;
+      armSettle();
     };
 
     // The announcement (track change while alive): the settle ladder down to
@@ -440,7 +484,18 @@ export function Waveform({
         // Only arm from "alive" — zero payloads keep arriving while paused,
         // and re-arming mid-collapse would restart the sequence. A quiet
         // payload landing mid-bloom is caught by the bloom's final beat.
-        if (phaseRef.current === "alive") armSettle();
+        if (phaseRef.current === "alive") {
+          if (sleepTimer === null) armSettle();
+          // A pending timer normally stands (steady quiet must not push the
+          // settle out forever). BUT a reactive-off flip — reduced motion on,
+          // or the separator pref off — mid-in-song-silence sends its single
+          // zero payload here with reactiveOn() now false, and the pending
+          // timer was armed on the 5s SLEEP_PLAYING_MS grace with nothing
+          // left to correct it: the bars would sit static ~5s (audit A5-2;
+          // #115 only covered a timer armed AFTER the flip). Re-arm on the
+          // now-false window (→ the prompt SLEEP_MS) so it collapses at once.
+          else if (playingRef.current && !reactiveOn()) rearmRef.current();
+        }
         if (b.level > 0.001) start();
       }
     });
@@ -450,11 +505,22 @@ export function Waveform({
       // A pending sleep timer means quiet was already in progress; count it
       // as settled so a mode-switch remount doesn't strand the next instance
       // in "alive" with no band event ever coming to collapse it (the
-      // backend goes silent after pause's single zero payload).
+      // backend goes silent after pause's single zero payload). Only while
+      // NOT playing, though: a mode switch inside a quiet passage of a
+      // still-playing track must not demote to rest (the dot flash + re-bloom
+      // is the artifact the grace window exists to kill) — the next instance
+      // seeds "alive" and its mount watchdog re-arms the grace, so the
+      // strand case stays covered.
       if (sleepTimer !== null) {
         window.clearTimeout(sleepTimer);
-        lastAlive = false;
+        sleepTimer = null;
+        if (!playingRef.current) lastAlive = false;
       }
+      // Sever the rearm bridge: after cleanup this closure is dead, but the
+      // [playing] effect can still fire before the next main effect installs
+      // its own (StrictMode's remount does exactly this) — a stale rearm
+      // would arm a ghost settle no wake payload can ever disarm.
+      rearmRef.current = () => {};
       clearSeq();
       running = false;
       cancelAnimationFrame(raf);

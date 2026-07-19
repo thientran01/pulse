@@ -19,6 +19,7 @@ import { MorphIcon } from "./icons/MorphIcon";
 import {
   commands,
   onHistoryAppended,
+  onHistoryCleared,
   onSettingsChanged,
   onSpotifyDevice,
   onSpotifyStatus,
@@ -34,13 +35,53 @@ import type {
 } from "./types";
 
 const HISTORY_PAGE = 30;
-/** Row height — the drag math's grid (swap threshold ±26 = just past half). */
-const ROW_H = 44;
-const SWAP_AT = 26;
 /** Popover garment box (the handoff's 312×330, height re-derived from the
  * real 440px window per mode — the prototype's 520px frame had more room). */
 export const POPOVER_W = 312;
 export const POPOVER_GAP = 12;
+
+/** Per-scale clothes + physics (the LyricsPanel SCALE precedent: same
+ * grammar, two rooms). "base" is the widget's 44px grid — rowH is the drag
+ * math's grid, swapAt just past half a row. "room" dresses the SAME panel
+ * for the focus takeover's content column, where the widget-sized rows read
+ * as a miniature lost in the room (Thien, 2026-07-16): taller rows, bigger
+ * art, type stepped up one rung. Row height and the swap threshold move
+ * together — the reorder drag and the ghost drop compute in rowH units. */
+export type QueueScale = "base" | "room";
+const QSCALE = {
+  base: {
+    rowH: 44,
+    swapAt: 26,
+    thumb: 26,
+    row: "h-[44px] gap-2.5 rounded-md px-2",
+    title: "text-xs",
+    artist: "text-[11px]",
+    label: "text-[10px]",
+    // One rung above the labels: the chip carries action RESULTS and errors
+    // (Search/Prefs seat the same role at 12px; 10px buried "Couldn't find
+    // it on Spotify" in the header row).
+    toast: "text-[11px]",
+    prose: "text-xs",
+    btn: "h-[26px] w-[26px]",
+    grip: "h-[26px] w-[18px]",
+    glyph: 13,
+  },
+  room: {
+    rowH: 56,
+    swapAt: 32,
+    thumb: 40,
+    row: "h-[56px] gap-3 rounded-lg px-2",
+    title: "text-[15px]",
+    artist: "text-[13px]",
+    label: "text-[11px]",
+    toast: "text-[12px]",
+    prose: "text-[13px]",
+    btn: "h-[30px] w-[30px]",
+    grip: "h-[30px] w-[20px]",
+    glyph: 15,
+  },
+} as const satisfies Record<QueueScale, unknown>;
+type QueueScaleSpec = (typeof QSCALE)[QueueScale];
 
 // ---- data hooks ----
 
@@ -77,7 +118,8 @@ export function useUpNext(): QueueTrack[] {
 
 /** The Earlier feed: seeds a page when first activated, live-prepends
  * finalized listens, and pages backwards on demand. Inert until `active` —
- * a closed queue UI costs nothing. */
+ * a closed queue UI costs nothing. "history-cleared" (prefs' Erase) resets
+ * everything, module caches included, and re-seeds an open panel. */
 export function useHistoryFeed(active: boolean): {
   entries: HistoryEntry[];
   loadMore: () => void;
@@ -85,8 +127,19 @@ export function useHistoryFeed(active: boolean): {
 } {
   const [entries, setEntries] = useState<HistoryEntry[]>([]);
   const [exhausted, setExhausted] = useState(false);
+  // Bumped by the history-cleared reset below so an OPEN panel re-seeds —
+  // the seed effect otherwise only fires on activation edges.
+  const [seedTick, setSeedTick] = useState(0);
   const seeded = useRef(false);
   const loading = useRef(false);
+  // Generation stamp for in-flight page reads: the history-cleared reset
+  // must beat any promise fired BEFORE it — a pre-wipe page resolving after
+  // the reset would re-adopt the erased rows onto the emptied list (the
+  // seed merge sees cur=[] and takes the page wholesale) and its short
+  // length would re-latch exhausted, exactly the stale state the reset
+  // exists to prevent. Every fetch captures the stamp; the clear handler
+  // bumps it; a resolution whose stamp went stale drops on the floor.
+  const gen = useRef(0);
   // Updater functions must stay PURE (StrictMode double-invokes them — a
   // fetch inside one paged twice and duplicated rows); reads go through a
   // ref instead.
@@ -97,9 +150,11 @@ export function useHistoryFeed(active: boolean): {
   useEffect(() => {
     if (!active || seeded.current) return;
     seeded.current = true;
+    const g = gen.current;
     void commands
       .historyPage(null, HISTORY_PAGE)
       .then((page) => {
+        if (g !== gen.current) return; // cleared mid-flight — pre-wipe rows
         // A live append can land while the seed is in flight — merge, don't
         // clobber (the page includes it too; dedupe).
         setEntries((cur) =>
@@ -108,11 +163,12 @@ export function useHistoryFeed(active: boolean): {
         if (page.length < HISTORY_PAGE) setExhausted(true);
       })
       .catch(() => {
+        if (g !== gen.current) return; // the clear already re-virgined the latch
         // Release the latch so a failed seed retries on the next activation
         // (the panel stays mounted, so nothing else resets it).
         seeded.current = false;
       });
-  }, [active]);
+  }, [active, seedTick]);
   useEffect(
     () =>
       onHistoryAppended((e) => {
@@ -121,13 +177,40 @@ export function useHistoryFeed(active: boolean): {
       }),
     [],
   );
+  useEffect(
+    () =>
+      onHistoryCleared(() => {
+        // Prefs' "Erase history" wiped the backend log (its own window — this
+        // one keeps running): every latch here now describes rows that no
+        // longer exist, and un-reset they showed the erased feed until
+        // relaunch with the cursor latched exhausted. Back to the virgin
+        // state; the seedTick bump re-seeds an OPEN panel immediately (it
+        // reads the now-empty log, latches exhausted honestly, and live
+        // appends flow again) — a closed one re-seeds on next activation.
+        // The module caches go with the log: the thumb files were deleted
+        // from disk (a cached data URL would keep showing art the user asked
+        // to erase), and the uri cache is a per-entry sidecar for entries
+        // that are gone.
+        seeded.current = false;
+        loading.current = false;
+        gen.current += 1; // strand any in-flight page read on the old stamp
+        setEntries([]);
+        setExhausted(false);
+        thumbCache.clear();
+        uriCache.clear();
+        setSeedTick((t) => t + 1);
+      }),
+    [],
+  );
   const loadMore = useCallback(() => {
     if (loading.current || exhausted) return;
     loading.current = true;
+    const g = gen.current;
     const oldest = entriesRef.current[entriesRef.current.length - 1];
     void commands
       .historyPage(oldest ? oldest.started_at_ms : null, HISTORY_PAGE)
       .then((page) => {
+        if (g !== gen.current) return; // cleared mid-flight — pre-wipe rows
         loading.current = false;
         if (page.length < HISTORY_PAGE) setExhausted(true);
         if (page.length > 0) {
@@ -135,6 +218,7 @@ export function useHistoryFeed(active: boolean): {
         }
       })
       .catch(() => {
+        if (g !== gen.current) return; // the clear already dropped the latch
         // Release the latch so a transient history_page failure doesn't jam
         // pagination for the rest of the session.
         loading.current = false;
@@ -269,10 +353,12 @@ export function RowThumb({ url, size = 26 }: { url: string | null; size?: number
 function RowActionButton({
   label,
   onClick,
+  s,
   children,
 }: {
   label: string;
   onClick: () => void;
+  s: QueueScaleSpec;
   children: React.ReactNode;
 }) {
   return (
@@ -290,7 +376,7 @@ function RowActionButton({
         e.stopPropagation();
         onClick();
       }}
-      className="grid h-[26px] w-[26px] shrink-0 place-items-center rounded-md text-fg opacity-0 [transition:opacity_140ms_var(--ease-out-tk),background-color_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 active:scale-95 group-hover/row:opacity-100 group-focus-within/row:opacity-100"
+      className={`grid ${s.btn} shrink-0 place-items-center rounded-md text-fg opacity-0 [transition:opacity_140ms_var(--ease-out-tk),background-color_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 active:scale-95 group-hover/row:opacity-100 group-focus-within/row:opacity-100`}
     >
       {children}
     </button>
@@ -298,46 +384,59 @@ function RowActionButton({
 }
 
 /** Tiny inline glyphs for the row actions — one-off SVGs, not morph icons
- * (they never morph; the 3-stroke system is for glyphs that do). */
-const PlusGlyph = (
-  <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" aria-hidden>
-    <path d="M 8,3.4 L 8,12.6" />
-    <path d="M 3.4,8 L 12.6,8" />
-  </svg>
-);
-const CrossGlyph = (
-  <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" aria-hidden>
-    <path d="M 4.2,4.2 L 11.8,11.8" />
-    <path d="M 11.8,4.2 L 4.2,11.8" />
-  </svg>
-);
-const GripGlyph = (
-  <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden>
-    <path d="M 3.5,5.5 L 12.5,5.5" />
-    <path d="M 3.5,10.5 L 12.5,10.5" />
-  </svg>
-);
-const PlayGlyph = (
-  <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-    <path d="M 5.4,3.4 L 5.4,12.6" />
-    <path d="M 5.4,3.4 L 13,8 L 5.4,12.6" />
-  </svg>
-);
+ * (they never morph; the 3-stroke system is for glyphs that do). Sized per
+ * garment scale (the cross reads best one px under its siblings). */
+function PlusGlyph({ size = 13 }: { size?: number }) {
+  return (
+    <svg viewBox="0 0 16 16" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" aria-hidden>
+      <path d="M 8,3.4 L 8,12.6" />
+      <path d="M 3.4,8 L 12.6,8" />
+    </svg>
+  );
+}
+function CrossGlyph({ size = 12 }: { size?: number }) {
+  return (
+    <svg viewBox="0 0 16 16" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" aria-hidden>
+      <path d="M 4.2,4.2 L 11.8,11.8" />
+      <path d="M 11.8,4.2 L 4.2,11.8" />
+    </svg>
+  );
+}
+function GripGlyph({ size = 13 }: { size?: number }) {
+  return (
+    <svg viewBox="0 0 16 16" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden>
+      <path d="M 3.5,5.5 L 12.5,5.5" />
+      <path d="M 3.5,10.5 L 12.5,10.5" />
+    </svg>
+  );
+}
+function PlayGlyph({ size = 13 }: { size?: number }) {
+  return (
+    <svg viewBox="0 0 16 16" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M 5.4,3.4 L 5.4,12.6" />
+      <path d="M 5.4,3.4 L 13,8 L 5.4,12.6" />
+    </svg>
+  );
+}
 /** Four-point star — the "more like this" verb. One shape only: a satellite
  * spark blurred into noise at 13px (the sibling glyphs are two simple
  * strokes; idiomatic beats clever at this size). */
-const SparkleGlyph = (
-  <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-    <path d="M 8,2.6 L 9.3,6.7 L 13.4,8 L 9.3,9.3 L 8,13.4 L 6.7,9.3 L 2.6,8 L 6.7,6.7 Z" />
-  </svg>
-);
+function SparkleGlyph({ size = 13 }: { size?: number }) {
+  return (
+    <svg viewBox="0 0 16 16" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M 8,2.6 L 9.3,6.7 L 13.4,8 L 9.3,9.3 L 8,13.4 L 6.7,9.3 L 2.6,8 L 6.7,6.7 Z" />
+    </svg>
+  );
+}
 
 const QueueRowBase = function QueueRow({
   track,
   index,
   dragging,
   dragDy,
+  settleDy,
   flash,
+  s,
   onDragStart,
   onRemove,
   onKeyDown,
@@ -346,7 +445,12 @@ const QueueRowBase = function QueueRow({
   index: number;
   dragging: boolean;
   dragDy: number;
+  /** Nonzero for one frame after a live swap displaced this row: it renders
+   * seated at its OLD slot with the transform transition muted, then the
+   * clear glides it home on that transition (QueuePanel's FLIP-lite). */
+  settleDy: number;
   flash: boolean;
+  s: QueueScaleSpec;
   onDragStart: (e: React.PointerEvent, index: number) => void;
   onRemove: (uri: string) => void;
   onKeyDown: (e: React.KeyboardEvent, index: number) => void;
@@ -359,26 +463,34 @@ const QueueRowBase = function QueueRow({
       aria-keyshortcuts="ArrowUp ArrowDown Delete"
       onPointerDown={(e) => onDragStart(e, index)}
       onKeyDown={(e) => onKeyDown(e, index)}
-      className={`group/row relative flex h-[44px] cursor-grab touch-none select-none items-center gap-2.5 rounded-md px-2 ${
+      className={`group/row relative flex ${s.row} cursor-grab touch-none select-none items-center ${
         dragging
           ? "z-10 bg-surface-2 shadow-lg shadow-black/40"
-          : "z-0 [transition:transform_140ms_var(--ease-out-tk),background-color_600ms_var(--ease-out-tk)] hover:bg-fg/5"
+          : settleDy
+            ? "z-0 hover:bg-fg/5"
+            : "z-0 [transition:transform_140ms_var(--ease-out-tk),background-color_600ms_var(--ease-out-tk)] hover:bg-fg/5"
       } ${flash && !dragging ? "bg-accent/15" : ""}`}
-      style={dragging ? { transform: `translateY(${dragDy}px)` } : undefined}
+      style={
+        dragging
+          ? { transform: `translateY(${dragDy}px)` }
+          : settleDy
+            ? { transform: `translateY(${settleDy}px)` }
+            : undefined
+      }
     >
-      <RowThumb url={track.art_url} />
+      <RowThumb url={track.art_url} size={s.thumb} />
       <span className="flex min-w-0 flex-1 flex-col">
-        <span className="truncate text-xs font-medium text-fg">{track.title}</span>
-        <span className="truncate text-[11px] text-muted">{track.artist}</span>
+        <span className={`truncate ${s.title} font-medium text-fg`}>{track.title}</span>
+        <span className={`truncate ${s.artist} text-muted`}>{track.artist}</span>
       </span>
       <span
         aria-hidden
-        className="grid h-[26px] w-[18px] shrink-0 place-items-center text-muted opacity-0 transition-opacity duration-2 ease-out-tk group-hover/row:opacity-100 group-focus-within/row:opacity-100"
+        className={`grid ${s.grip} shrink-0 place-items-center text-muted opacity-0 transition-opacity duration-2 ease-out-tk group-hover/row:opacity-100 group-focus-within/row:opacity-100`}
       >
-        {GripGlyph}
+        <GripGlyph size={s.glyph} />
       </span>
-      <RowActionButton label="Remove from queue" onClick={() => onRemove(track.uri)}>
-        {CrossGlyph}
+      <RowActionButton label="Remove from queue" onClick={() => onRemove(track.uri)} s={s}>
+        <CrossGlyph size={s.glyph - 1} />
       </RowActionButton>
     </div>
   );
@@ -388,6 +500,7 @@ const QueueRow = memo(QueueRowBase);
 const HistoryRowBase = function HistoryRow({
   entry,
   actionable,
+  s,
   onPlayNow,
   onAdd,
   onGhostStart,
@@ -396,6 +509,7 @@ const HistoryRowBase = function HistoryRow({
   entry: HistoryEntry;
   /** uri known AND Spotify connected — play-now/+/drag all need the uri. */
   actionable: boolean;
+  s: QueueScaleSpec;
   onPlayNow: (e: HistoryEntry) => void;
   onAdd: (e: HistoryEntry) => void;
   onGhostStart: (ev: React.PointerEvent, e: HistoryEntry) => void;
@@ -406,26 +520,30 @@ const HistoryRowBase = function HistoryRow({
     <div
       role="listitem"
       tabIndex={0}
-      aria-label={`${entry.title} — ${entry.artist}`}
-      aria-keyshortcuts={actionable ? "Enter" : undefined}
+      aria-label={
+        actionable
+          ? `${entry.title} — ${entry.artist}. Enter to queue, Shift+Enter to play now`
+          : `${entry.title} — ${entry.artist}`
+      }
+      aria-keyshortcuts={actionable ? "Enter Shift+Enter" : undefined}
       onPointerDown={actionable ? (ev) => onGhostStart(ev, entry) : undefined}
       onKeyDown={(ev) => onKeyDown(ev, entry)}
-      className={`group/row flex h-[44px] select-none items-center gap-2.5 rounded-md px-2 [transition:background-color_140ms_var(--ease-out-tk)] hover:bg-fg/5 ${
+      className={`group/row flex ${s.row} select-none items-center [transition:background-color_140ms_var(--ease-out-tk)] hover:bg-fg/5 ${
         actionable ? "cursor-grab touch-none" : ""
       }`}
     >
-      <RowThumb url={thumb} />
+      <RowThumb url={thumb} size={s.thumb} />
       <span className="flex min-w-0 flex-1 flex-col">
-        <span className="truncate text-xs font-medium text-fg">{entry.title}</span>
-        <span className="truncate text-[11px] text-muted">{entry.artist}</span>
+        <span className={`truncate ${s.title} font-medium text-fg`}>{entry.title}</span>
+        <span className={`truncate ${s.artist} text-muted`}>{entry.artist}</span>
       </span>
       {actionable && (
         <>
-          <RowActionButton label="Play now" onClick={() => onPlayNow(entry)}>
-            {PlayGlyph}
+          <RowActionButton label="Play now" onClick={() => onPlayNow(entry)} s={s}>
+            <PlayGlyph size={s.glyph} />
           </RowActionButton>
-          <RowActionButton label="Add to queue" onClick={() => onAdd(entry)}>
-            {PlusGlyph}
+          <RowActionButton label="Add to queue" onClick={() => onAdd(entry)} s={s}>
+            <PlusGlyph size={s.glyph} />
           </RowActionButton>
         </>
       )}
@@ -484,12 +602,17 @@ export function QueuePanel({
   np,
   connected,
   open,
+  scale = "base",
 }: {
   np: NowPlaying | null;
   connected: boolean;
   /** The history feed activates on first open; rows stay mounted after. */
   open: boolean;
+  /** Garment scale: "base" for the widget's popover/expanded garments,
+   * "room" for the focus takeover's content column (see QSCALE). */
+  scale?: QueueScale;
 }) {
+  const s = QSCALE[scale];
   const upnext = useUpNext();
   const { entries, loadMore, exhausted } = useHistoryFeed(open);
   const spotifyActive = np?.player === "spotify";
@@ -593,7 +716,11 @@ export function QueuePanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [upnext, seeding]);
   const moreLikeThis = () => {
-    if (!np || !np.title || seeding) return;
+    // queueLive matches the button's aria-disabled gate: the control stays
+    // keyboard-focusable (a real <button>; pointer-events-none blocks the
+    // mouse but not Enter/Space), so without this a keyboard user could fire
+    // a real backend seed on a visually-disabled control (audit A7-8).
+    if (!queueLive || !np || !np.title || seeding) return;
     setSeeding(true);
     // Held past the default clear — the run takes seconds and a blank chip
     // mid-run reads as a stall; the result toast replaces it.
@@ -610,9 +737,9 @@ export function QueuePanel({
         else if (r === "bad_key") showToast("Last.fm rejected the API key");
         else if (r === "disconnected") showToast("Spotify unreachable");
         else if (r === "busy") showToast("Still finding similar tracks");
-        else showToast("Can't reach Last.fm");
+        else showToast("Couldn't reach Last.fm");
       })
-      .catch(() => showToast("Can't reach Last.fm"))
+      .catch(() => showToast("Couldn't reach Last.fm"))
       .finally(() => setSeeding(false));
   };
   const playNow = (t: { uri: string; title: string; artist: string }) => {
@@ -629,6 +756,29 @@ export function QueuePanel({
   // ---- queue reorder drag (translateY follow + live swap, the 11a spec) ----
   const [drag, setDrag] = useState<{ index: number; dy: number } | null>(null);
   const [order, setOrder] = useState<QueueTrack[] | null>(null); // drag overlay
+  // FLIP-lite for the displaced neighbor: a live swap re-renders it a full
+  // row away in one frame — the only un-eased motion in the drag grammar
+  // (its declared transform transition never fired; nothing changed on the
+  // element, only its list position — motion pass, 2026-07-16). On each
+  // swap, seat it at its OLD position (translateY ∓rowH, transition muted),
+  // then clear next frame so the row's own 140ms EASE.out transform
+  // transition glides it into the new slot. Index-addressed (uris can
+  // repeat); tick disambiguates back-to-back swaps of the same index.
+  const [settle, setSettle] = useState<{ index: number; dy: number; tick: number } | null>(null);
+  const settleTick = useRef(0);
+  useEffect(() => {
+    if (!settle) return;
+    // Double-rAF: the offset must PAINT before the clear re-render arms the
+    // transition back on — a single rAF can land pre-paint.
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => setSettle(null));
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+    };
+  }, [settle]);
   const rows = order ?? upnext;
   const upnextRef = useRef(upnext);
   upnextRef.current = upnext;
@@ -669,21 +819,31 @@ export function QueuePanel({
       }
       dy = ev.clientY - y0;
       let moved = false;
-      while (dy > SWAP_AT && i < list.length - 1) {
+      // The displaced neighbor of the LAST swap this event (normally the
+      // only one — SWAP_AT paces swaps to one per threshold crossing); it
+      // FLIPs from its old slot via `settle`. dy sign: a down-swap moves it
+      // UP one slot, so it starts translated DOWN (+rowH), and vice versa.
+      let displaced: { index: number; dy: number } | null = null;
+      while (dy > s.swapAt && i < list.length - 1) {
         [list[i], list[i + 1]] = [list[i + 1], list[i]];
         i++;
-        y0 += ROW_H;
-        dy -= ROW_H;
+        y0 += s.rowH;
+        dy -= s.rowH;
         moved = true;
+        displaced = { index: i - 1, dy: s.rowH };
       }
-      while (dy < -SWAP_AT && i > 0) {
+      while (dy < -s.swapAt && i > 0) {
         [list[i], list[i - 1]] = [list[i - 1], list[i]];
         i--;
-        y0 -= ROW_H;
-        dy += ROW_H;
+        y0 -= s.rowH;
+        dy += s.rowH;
         moved = true;
+        displaced = { index: i + 1, dy: -s.rowH };
       }
-      if (moved) setOrder([...list]);
+      if (moved) {
+        setOrder([...list]);
+        if (displaced) setSettle({ ...displaced, tick: ++settleTick.current });
+      }
       setDrag({ index: i, dy });
     };
     const finish = (commit: boolean) => {
@@ -793,7 +953,7 @@ export function QueuePanel({
       const r = zoneRef.current!.getBoundingClientRect();
       const at = Math.max(
         0,
-        Math.min(Math.round((ev.clientY - r.top - ROW_H / 2) / ROW_H), upnextRef.current.length),
+        Math.min(Math.round((ev.clientY - r.top - s.rowH / 2) / s.rowH), upnextRef.current.length),
       );
       addResolved(entry, at);
     };
@@ -806,10 +966,15 @@ export function QueuePanel({
   };
 
   const onHistoryKeyDown = (e: React.KeyboardEvent, entry: HistoryEntry) => {
-    if (e.key === "Enter" && queueLive) {
-      e.preventDefault();
-      addResolved(entry);
-    }
+    if (e.key !== "Enter" || !queueLive) return;
+    e.preventDefault();
+    // Enter queues (the row's default verb); Shift+Enter plays now — the
+    // pointer play-now button is out of the Tab order (the ROW is the
+    // keyboard stop), so without this there was NO keyboard path to play-now
+    // (audit A6-8). Both gated on queueLive, exactly like the pointer
+    // actions — mirrors the Search pane's two-Enter grammar.
+    if (e.shiftKey) playResolved(entry);
+    else addResolved(entry);
   };
 
   // Infinite scroll: page when the scroll bottom nears.
@@ -833,14 +998,14 @@ export function QueuePanel({
       className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto overscroll-contain [scrollbar-width:none]"
     >
       <div className="flex items-center gap-1.5 px-2 pb-0.5 pt-1.5">
-        <span className="text-[10px] uppercase tracking-widest text-muted">
+        <span className={`${s.label} uppercase tracking-widest text-muted`}>
           Up next{rows.length > 0 && ` · ${rows.length}`}
         </span>
-        <span className="text-[10px] text-muted/85">
+        <span className={`${s.label} text-muted/85`}>
           {queueLive ? "Spotify · drag to reorder" : "Spotify"}
         </span>
         {/* aria-live chip: quiet feedback for queue/play actions. */}
-        <span aria-live="polite" className="ml-auto min-w-0 truncate text-[10px] text-fg">
+        <span aria-live="polite" className={`ml-auto min-w-0 truncate ${s.toast} text-fg`}>
           {toast}
         </span>
         {/* More-like-this: fills the list with Last.fm-similar tracks for
@@ -851,17 +1016,22 @@ export function QueuePanel({
         {hasKey && (
           <button
             type="button"
+            // The expanded garment nudges this onto the corner-chrome rail
+            // via [&_[data-sparkle]] (App.tsx queue layer) — the sparkle is
+            // persistent chrome there and must share the ViewToggle/bracket
+            // vertical line (Thien, 2026-07-16).
+            data-sparkle
             aria-label={np?.title ? `More like ${np.title}` : "More like this"}
             title={np?.title ? `More like ${np.title}` : "More like this"}
             aria-disabled={!queueLive || !np?.title || seeding || undefined}
             onClick={moreLikeThis}
-            className={`grid h-[26px] w-[26px] shrink-0 place-items-center rounded-md [transition:color_140ms_var(--ease-out-tk),background-color_140ms_var(--ease-out-tk),opacity_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] ${
+            className={`grid ${s.btn} shrink-0 place-items-center rounded-md [transition:color_140ms_var(--ease-out-tk),background-color_140ms_var(--ease-out-tk),opacity_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] ${
               !queueLive || !np?.title || seeding
                 ? "pointer-events-none text-muted opacity-30"
                 : "text-fg hover:bg-fg/10 active:scale-95"
             }`}
           >
-            {SparkleGlyph}
+            <SparkleGlyph size={s.glyph} />
           </button>
         )}
       </div>
@@ -873,10 +1043,10 @@ export function QueuePanel({
       {!connected ? (
         <div className="flex flex-col items-start gap-1 px-2 pb-1.5 pt-0.5">
           <SpotifyConnectButton />
-          <p className="m-0 text-[11px] text-muted/85">Up next &amp; playback need Spotify.</p>
+          <p className={`m-0 ${s.artist} text-muted/85`}>Queue &amp; playback need Spotify.</p>
         </div>
       ) : gateProse ? (
-        <p className="m-0 px-2 pb-1 text-xs text-muted">{gateProse}</p>
+        <p className={`m-0 px-2 pb-1 ${s.prose} text-muted`}>{gateProse}</p>
       ) : null}
       <div
         ref={zoneRef}
@@ -887,7 +1057,7 @@ export function QueuePanel({
         }`}
       >
         {rows.length === 0 && !gated && (
-          <p className="m-0 px-2 py-2 text-xs text-muted">
+          <p className={`m-0 px-2 py-2 ${s.prose} text-muted`}>
             Queue is empty — press + on a track below or drag one here.
           </p>
         )}
@@ -906,7 +1076,9 @@ export function QueuePanel({
                 index={i}
                 dragging={drag?.index === i}
                 dragDy={drag?.index === i ? drag.dy : 0}
+                settleDy={settle && settle.index === i && drag?.index !== i ? settle.dy : 0}
                 flash={flashUris.has(t.uri)}
+                s={s}
                 onDragStart={onQueueDragStart}
                 onRemove={(uri) => commands.upnextRemove(uri)}
                 onKeyDown={onQueueKeyDown}
@@ -916,11 +1088,11 @@ export function QueuePanel({
         })()}
       </div>
       <div className="px-2 pb-0.5 pt-2.5">
-        <span className="text-[10px] uppercase tracking-widest text-muted">Earlier</span>
+        <span className={`${s.label} uppercase tracking-widest text-muted`}>Earlier</span>
       </div>
       <div role="list" aria-label="Earlier" className="flex flex-col">
         {entries.length === 0 && (
-          <p className="m-0 px-2 py-2 text-xs text-muted">
+          <p className={`m-0 px-2 py-2 ${s.prose} text-muted`}>
             Tracks you play land here{exhausted ? "" : "…"}
           </p>
         )}
@@ -934,6 +1106,7 @@ export function QueuePanel({
             key={`${e.key}:${e.started_at_ms}`}
             entry={e}
             actionable={queueLive}
+            s={s}
             onPlayNow={playResolved}
             onAdd={(en) => addResolved(en)}
             onGhostStart={onGhostStart}
@@ -942,22 +1115,30 @@ export function QueuePanel({
         ))}
       </div>
       {/* Ghost chip — fixed within the (window-sized) webview, riding the
-          cursor; pure decoration, the pointer handlers own the semantics. */}
+          cursor; pure decoration, the pointer handlers own the semantics.
+          Two layers, two clocks: the OUTER transform is the cursor-follow
+          (translate3d, untransitioned — cursor-locked, compositor-only; it
+          was left/top layout mutations per move) and the INNER carries the
+          drop-zone scale on an eased transition — on one element the scale
+          snapped at the zone boundary while the zone's own glow eased 140ms
+          (motion pass, 2026-07-16). */}
       {ghost && (
         <div
           aria-hidden
-          className="pointer-events-none fixed z-50 flex items-center gap-2 rounded-lg border border-border/15 bg-surface-2 py-1 pl-1.5 pr-3 shadow-xl shadow-black/50"
-          style={{
-            left: ghost.x + 10,
-            top: ghost.y - 16,
-            transform: ghost.over ? "scale(1.02)" : "scale(1)",
-          }}
+          className="pointer-events-none fixed left-0 top-0 z-50 will-change-transform"
+          style={{ transform: `translate3d(${ghost.x + 10}px, ${ghost.y - 16}px, 0)` }}
         >
-          <span className="grid h-[22px] w-[22px] place-items-center overflow-hidden rounded-[5px] bg-surface text-muted">
-            <MorphIcon name="note" size={11} />
-          </span>
-          <span className="whitespace-nowrap text-xs font-medium text-fg">{ghost.entry.title}</span>
-          <span className="whitespace-nowrap text-[11px] text-muted">{ghost.entry.artist}</span>
+          <div
+            className={`flex items-center gap-2 rounded-lg border border-border/15 bg-surface-2 py-1 pl-1.5 pr-3 shadow-xl shadow-black/40 [transition:scale_140ms_var(--ease-out-tk)] ${
+              ghost.over ? "scale-[1.02]" : "scale-100"
+            }`}
+          >
+            <span className="grid h-[22px] w-[22px] place-items-center overflow-hidden rounded-[5px] bg-surface text-muted">
+              <MorphIcon name="note" size={11} />
+            </span>
+            <span className="whitespace-nowrap text-xs font-medium text-fg">{ghost.entry.title}</span>
+            <span className="whitespace-nowrap text-[11px] text-muted">{ghost.entry.artist}</span>
+          </div>
         </div>
       )}
     </div>

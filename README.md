@@ -46,7 +46,7 @@ Transport commands route to whatever Windows considers the current media session
 
 ## Tray menu
 
-Show / Hide · Reset position · Start at login · Hide on fullscreen · Connect Spotify · Check for updates · Quit
+Show / Hide · Reset position · Preferences… · Shortcuts / Help · Start at login · Hide on fullscreen · Connect Spotify · Check for updates · Open logs · Quit
 
 ## Player support
 
@@ -54,6 +54,7 @@ What each player actually honors over GSMTC is **measured, not assumed** — the
 
 - **Spotify** supports seek natively over SMTC — ±10s lands in ~50ms, both directions.
 - **Apple Music** has no working programmatic seek path (SMTC seek is silently ignored, keyboard accelerators are swallowed, UIA value writes revert). Palette ships AM with a display-only progress bar and the seek buttons gated off. Position and lyric sync still work.
+- **Apple Music lossless can hold the output device in WASAPI *exclusive* mode**, which bypasses the shared mix — nothing on the system can capture that stream, so the audio-reactive separator stays flat. Workaround: Windows Sound → your output device → Advanced → untick "Allow apps to take exclusive control of this device" (drops AM to shared mode, no longer bit-perfect). Detail in [docs/smtc-support-matrix.md](docs/smtc-support-matrix.md), finding 12.
 
 ## Spotify & Last.fm (optional)
 
@@ -77,9 +78,9 @@ Everything above is an optional power tier layered on top — the base player ne
 
 Palette keeps everything local. There is no analytics, no telemetry, and no account.
 
-- **What's stored on your machine** (`%APPDATA%\com.thien.pulse`): your preferences, your play history (`history.jsonl` — every track Palette displayed), the on-disk lyrics and thumbnail caches, and — only if you connect Spotify — your Spotify tokens. Logs and the WebView2 cache live under `%LOCALAPPDATA%\com.thien.pulse`.
+- **What's stored on your machine** (`%APPDATA%\com.thien.pulse`): your preferences, your play history (`history.jsonl` — every track Palette displayed), the on-disk lyrics and thumbnail caches, and — only if you connect Spotify — your Spotify tokens. The tokens are plain JSON protected by your Windows user-profile permissions, not OS-level encryption. Logs and the WebView2 cache live under `%LOCALAPPDATA%\com.thien.pulse`; the log (`pulse.log`) records app diagnostics including fullscreen-presence transitions (when the widget concealed and restored — which app was fullscreen is recorded only in debug builds, never in release logs).
 - **What leaves your machine**: lyric lookups to [LRCLIB](https://lrclib.net), and — only for the opt-in tier — requests to the Spotify Web API and Last.fm. Nothing else.
-- **Clearing data**: **Preferences → Data → Clear play history** wipes the history log and its thumbnails. Uninstalling removes your Spotify tokens.
+- **Clearing data**: **Preferences → Data → Clear play history** wipes the history log and its thumbnails. Uninstalling removes the app and always deletes your Spotify tokens; play history, preferences, and caches survive an uninstall→reinstall unless you tick the uninstaller's "Delete the application data" checkbox.
 
 ## Build from source
 
@@ -90,6 +91,11 @@ npm install
 npm run tauri dev     # run the app
 npm run tauri build   # installer → src-tauri/target/release/bundle/nsis/
 ```
+
+One heads-up: `npm run tauri build` compiles fine, then **errors at the bundling step without a signing key** — the config has `createUpdaterArtifacts` on, so the bundler wants `TAURI_SIGNING_PRIVATE_KEY` in the environment. Two ways through:
+
+- Generate your own updater keypair with `npx tauri signer generate` and export the private key as `TAURI_SIGNING_PRIVATE_KEY` before building, or
+- flip `createUpdaterArtifacts` to `false` in `src-tauri/tauri.conf.json` locally for an unsigned personal build (you just won't get self-update artifacts).
 
 ## Stack
 

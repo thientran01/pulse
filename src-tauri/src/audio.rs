@@ -20,7 +20,7 @@ use rustfft::{num_complex::Complex, FftPlanner};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 const FFT_SIZE: usize = 2048;
@@ -89,7 +89,16 @@ impl Ring {
         }
     }
     pub(crate) fn push_frame(&mut self, frame_mean: f32) {
-        self.buf[self.pos] = frame_mean;
+        // Sanitize at the one ingest point both capture paths share: a single
+        // non-finite sample (a driver/format edge case can emit NaN/Inf)
+        // propagates through the FFT into smoothed[] and STICKS there — serde
+        // renders a NaN band as `null` and the bars freeze until the next pause
+        // resets the envelope.
+        self.buf[self.pos] = if frame_mean.is_finite() {
+            frame_mean
+        } else {
+            0.0
+        };
         self.pos = (self.pos + 1) % self.buf.len();
     }
     /// Snapshot in chronological order.
@@ -207,19 +216,84 @@ const SILENCE_AFTER_MS: u64 = 250;
 /// often — the player's audio session often appears a beat after playback
 /// starts, and a missed join at open time shouldn't stick for the session.
 const UPGRADE_RETRY: Duration = Duration::from_secs(5);
-/// A process capture that has NEVER delivered a packet this long into
-/// playback joined the wrong process (multi-profile browsers can alias an
-/// AUMID) — the right join delivers within the first beat of a playing
-/// track. Demote that AUMID to the Device fallback, stickily (re-resolving
-/// would pick the same wrong PID and strand the bars at zero again), until
-/// the playing app changes. A capture that HAS delivered is never demoted:
-/// its later silence is the target really rendering nothing.
+/// Device-fallback stall watchdog: first reopen after this long without a
+/// callback frame — the one-off "default device changed / stream silently
+/// died" case recovers at this latency.
+const STALL_BASE: Duration = Duration::from_secs(2);
+/// A reopen the endpoint answers with ZERO frames is FRUITLESS, and WASAPI
+/// device loopback legitimately delivers no callbacks while nothing renders
+/// locally (GSMTC playing with the audio on a phone/speaker — the DeviceTag
+/// case): reopening can't help, so consecutive fruitless reopens double the
+/// next stall threshold (2s → 4s → 8s …) up to this cap instead of cycling
+/// the device open/close every 2s all session. Any real frame progress, a
+/// target change, or a landed process join resets to STALL_BASE, so genuine
+/// device-swap recovery keeps its first-reopen latency.
+const STALL_CAP: Duration = Duration::from_secs(60);
+/// A process capture that has NEVER delivered a packet WITH SIGNAL this long
+/// into playback either joined the wrong process (multi-profile browsers can
+/// alias an AUMID) or joined a session that only renders SILENCE while the
+/// audible audio goes elsewhere (a spatial mixer, or a sibling process —
+/// loopback.rs's second quirk). The right join delivers real audio within the
+/// first beat of a playing track. Demote that AUMID to the Device fallback,
+/// stickily (re-resolving would pick the same silent PID and strand the bars at
+/// zero again), until the playing app changes — the whole-mix fallback captures
+/// the endpoint IF the audio is in the shared mix at all. It is NOT for
+/// exclusive-mode playback (Apple Music bit-perfect lossless): that bypasses the
+/// shared mix and is uncapturable by any loopback — see docs/smtc-support-matrix.md
+/// finding 12. A capture that has delivered signal is never demoted: its later
+/// silence is the target really rendering nothing.
 const DEMOTE_AFTER_MS: u64 = 10_000;
+/// A demote is sticky but NOT permanent (it used to clear only on an AUMID
+/// change — so a single transient activation blip, or >10s of digital silence
+/// at open, stranded a player on whole-mix Discord-bleed capture for the whole
+/// session). After this BASE window the AUMID is retried with a process-scoped
+/// join; it's wide enough that a genuinely-uncapturable target (exclusive mode,
+/// sibling-process render) isn't re-resolved every loop.
+const DEMOTE_EXPIRY: Duration = Duration::from_secs(90);
+/// Backoff ceiling for a PERMANENT mis-join. Without it, a target whose process
+/// capture activates but never delivers packets retries every DEMOTE_EXPIRY
+/// forever — each retry opens the silent capture and flattens the waveform for
+/// DEMOTE_AFTER_MS (~10s flat every 90s). Each consecutive silent re-demote of
+/// the same AUMID instead doubles its retry window (90s → 180s → … → this cap;
+/// stamp_demote), so a permanent mis-join settles to one brief flat per ~10min.
+/// A target that changes, or a retry that actually delivers signal, resets to
+/// the base window — so transient failures still recover at DEMOTE_EXPIRY.
+const DEMOTE_EXPIRY_CAP: Duration = Duration::from_secs(600);
+
+/// True while `aumid` is under an UNEXPIRED demote — its stored window (which
+/// grows with the backoff, see stamp_demote) hasn't elapsed. Expired → false,
+/// so the next open retries the process join; the stamp is deliberately LEFT in
+/// place (not cleared) so a re-demote reads its window as the doubling base. A
+/// target change or a genuine recovery clears it (see the demoted decl).
+fn is_demoted(demoted: &Option<(String, Instant, Duration)>, aumid: &str) -> bool {
+    match demoted {
+        Some((d, since, expiry)) => d == aumid && since.elapsed() < *expiry,
+        None => false,
+    }
+}
+
+/// Stamp (or re-stamp) the sticky demote for `aumid`. Re-demoting the SAME
+/// target — a consecutive expiry-retry that opened the process capture and it
+/// still never delivered — doubles the retry window (capped at
+/// DEMOTE_EXPIRY_CAP); a first demote, or one after the target changed/
+/// recovered (`prev` None or a different AUMID), starts at the base window.
+fn stamp_demote(
+    prev: &Option<(String, Instant, Duration)>,
+    aumid: String,
+) -> (String, Instant, Duration) {
+    let expiry = match prev {
+        Some((d, _, e)) if *d == aumid => (*e * 2).min(DEMOTE_EXPIRY_CAP),
+        _ => DEMOTE_EXPIRY,
+    };
+    (aumid, Instant::now(), expiry)
+}
 
 /// Owner thread: opens/drops the capture as the switch flips, runs the
 /// FFT + smoothing + emit loop while on.
 pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
-    std::thread::spawn(move || {
+    std::thread::Builder::new()
+        .name("audio-owner".into())
+        .spawn(move || {
         let mut planner = FftPlanner::<f32>::new();
         let fft = planner.plan_fft_forward(FFT_SIZE);
         // Hann window, precomputed.
@@ -242,9 +316,14 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
 
         let mut active: Option<(Capture, f32, Arc<Mutex<Ring>>)> = None;
         let mut last_upgrade = std::time::Instant::now();
-        // The one AUMID currently demoted to Device capture (see
-        // DEMOTE_AFTER_MS). Cleared when the target moves off it.
-        let mut demoted: Option<String> = None;
+        // The one AUMID currently demoted to Device capture: (aumid, stamped-at,
+        // retry window that applies). The window is the base DEMOTE_EXPIRY,
+        // doubled per consecutive silent re-demote up to DEMOTE_EXPIRY_CAP
+        // (stamp_demote). Cleared when the target moves off it (open branch) or
+        // a retry genuinely recovers (the Process health arm's has_data reset).
+        // An EXPIRED stamp is left in place — its window is the next backoff's
+        // base, and is_demoted already reads it as not-demoted.
+        let mut demoted: Option<(String, Instant, Duration)> = None;
         let mut smoothed = [0.0f32; 3];
         let mut gain_ref = [1e-4f32; 3];
         let spec_edges = spectrum_edges();
@@ -259,6 +338,16 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
         let frames = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let mut last_frames = 0u64;
         let mut last_progress = std::time::Instant::now();
+        // Fruitless-reopen backoff (see STALL_CAP) + one-warn-per-episode
+        // gates: a silent endpoint otherwise wrote the stall warn AND the
+        // no-join warn every ~2s cycle (~3.6k lines/hour). An "episode" ends
+        // when frames progress, the target AUMID moves, or a process-scoped
+        // join lands — each resets all three so the next episode warns once
+        // again at Warn level and starts at the base first-reopen latency.
+        let mut stall_threshold = STALL_BASE;
+        let mut stall_warned = false;
+        let mut fallback_warned = false;
+        let mut stall_target = String::new();
 
         loop {
             let want = switch.load(Ordering::Relaxed);
@@ -275,10 +364,21 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                 // whole-mix device loopback as the fallback.
                 let ring = Arc::new(Mutex::new(Ring::new()));
                 let aumid = target_aumid();
-                if demoted.as_deref().is_some_and(|d| d != aumid) {
-                    demoted = None;
+                if demoted.as_ref().is_some_and(|(d, _, _)| *d != aumid) {
+                    demoted = None; // target moved off the demoted AUMID
                 }
-                let process = if aumid.is_empty() || demoted.is_some() {
+                if aumid != stall_target {
+                    // A fresh target opening = a fresh episode: base stall
+                    // latency, warns re-armed. (The Device arm's identical
+                    // reset covers a target that moves mid-capture; this one
+                    // covers an episode that STARTS here — it must not
+                    // inherit the previous target's backoff.)
+                    stall_target = aumid.clone();
+                    stall_threshold = STALL_BASE;
+                    stall_warned = false;
+                    fallback_warned = false;
+                }
+                let process = if aumid.is_empty() || is_demoted(&demoted, &aumid) {
                     None
                 } else {
                     loopback::resolve_target(&aumid).and_then(|t| {
@@ -287,12 +387,30 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                 };
                 if let Some(cap) = process {
                     let rate = cap.sample_rate;
+                    // A landed join ends any stall episode: the Device-arm
+                    // resets can't run while a Process capture holds the
+                    // slot, so without this a later same-AUMID fall back to
+                    // Device inherits a capped threshold + pre-suppressed
+                    // warns from BEFORE the interlude.
+                    stall_threshold = STALL_BASE;
+                    stall_warned = false;
+                    fallback_warned = false;
                     active = Some((Capture::Process(cap, aumid), rate, ring));
                 } else if let Some((stream, rate)) = open_loopback(ring.clone(), frames.clone()) {
                     if !aumid.is_empty() {
-                        log::warn!(
-                            "audio: no process-loopback join for {aumid:?} — device-mix fallback"
-                        );
+                        // Warn once per fallback episode: a silent-endpoint
+                        // reopen cycle re-enters here every pass, and each
+                        // cycle re-missing the same join is not news.
+                        if !fallback_warned {
+                            fallback_warned = true;
+                            log::warn!(
+                                "audio: no process-loopback join for {aumid:?} — device-mix fallback"
+                            );
+                        } else {
+                            log::debug!(
+                                "audio: still no process-loopback join for {aumid:?} — device-mix fallback"
+                            );
+                        }
                     }
                     last_upgrade = std::time::Instant::now();
                     active = Some((Capture::Device(stream), rate, ring));
@@ -321,6 +439,13 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                     // plus the wrong-join demote (a real player is never
                     // THIS silent mid-playback).
                     Capture::Process(p, aumid) => {
+                        // A capture now delivering signal is a genuine recovery
+                        // — drop any lingering demote for this target so a
+                        // future mis-join retries at the base window (the
+                        // backoff is for CONSECUTIVE silent re-demotes only).
+                        if p.has_data() && demoted.as_ref().is_some_and(|(d, _, _)| d == aumid) {
+                            demoted = None;
+                        }
                         // A capture that died having NEVER delivered is a
                         // broken join — demote, don't reopen: a plain reopen
                         // would re-run the full resolution+activation at
@@ -340,16 +465,45 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                         if now_frames != last_frames {
                             last_frames = now_frames;
                             last_progress = std::time::Instant::now();
+                            // Real packets: the endpoint is audible — restore
+                            // the first-reopen latency and re-arm the
+                            // per-episode warns.
+                            stall_threshold = STALL_BASE;
+                            stall_warned = false;
+                            fallback_warned = false;
                         }
-                        if last_progress.elapsed() > Duration::from_secs(2) {
-                            log::warn!(
-                                "audio loopback stalled — reopening against current default device"
-                            );
+                        let aumid = target_aumid();
+                        if aumid != stall_target {
+                            // Target moved (player change): a fresh endpoint
+                            // deserves the base latency and a fresh warn.
+                            stall_target = aumid.clone();
+                            stall_threshold = STALL_BASE;
+                            stall_warned = false;
+                            fallback_warned = false;
+                        }
+                        if last_progress.elapsed() > stall_threshold {
+                            // Fire the reopen and pre-double the next wait:
+                            // a reopen that delivers frames resets to base
+                            // above, so only a FRUITLESS one (silent
+                            // endpoint) keeps the doubled threshold — the
+                            // cadence decays 2s→4s→…→cap instead of
+                            // churning.
+                            stall_threshold = (stall_threshold * 2).min(STALL_CAP);
+                            if !stall_warned {
+                                stall_warned = true;
+                                log::warn!(
+                                    "audio loopback stalled — reopening against current default device"
+                                );
+                            } else {
+                                log::debug!(
+                                    "audio loopback still silent — reopen backoff now {}s",
+                                    stall_threshold.as_secs()
+                                );
+                            }
                             Act::Reopen
                         } else if last_upgrade.elapsed() > UPGRADE_RETRY {
                             last_upgrade = std::time::Instant::now();
-                            let aumid = target_aumid();
-                            if aumid.is_empty() || demoted.as_deref() == Some(&aumid) {
+                            if aumid.is_empty() || is_demoted(&demoted, &aumid) {
                                 Act::Keep
                             } else {
                                 Act::TryUpgrade(aumid)
@@ -367,7 +521,7 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                     }
                     Act::Demote(aumid) => {
                         log::warn!("audio: process capture for {aumid:?} never delivered — device-mix fallback");
-                        demoted = Some(aumid);
+                        demoted = Some(stamp_demote(&demoted, aumid));
                         active = None; // reopens demoted (Device) next iteration
                         continue;
                     }
@@ -390,9 +544,16 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
                                     active = Some((Capture::Process(cap, aumid), rate, ring));
                                     last_frames = frames.load(Ordering::Relaxed);
                                     last_progress = std::time::Instant::now();
+                                    // Same episode-end as the open-branch
+                                    // join: the upgrade proves the target
+                                    // deliverable, so a later Device
+                                    // fallback is a NEW episode.
+                                    stall_threshold = STALL_BASE;
+                                    stall_warned = false;
+                                    fallback_warned = false;
                                 } else {
                                     log::warn!("audio: process activation failed for {aumid:?} — staying on device mix");
-                                    demoted = Some(aumid);
+                                    demoted = Some(stamp_demote(&demoted, aumid));
                                 }
                             }
                         }
@@ -477,5 +638,6 @@ pub fn spawn(app: AppHandle, switch: Arc<AtomicBool>) {
             let _ = app.emit("audio-bands", bands);
             std::thread::sleep(EMIT_INTERVAL);
         }
-    });
+        })
+        .expect("spawn audio-owner thread");
 }

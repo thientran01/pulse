@@ -41,7 +41,7 @@
  * Moved event) settles it — which also self-heals positions persisted on a
  * now-disconnected monitor.
  */
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -175,8 +175,14 @@ pub struct Dock {
     /// Every positioning op bumps this first; a stale snap animation dies on
     /// its next frame. Last write wins — no queue.
     epoch: AtomicU64,
-    /// Set around self-inflicted moves so on_moved ignores them.
-    animating: AtomicBool,
+    /// Nesting COUNT of in-flight self-inflicted moves so on_moved ignores
+    /// them (>0 = animating). A plain bool let a SUPERSEDED animation thread's
+    /// tail `store(false)` clear the flag out from under the NEWER animation
+    /// that replaced it — a self-inflicted Moved during that newer glide then
+    /// read as a user drag and mis-fired the corner snap. A counter can't: each
+    /// op adds exactly one on entry and subs one on every exit, so a superseded
+    /// thread only removes its own contribution.
+    animating: AtomicI32,
     last_moved: Mutex<Instant>,
     /// One debounce watcher at a time.
     watcher_armed: AtomicBool,
@@ -226,7 +232,7 @@ impl Default for Dock {
         Self {
             corner: Mutex::new(None),
             epoch: AtomicU64::new(0),
-            animating: AtomicBool::new(false),
+            animating: AtomicI32::new(0),
             last_moved: Mutex::new(Instant::now()),
             watcher_armed: AtomicBool::new(false),
             hit_size: Mutex::new(None),
@@ -341,10 +347,10 @@ fn apply_pos(window: &WebviewWindow, x: i32, y: i32, size: Option<(i32, i32)>) {
 /// (the window is hidden) — visible moves glide via animate_to.
 fn jump_to(window: &WebviewWindow, x: i32, y: i32) {
     let dock = window.state::<Dock>();
+    dock.animating.fetch_add(1, Ordering::SeqCst);
     dock.epoch.fetch_add(1, Ordering::SeqCst);
-    dock.animating.store(true, Ordering::SeqCst);
     apply_pos(window, x, y, None);
-    dock.animating.store(false, Ordering::SeqCst);
+    dock.animating.fetch_sub(1, Ordering::SeqCst);
 }
 
 /// Clamp an origin so the w×h window sits inside `rect`, keeping the
@@ -468,9 +474,9 @@ fn animate_to(window: &WebviewWindow, from: (i32, i32), target: (i32, i32)) {
         // older in-flight animation and suppress the self-inflicted Moved.
         dock.epoch.fetch_add(1, Ordering::SeqCst);
         if (dx, dy) != (0, 0) {
-            dock.animating.store(true, Ordering::SeqCst);
+            dock.animating.fetch_add(1, Ordering::SeqCst);
             apply_pos(window, target.0, target.1, None);
-            dock.animating.store(false, Ordering::SeqCst);
+            dock.animating.fetch_sub(1, Ordering::SeqCst);
         }
         return;
     }
@@ -479,6 +485,45 @@ fn animate_to(window: &WebviewWindow, from: (i32, i32), target: (i32, i32)) {
         let y = from.1 + (dy as f64 * e).round() as i32;
         apply_pos(win, x, y, None);
     });
+}
+
+/// Decrements the `animating` counter on drop, so EVERY exit of a
+/// spawn_animation thread — normal landing, superseded-return, AND a panic in
+/// the `frame` closure — resets the count. A panic that leaked the count ≥1
+/// would make on_moved read every real user drag as self-inflicted and refuse
+/// to re-dock until a restart. The matching fetch_add stays in spawn_animation
+/// BEFORE the epoch bump (so the count never dips to 0 between add and a
+/// superseded thread's sub); this guard owns only the decrement. Mirrors
+/// spotify.rs's FlagGuard / loopback.rs's CaptureExit.
+struct AnimGuard<'a>(&'a AtomicI32);
+
+impl Drop for AnimGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// RAII 1ms system timer resolution (timeBeginPeriod/timeEndPeriod). Restores
+/// it on drop, so a panic in the animation frame can't leak the elevated
+/// resolution process-wide — and the two exit paths (superseded-return, normal
+/// end) no longer each need a manual timeEndPeriod.
+struct TimerPeriod;
+
+impl TimerPeriod {
+    fn new() -> Self {
+        unsafe {
+            let _ = timeBeginPeriod(1);
+        }
+        TimerPeriod
+    }
+}
+
+impl Drop for TimerPeriod {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = timeEndPeriod(1);
+        }
+    }
 }
 
 /// Drive `frame(window, eased_fraction)` at FRAME_MS over SNAP_MS with the
@@ -492,49 +537,53 @@ fn spawn_animation(
     frame: impl Fn(&WebviewWindow, f64) + Send + 'static,
 ) {
     let dock = window.state::<Dock>();
+    // Increment BEFORE bumping the epoch: the superseded thread subs when it
+    // sees the new epoch, and adding first keeps the count from momentarily
+    // dipping to 0 between the two.
+    dock.animating.fetch_add(1, Ordering::SeqCst);
     let my_epoch = dock.epoch.fetch_add(1, Ordering::SeqCst) + 1;
-    dock.animating.store(true, Ordering::SeqCst);
     let window = window.clone();
-    std::thread::spawn(move || {
-        let dock = window.state::<Dock>();
-        if snap_animation_enabled() {
-            // Default Windows timer resolution rounds thread::sleep(8ms) up
-            // to ~15.6ms, landing ~13 UNEVEN frames across the 200ms window —
-            // the mid-curve (fastest) stretch jumps in irregular steps and
-            // the motion reads as lunge-then-settle instead of one glide.
-            // 1ms resolution for the animation's lifetime makes the 8ms
-            // cadence real; wall-clock progress below stays the correctness
-            // backstop for any frame the OS still delays.
-            unsafe {
-                let _ = timeBeginPeriod(1);
-            }
-            let start = Instant::now();
-            loop {
-                std::thread::sleep(Duration::from_millis(FRAME_MS));
-                if dock.epoch.load(Ordering::SeqCst) != my_epoch {
-                    // Superseded by a drag or resize — stop where we are.
-                    dock.animating.store(false, Ordering::SeqCst);
-                    unsafe {
-                        let _ = timeEndPeriod(1);
+    std::thread::Builder::new()
+        .name("dock-anim".into())
+        .spawn(move || {
+            let dock = window.state::<Dock>();
+            // RAII: the fetch_add ran in spawn_animation (before the epoch
+            // bump); this guard owns the matching sub for EVERY exit — normal
+            // landing, superseded-return, and a panic in `frame`.
+            let _anim = AnimGuard(&dock.animating);
+            if snap_animation_enabled() {
+                // Default Windows timer resolution rounds thread::sleep(8ms) up
+                // to ~15.6ms, landing ~13 UNEVEN frames across the 200ms window —
+                // the mid-curve (fastest) stretch jumps in irregular steps and
+                // the motion reads as lunge-then-settle instead of one glide.
+                // 1ms resolution for the animation's lifetime makes the 8ms
+                // cadence real; wall-clock progress below stays the correctness
+                // backstop for any frame the OS still delays. RAII so a frame
+                // panic can't leak the elevated resolution.
+                let _timer = TimerPeriod::new();
+                let start = Instant::now();
+                loop {
+                    std::thread::sleep(Duration::from_millis(FRAME_MS));
+                    if dock.epoch.load(Ordering::SeqCst) != my_epoch {
+                        // Superseded by a drag or resize — stop where we are.
+                        // The guards sub only OUR contribution + restore the
+                        // timer on drop; the newer op's increment keeps the
+                        // count >0 so its glide stays flagged self-inflicted.
+                        return;
                     }
-                    return;
+                    // Progress from wall-clock, not frame count: a delayed frame
+                    // skips ahead instead of slowing the animation down.
+                    let t = (start.elapsed().as_secs_f64() * 1000.0 / SNAP_MS as f64).min(1.0);
+                    frame(&window, ease(t));
+                    if t >= 1.0 {
+                        break;
+                    }
                 }
-                // Progress from wall-clock, not frame count: a delayed frame
-                // skips ahead instead of slowing the animation down.
-                let t = (start.elapsed().as_secs_f64() * 1000.0 / SNAP_MS as f64).min(1.0);
-                frame(&window, ease(t));
-                if t >= 1.0 {
-                    break;
-                }
+            } else {
+                frame(&window, 1.0);
             }
-            unsafe {
-                let _ = timeEndPeriod(1);
-            }
-        } else {
-            frame(&window, 1.0);
-        }
-        dock.animating.store(false, Ordering::SeqCst);
-    });
+        })
+        .expect("spawn dock-anim thread");
 }
 
 /// The mode footprint anchored at the docked corner (physical px, screen
@@ -848,9 +897,9 @@ pub fn set_window_size(window: WebviewWindow, dock: State<Dock>, width: f64, hei
     // Launch derivation glides nothing (a single sized apply_pos) — no grace.
     set_corner(&dock, corner, false);
     emit_corner(&window, corner);
-    dock.animating.store(true, Ordering::SeqCst);
+    dock.animating.fetch_add(1, Ordering::SeqCst);
     apply_pos(&window, x, y, Some((w, h)));
-    dock.animating.store(false, Ordering::SeqCst);
+    dock.animating.fetch_sub(1, Ordering::SeqCst);
 }
 
 /// The frontend reports the current mode's interactive footprint (logical
@@ -873,75 +922,79 @@ pub fn set_hit_size(dock: State<Dock>, width: f64, height: f64) {
 /// from under it. While hidden the loop parks on Dock::show_signal (woken by
 /// apply_visibility's show path) instead of polling.
 pub fn spawn_hit_watcher(window: WebviewWindow) {
-    std::thread::spawn(move || {
-        // Local mirror of the applied state — the window starts interactive.
-        let mut ignoring = false;
-        loop {
-            let mut near = false;
-            let visible = window.is_visible().unwrap_or(false);
-            if !visible {
-                // Park until a show wakes us (or the safety timeout). Re-check
-                // visibility under the lock so a show that landed between the
-                // check above and here isn't waited past (lost-wakeup guard);
-                // the wake flag covers a notify_shown that ran before we
-                // parked. On wake the top-of-loop is_visible() runs the hit
-                // block immediately, so the state is right before any click.
-                let dock = window.state::<Dock>();
-                let (lock, cv) = &dock.show_signal;
-                let mut shown = lock.lock().unwrap_or_else(PoisonError::into_inner);
-                if !*shown && !window.is_visible().unwrap_or(false) {
-                    let (g, _) = cv
-                        .wait_timeout(shown, Duration::from_millis(HIT_PARK_SAFETY_MS))
-                        .unwrap_or_else(PoisonError::into_inner);
-                    shown = g;
+    std::thread::Builder::new()
+        .name("hit-watch".into())
+        .spawn(move || {
+            // Local mirror of the applied state — the window starts interactive.
+            let mut ignoring = false;
+            loop {
+                let mut near = false;
+                let visible = window.is_visible().unwrap_or(false);
+                if !visible {
+                    // Park until a show wakes us (or the safety timeout). Re-check
+                    // visibility under the lock so a show that landed between the
+                    // check above and here isn't waited past (lost-wakeup guard);
+                    // the wake flag covers a notify_shown that ran before we
+                    // parked. On wake the top-of-loop is_visible() runs the hit
+                    // block immediately, so the state is right before any click.
+                    let dock = window.state::<Dock>();
+                    let (lock, cv) = &dock.show_signal;
+                    let mut shown = lock.lock().unwrap_or_else(PoisonError::into_inner);
+                    if !*shown && !window.is_visible().unwrap_or(false) {
+                        let (g, _) = cv
+                            .wait_timeout(shown, Duration::from_millis(HIT_PARK_SAFETY_MS))
+                            .unwrap_or_else(PoisonError::into_inner);
+                        shown = g;
+                    }
+                    *shown = false; // consume
+                    continue;
                 }
-                *shown = false; // consume
-                continue;
-            }
-            {
-                let mut p = windows::Win32::Foundation::POINT::default();
-                let got = unsafe { GetCursorPos(&mut p).is_ok() };
-                if got {
-                    if let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) {
-                        let (wx, wy) = (pos.x, pos.y);
-                        let (ww, wh) = (size.width as i32, size.height as i32);
-                        near = p.x >= wx - HIT_NEAR_PAD
-                            && p.x < wx + ww + HIT_NEAR_PAD
-                            && p.y >= wy - HIT_NEAR_PAD
-                            && p.y < wy + wh + HIT_NEAR_PAD;
-                        let (l, t, hw, hh) = hit_rect(&window, wx, wy, ww, wh);
-                        let inside = p.x >= l && p.x < l + hw && p.y >= t && p.y < t + hh;
-                        // inside == ignoring means the state is wrong-way —
-                        // flip it, unless a press is in flight. The mirror
-                        // only advances when the OS call lands, so a failed
-                        // call retries next poll instead of desyncing.
-                        if inside == ignoring
-                            && !primary_button_down()
-                            && window.set_ignore_cursor_events(!inside).is_ok()
+                {
+                    let mut p = windows::Win32::Foundation::POINT::default();
+                    let got = unsafe { GetCursorPos(&mut p).is_ok() };
+                    if got {
+                        if let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size())
                         {
-                            ignoring = !inside;
-                            if ignoring {
-                                // WS_EX_TRANSPARENT stops ALL mouse messages
-                                // the instant it lands — the webview never
-                                // receives the mouseleave, so Chromium's
-                                // :hover freezes true and pins the
-                                // hover-revealed chrome open. Tell the
-                                // frontend to drop its hover state instead
-                                // (quick-review catch, 2026-07-10).
-                                let _ = window.emit("cursor-left", ());
+                            let (wx, wy) = (pos.x, pos.y);
+                            let (ww, wh) = (size.width as i32, size.height as i32);
+                            near = p.x >= wx - HIT_NEAR_PAD
+                                && p.x < wx + ww + HIT_NEAR_PAD
+                                && p.y >= wy - HIT_NEAR_PAD
+                                && p.y < wy + wh + HIT_NEAR_PAD;
+                            let (l, t, hw, hh) = hit_rect(&window, wx, wy, ww, wh);
+                            let inside = p.x >= l && p.x < l + hw && p.y >= t && p.y < t + hh;
+                            // inside == ignoring means the state is wrong-way —
+                            // flip it, unless a press is in flight. The mirror
+                            // only advances when the OS call lands, so a failed
+                            // call retries next poll instead of desyncing.
+                            if inside == ignoring
+                                && !primary_button_down()
+                                && window.set_ignore_cursor_events(!inside).is_ok()
+                            {
+                                ignoring = !inside;
+                                if ignoring {
+                                    // WS_EX_TRANSPARENT stops ALL mouse messages
+                                    // the instant it lands — the webview never
+                                    // receives the mouseleave, so Chromium's
+                                    // :hover freezes true and pins the
+                                    // hover-revealed chrome open. Tell the
+                                    // frontend to drop its hover state instead
+                                    // (quick-review catch, 2026-07-10).
+                                    let _ = window.emit("cursor-left", ());
+                                }
                             }
                         }
                     }
                 }
+                // Only reached while visible (the hidden branch parks + continues).
+                std::thread::sleep(Duration::from_millis(if near {
+                    HIT_NEAR_MS
+                } else {
+                    HIT_FAR_MS
+                }));
             }
-            // Only reached while visible (the hidden branch parks + continues).
-            std::thread::sleep(Duration::from_millis(if near {
-                HIT_NEAR_MS
-            } else {
-                HIT_FAR_MS
-            }));
-        }
-    });
+        })
+        .expect("spawn hit-watch thread");
 }
 
 /// One-shot corner read for webview mount/reload — the event stream's seed
@@ -968,8 +1021,8 @@ pub fn start_drag(window: WebviewWindow, dock: State<Dock>) {
 /// held still mid-air keeps waiting.
 pub fn on_moved(window: &Window) {
     let dock = window.state::<Dock>();
-    if dock.animating.load(Ordering::SeqCst) {
-        return; // self-inflicted move
+    if dock.animating.load(Ordering::SeqCst) > 0 {
+        return; // self-inflicted move (one or more positioning ops in flight)
     }
     *dock
         .last_moved

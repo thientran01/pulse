@@ -39,15 +39,22 @@
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { MorphIcon } from "./icons/MorphIcon";
-import { commands, onNowPlaying } from "./lib/backend";
+import { commands, onNowPlaying, onSpotifyJump, onSpotifyJumpCancel } from "./lib/backend";
+import { useArt, useArtAccent } from "./lib/artAccent";
 import { VOCAL_LEAD_MS } from "./lib/lrc";
-import { extractAccent } from "./lib/palette";
 import * as posClock from "./lib/posClock";
 import { initReactive } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
 import { DeviceTag } from "./DeviceTag";
 import { LyricsPanel, lyricsKeyOf, useLyrics } from "./LyricsPanel";
-import { QueuePanel, useSpotifyDevice, useSpotifyStatus } from "./Queue";
+import {
+  armSuppression,
+  clearSuppression,
+  isAnnounceSuppressed,
+  QueuePanel,
+  useSpotifyDevice,
+  useSpotifyStatus,
+} from "./Queue";
 import { ProgressBar, Transport } from "./Transport";
 import { SeparatorDot, Waveform } from "./Waveform";
 import type { NowPlaying, SpotifyDevice } from "./types";
@@ -76,51 +83,9 @@ function sameIdentity(a: NowPlaying | null, b: NowPlaying): boolean {
   return a !== null && IDENTITY_FIELDS.every((k) => a[k] === b[k]);
 }
 
-/** App.tsx's useArt, realm-local (the hook is small and App's module is the
- * whole widget — not worth importing for 20 lines). */
-function useArt(artId: string | null): string | null {
-  const [url, setUrl] = useState<string | null>(null);
-  const lastId = useRef<string | null>(null);
-  useEffect(() => {
-    if (artId === lastId.current) return;
-    if (!artId) {
-      lastId.current = null;
-      setUrl(null);
-      return;
-    }
-    let alive = true;
-    void commands.art(artId).then((u) => {
-      if (!alive) return;
-      setUrl(u);
-      if (u) lastId.current = artId;
-    });
-    return () => {
-      alive = false;
-    };
-  }, [artId]);
-  return artId ? url : null;
-}
-
-/** Accent extraction for THIS window's document (each realm owns its own
- * --accent; the main widget's extraction doesn't reach here). */
-function useArtAccent(artUrl: string | null): void {
-  useEffect(() => {
-    const root = document.documentElement;
-    if (!artUrl) {
-      root.style.removeProperty("--accent");
-      return;
-    }
-    let alive = true;
-    void extractAccent(artUrl).then((rgb) => {
-      if (!alive) return;
-      if (rgb) root.style.setProperty("--accent", rgb);
-      else root.style.removeProperty("--accent");
-    });
-    return () => {
-      alive = false;
-    };
-  }, [artUrl]);
-}
+// useArt / useArtAccent live in src/lib/artAccent.ts (one copy for all
+// three realms — each window's own listener still owns its own document's
+// --accent; the main widget's extraction doesn't reach here).
 
 /** The identity stack: art + metadata + the reserved lyrics-status caption
  * slot (the Gatefold graft — the block never reflows when the state
@@ -149,6 +114,13 @@ function IdentityStack({
   device: SpotifyDevice | null;
 }) {
   const align = centered ? "items-center text-center" : "items-start text-left";
+  // Broken art (a CDN 403/404, or AM's lagged first read) degrades to the note
+  // glyph — App and the queue rows already do this; the fullscreen room showed
+  // the ~560px broken-image icon otherwise (audit A6-7). Failure is keyed to
+  // the url itself (RowThumb's pattern): the img never remounts on an art-
+  // revision flip, so a new url simply stops matching failedUrl and retries.
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const showArt = artUrl !== null && artUrl !== failedUrl;
   return (
     // Width = var(--art), defined ONCE on each seat in Focus's return
     // (both seats set it identically) — the seats' stack-top math, this
@@ -156,8 +128,14 @@ function IdentityStack({
     // same value, which is what makes the aligned edges exact.
     <div className={`flex w-(--art) flex-col ${align}`}>
       <div className="grid aspect-square w-full place-items-center overflow-hidden rounded-3xl bg-surface-2 text-muted">
-        {artUrl ? (
-          <img src={artUrl} alt="" className="h-full w-full object-cover" draggable={false} />
+        {showArt ? (
+          <img
+            src={artUrl}
+            alt=""
+            className="h-full w-full object-cover"
+            draggable={false}
+            onError={() => setFailedUrl(artUrl)}
+          />
         ) : (
           <MorphIcon name="note" size={44} />
         )}
@@ -173,13 +151,16 @@ function IdentityStack({
         </p>
         {device && (
           <div className="mt-2">
-            <DeviceTag device={device} playing={np.status === "playing"} showName className="text-[15px]" />
+            {/* size="lg" — DeviceTag's real room-scale knob; a className
+                text-[15px] override silently lost to the component's own
+                text-[11px] (conflicting-utility order is load-order). */}
+            <DeviceTag device={device} playing={np.status === "playing"} showName size="lg" />
           </div>
         )}
       </div>
       {/* Reserved slot — "Finding lyrics…" answers the wait, the miss stays
           quiet, and the fixed height means resolution never moves the art. */}
-      <p className="mt-1 h-7 w-full truncate text-[17px] leading-7 text-muted/70">
+      <p className="mt-1 h-7 w-full truncate text-[17px] leading-7 text-muted/85">
         {caption && (
           <span
             key={caption}
@@ -222,8 +203,34 @@ export default function Focus() {
   const activeDevice = useSpotifyDevice();
   const remoteDevice: SpotifyDevice | null =
     activeDevice && np?.player === "spotify" ? activeDevice : null;
-  // The room's queue/history surface — same QueuePanel, this realm's own
-  // open bit (the widget's queueOpen is another window's state).
+  // Jump-intermediate suppression, exactly the pill's wiring (App.tsx): a
+  // play_now jump flickers through intermediates, and the room's horizon —
+  // this window's one announcing surface — must not run the full drain/
+  // ignite ladder for tracks the user only skipped through. The target's
+  // arrival announces once, normally.
+  const announceSuppressed = isAnnounceSuppressed(np);
+  useEffect(() => onSpotifyJump(armSuppression), []);
+  useEffect(() => onSpotifyJumpCancel(clearSuppression), []);
+  // The AT twin of the horizon's announcement (App.tsx's wiring, own realm —
+  // each webview owns its live regions): the room's choreography is all
+  // aria-hidden, so identity changes reach AT only through this text.
+  // Ref-gated (the first identity after open seeds silently — the takeover
+  // opened ON this track) and held by the same suppression the horizon
+  // rides; the jump landing announces once.
+  const [announceText, setAnnounceText] = useState("");
+  const announcedKey = useRef<string | null>(null);
+  useEffect(() => {
+    const key = lyricsKeyOf(np);
+    if (!np || !key || key === announcedKey.current || announceSuppressed) return;
+    const first = announcedKey.current === null;
+    announcedKey.current = key;
+    if (first) return;
+    setAnnounceText(np.artist ? `${np.title} — ${np.artist}` : np.title);
+  }, [np, announceSuppressed]);
+  // The room's queue/history surface — same QueuePanel at room scale, this
+  // realm's own open bit (the widget's queueOpen is another window's state).
+  // Closed when no session, like the widget (the toggle that opens it is
+  // hidden then too).
   const [queueOpen, setQueueOpen] = useState(false);
 
   // Esc peels one layer: the queue panel first, then the room.
@@ -244,6 +251,9 @@ export default function Focus() {
   const lyricsLive =
     lyrics.status === "synced" && np !== null && lyrics.key === lyricsKeyOf(np);
   const nothing = !np || np.player === "none";
+  useEffect(() => {
+    if (nothing) setQueueOpen(false);
+  }, [nothing]);
 
   // The arrival cascade is earned ONCE per takeover: the first lyrics mount
   // after open plays it (the user summoned the room and waited on window
@@ -252,8 +262,11 @@ export default function Focus() {
   const entranceSpent = useRef(false);
   const entrance = lyricsLive && !entranceSpent.current;
   useEffect(() => {
-    if (lyricsLive) entranceSpent.current = true;
-  }, [lyricsLive]);
+    // Queue-gated spend: the panel doesn't mount while the queue owns the
+    // column, and a resolve behind it must not burn the cascade unseen —
+    // the user's first actual sighting (queue close) earns it instead.
+    if (lyricsLive && !queueOpen) entranceSpent.current = true;
+  }, [lyricsLive, queueOpen]);
 
   const caption = lyricsLive
     ? null
@@ -272,7 +285,10 @@ export default function Focus() {
   const [captionExpired, setCaptionExpired] = useState(false);
   useEffect(() => {
     setCaptionExpired(false);
-    if (lyrics.status !== "none") return;
+    // Both terminal non-synced states expire (the expanded view's gate,
+    // App.tsx — this room's own rule comment claims to keep in step): the
+    // offline caption used to sit under the metadata forever.
+    if (lyrics.status !== "none" && lyrics.status !== "offline") return;
     const t = window.setTimeout(() => setCaptionExpired(true), NO_LYRICS_CAPTION_MS);
     return () => window.clearTimeout(t);
   }, [lyrics.status, trackKey]);
@@ -296,29 +312,40 @@ export default function Focus() {
     // here (every band derives from them — the identity seat, the lyric
     // box's edges, the horizon's centering). --art = the album's size:
     // 560px design size, 46vh so the square art leaves room on normal
-    // monitors, 100vh-660px as the short-monitor guard, 50vw-582px as the
+    // monitors, 100vh-660px as the short-monitor guard, 40vw-390px as the
     // narrow-width guard (the identity column must end left of the
-    // centered 780px horizon: 192 + art ≤ (100vw-780)/2 — the metadata
-    // riding into the horizon's ROW is accepted per Thien's Figma pass).
-    // --stack-top centers the identity STACK (art + 146px of metadata) on
-    // the window's vertical midpoint (Thien's Figma verdict, 2026-07-14:
-    // it lifts the art to meet the lyric cluster).
-    <div className="group/focus room-in relative flex h-screen w-screen flex-col overflow-hidden bg-surface text-fg [--art:min(560px,46vh,100vh_-_660px,50vw_-_582px)] [--stack-top:calc(50vh_-_var(--art)/2_-_73px)]">
+    // centered 780px horizon: 10vw + art ≤ (100vw-780)/2 → art ≤ 40vw-390
+    // — width-correct at every vw; the earlier 50vw-582 form baked 10% of
+    // exactly 1920 in as a 192px constant, breaking the invariant off-1920.
+    // The metadata riding into the horizon's ROW is accepted per Thien's
+    // Figma pass). --stack-top centers the identity STACK (art + 146px of
+    // metadata) on the window's vertical midpoint (Thien's Figma verdict,
+    // 2026-07-14: it lifts the art to meet the lyric cluster). Known,
+    // accepted skew: the 146px metadata constant predates the DeviceTag
+    // row (PR #109) — a remote-device session rides ~10px low.
+    // --horizon-mb: the horizon's bottom margin, factored out so the
+    // no-lyrics cluster can anchor off the SAME geometry (see its seat).
+    <div className="group/focus room-in relative flex h-screen w-screen flex-col overflow-hidden bg-surface text-fg [--art:min(560px,46vh,100vh_-_660px,40vw_-_390px)] [--stack-top:calc(50vh_-_var(--art)/2_-_73px)] [--horizon-mb:calc((93vh_-_212px_-_var(--stack-top)_-_var(--art))/2)]">
       {/* Corner exit: hover-revealed + the has-[:focus-visible] keyboard
           reveal (the widget's contract). The contract-bracket verb, going
           home. */}
       <div className="pointer-events-none absolute right-4 top-4 z-10 flex gap-1 opacity-0 transition-opacity duration-2 ease-out-tk group-hover/focus:pointer-events-auto group-hover/focus:opacity-100 has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:opacity-100">
-        <button
-          type="button"
-          aria-label={queueOpen ? "Close queue" : "Show queue"}
-          title={queueOpen ? "Close queue" : "Show queue"}
-          onClick={() => setQueueOpen((o) => !o)}
-          className={`grid h-8 w-8 place-items-center rounded-md text-fg [transition:background-color_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 active:scale-95 ${
-            queueOpen ? "bg-fg/10" : ""
-          }`}
-        >
-          <MorphIcon name="queue" size={15} dur={DUR[3]} ease={EASE.inOut} />
-        </button>
+        {/* Queue toggle hides with no session (the widget's rule — there is
+            no queue surface to open over the resting pulse). */}
+        {!nothing && (
+          <button
+            type="button"
+            aria-label={queueOpen ? "Close queue" : "Open queue"}
+            title={queueOpen ? "Close queue" : "Open queue"}
+            aria-pressed={queueOpen}
+            onClick={() => setQueueOpen((o) => !o)}
+            className={`grid h-8 w-8 place-items-center rounded-md text-fg [transition:background-color_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/10 active:scale-95 ${
+              queueOpen ? "bg-fg/10" : ""
+            }`}
+          >
+            <MorphIcon name="queue" size={15} dur={DUR[3]} ease={EASE.inOut} />
+          </button>
+        )}
         <button
           type="button"
           aria-label="Leave focus (Esc)"
@@ -329,6 +356,13 @@ export default function Focus() {
           <MorphIcon name="contract" size={15} dur={DUR[3]} ease={EASE.inOut} />
         </button>
       </div>
+
+      {/* The AT announcement region — outside the upper-room swap (like the
+          horizon) so track changes never remount it; sr-only, content set
+          only on a real, unsuppressed identity change. */}
+      <span className="sr-only" aria-live="polite">
+        {announceText}
+      </span>
 
       {nothing ? (
         <div className="grid h-full w-full place-items-center">
@@ -342,12 +376,18 @@ export default function Focus() {
               change exits through the fallback interlude anyway (lyricsLive
               flips while lyrics re-key), so the per-track key just makes
               the remount explicit and covers the fast-resolve path where
-              AnimatePresence would otherwise recycle the exiting seat. */}
+              AnimatePresence would otherwise recycle the exiting seat.
+              An OPEN QUEUE also forces the split composition: the queue
+              surface lives in the lyric column's seat (below), so the
+              identity stack must hold the left seat even with no lyrics —
+              keyed on lyricsKeyOf(np) (≡ lyrics.key whenever lyricsLive),
+              which stays honest when the seat is queue-forced through the
+              fetch interlude. */}
           <div className="relative min-h-0 flex-1">
             <AnimatePresence initial={false}>
-              {lyricsLive ? (
+              {lyricsLive || queueOpen ? (
                 <motion.div
-                  key={`split:${lyrics.key}`}
+                  key={`split:${lyricsKeyOf(np)}`}
                   {...swap}
                   transition={swapTiming}
                   exit={{
@@ -376,13 +416,23 @@ export default function Focus() {
                       bottom fade dissolves exactly at the art's bottom line
                       (Thien, 2026-07-14). */}
                   <div className="flex h-[calc(var(--stack-top)_+_var(--art)_-_11vh)] min-h-0 min-w-0 flex-1 flex-col mt-[11vh]">
-                    <LyricsPanel
-                      lines={lyrics.lines}
-                      seekable={seekable}
-                      leadMs={VOCAL_LEAD_MS[np.player]}
-                      entrance={entrance}
-                      scale="focus"
-                    />
+                    {/* Unmounted while the queue owns the column (not just
+                        covered): the queue box is art-width, narrower than
+                        this column, so live lyric lines would peek out past
+                        its right edge — and a first-lyrics resolve behind
+                        the cover would burn the once-per-takeover cascade
+                        unseen (its spend is queue-gated below to match).
+                        Closing the queue mounts lyrics fresh; the panel
+                        re-anchors itself. */}
+                    {lyricsLive && !queueOpen && (
+                      <LyricsPanel
+                        lines={lyrics.lines}
+                        seekable={seekable}
+                        leadMs={VOCAL_LEAD_MS[np.player]}
+                        entrance={entrance}
+                        scale="focus"
+                      />
+                    )}
                   </div>
                 </motion.div>
               ) : (
@@ -395,12 +445,31 @@ export default function Focus() {
                     pointerEvents: "none" as const,
                     transition: { duration: reducedMotion ? 0 : DUR[2] / 1000, ease: [...EASE.out] as [number, number, number, number] },
                   }}
-                  className="absolute inset-0 flex items-start justify-center"
+                  className="absolute inset-0 flex items-end justify-center"
                 >
-                  {/* Same seat rule as the lyrics view (identity stack
-                      centered on the window midline), so the lyrics⇄fallback
-                      crossfade holds the art still on the vertical axis. */}
-                  <div className="pt-(--stack-top)">
+                  {/* No-lyrics fallback: the identity stack is BOTTOM-anchored
+                      to the horizon's top with a margin that seats the ARTIST
+                      line equidistant from the wave and the console — not
+                      pinned to --stack-top like the split view (that centers
+                      the ART on the window midline, hanging the metadata +
+                      caption ~146px below it, head-on into the horizon's band;
+                      in split the metadata is far-left and the horizon
+                      centered, so they clear — the collision is centered-only,
+                      Thien's live catch 2026-07-17).
+
+                      The seat anchors off the SAME geometry the horizon uses
+                      (--horizon-mb): items-end pins the stack bottom to the
+                      horizon top, and mb pushes it up by (--horizon-mb + 1vh),
+                      mirroring the console's distance below the wave — then
+                      MINUS the caption slot (mt-1 4px + h-7 28px = 32px) so
+                      that reserved, usually-empty "No synced lyrics" line
+                      drops out of the reckoning and the visible ARTIST line
+                      lands on center — measured 139/141 @1080, 175/176 @1440
+                      (Thien: "the wave's a bit low — the No synced lyrics
+                      text"). The loading⇄synced crossfade already slides the
+                      art center→left, so this rides the same opacity
+                      crossfade, not a new "art slides" break. */}
+                  <div className="mb-[calc(var(--horizon-mb)_+_1vh_-_32px)]">
                     <IdentityStack np={np} artUrl={artUrl} caption={caption} captionExpired={captionExpired} centered device={remoteDevice} />
                   </div>
                 </motion.div>
@@ -408,24 +477,32 @@ export default function Focus() {
             </AnimatePresence>
           </div>
 
-          {/* The queue/history surface — the widget's QueuePanel wholesale,
-              floating over the upper room's right side on the popover shell
-              recipe. Always mounted (scroll + feed survive toggling), the
-              expanded-surface visibility grammar. Bottom inset clears the
-              CONSOLE — the only band it horizontally overlaps (the 420px
-              horizon is centered and never reaches under this right-docked
-              popover); the extra ~120px is breathing room, not a horizon
-              budget. */}
-          <div
-            inert={!queueOpen}
-            className={`absolute right-6 top-16 z-20 flex w-[380px] flex-col rounded-xl border border-border/10 bg-surface p-1.5 shadow-xl shadow-black/40 ${
-              queueOpen
-                ? "visible opacity-100 [transition:opacity_140ms_var(--ease-out-tk)]"
-                : "invisible opacity-0 [transition:opacity_140ms_var(--ease-out-tk),visibility_0s_140ms]"
-            }`}
-            style={{ bottom: "calc(120px + 176px)" }}
-          >
-            <QueuePanel np={np} connected={spotify.connected} open={queueOpen} />
+          {/* THE QUEUE — the room's content surface, seated IN THE LYRIC
+              COLUMN (redesigned 2026-07-16: the widget-sized 380px popover
+              read as a miniature lost on the big screen — Thien). This is
+              the expanded garment's peer-layer grammar at room scale:
+              content surfaces swap in place while identity holds still —
+              the album + metadata keep the left seat (the upper room is
+              queue-forced into the split composition above) and the queue
+              takes the lyric column's exact box: same px/gap flex row with
+              a --art spacer, same 11vh ladder top, same bottom edge on the
+              art's bottom line. Opaque bg-surface covers the still-running
+              lyrics behind it; opacity-only crossfade (in 200 / out 140,
+              visibility deferred), inert when hidden, always MOUNTED so
+              scroll + the history feed survive the toggle. Capped at 560px
+              (= the art's design width) — full-column rows read sparse. */}
+          <div className="pointer-events-none absolute inset-0 z-20 flex items-stretch gap-[7%] px-[10%]">
+            <div className="w-(--art) shrink-0" />
+            <div
+              inert={!queueOpen}
+              className={`pointer-events-auto mt-[11vh] flex h-[calc(var(--stack-top)_+_var(--art)_-_11vh)] w-full min-w-0 max-w-(--art) flex-col bg-surface ${
+                queueOpen
+                  ? "opacity-100 [transition:opacity_200ms_var(--ease-out-tk)]"
+                  : "invisible opacity-0 [transition:opacity_140ms_var(--ease-out-tk),visibility_0s_140ms]"
+              }`}
+            >
+              <QueuePanel np={np} connected={spotify.connected} open={queueOpen} scale="room" />
+            </div>
           </div>
 
           {/* THE HORIZON — the room's one living reactive surface, OUTSIDE
@@ -443,8 +520,12 @@ export default function Focus() {
               column only the bottom margin positions the box — the flex-1
               region above absorbs the rest — so mb = half the free space
               (Thien, 2026-07-14: "even" gaps both sides). */}
-          <div className="mb-[calc((93vh_-_212px_-_var(--stack-top)_-_var(--art))/2)] flex shrink-0 items-center justify-center">
-            <Waveform size="room" announceKey={lyricsKeyOf(np) ?? undefined} />
+          <div className="mb-(--horizon-mb) flex shrink-0 items-center justify-center">
+            <Waveform
+              size="room"
+              announceKey={announceSuppressed ? undefined : (lyricsKeyOf(np) ?? undefined)}
+              playing={np?.status === "playing"}
+            />
           </div>
 
           {/* THE CONSOLE — persistent (a summoned takeover shows its

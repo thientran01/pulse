@@ -1,16 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the app's windows (a label missing here gets ZERO IPC, silently)",
+  "description": "Capability for the app's windows (a label missing here gets ZERO IPC, silently). The webview imports no window/opener JS API — geometry is Rust-owned (dock.rs SetWindowPos + the set_window_size command) and every opener call is Rust-side (prefs.rs open_logs/open_data_folder/open_repo via app.opener(), which bypasses the webview capability) — so opener:default and the MUTATING window perms are not granted. The real revoke is set-size/set-position (setters, absent from core:window:default). NOTE: core:default is kept and its core:window:default set still grants the read-only geometry/monitor getters (outer-position/outer-size/current-monitor plus their inner-*/primary-monitor/available-monitors/cursor-position/scale-factor siblings) — trimming them from this list was a no-op (a set can't be un-granted a member without an explicit deny of the whole getter family); they stay unused and low-risk. allow-start-dragging is the ONE extra window perm kept — the prefs window's data-tauri-drag-region depends on it.",
   "windows": ["main", "search", "focus", "prefs"],
   "permissions": [
     "core:default",
-    "core:window:allow-start-dragging",
-    "core:window:allow-set-size",
-    "core:window:allow-set-position",
-    "core:window:allow-outer-position",
-    "core:window:allow-outer-size",
-    "core:window:allow-current-monitor",
-    "opener:default"
+    "core:window:allow-start-dragging"
   ]
 }

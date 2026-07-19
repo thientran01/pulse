@@ -7,20 +7,24 @@
  * Doctrine (hard rules, from CLAUDE.md + the handoff):
  * - Dark-only, monochrome chrome on semantic tokens (fg/muted on
  *   surface/surface-2).
- * - Accent (--accent, ember) appears in EXACTLY TWO places in this whole
- *   window: the live hotkey-capture ring and the Spotify "connected" dot.
+ * - Accent (--accent, twilight violet) appears in EXACTLY TWO places in this
+ *   whole window: the live hotkey-capture ring and the Spotify "connected" dot.
  * - Toggles fill cream (--fg) when on, never accent.
- * - Warnings/conflicts use the desaturated rgb(214,142,116), never red-red,
+ * - Warnings/conflicts use the desaturated --warn token, never red-red,
  *   never accent.
  * - Motion on EASE/DUR tokens; the global reduced-motion kill (index.css)
  *   collapses every animation/transition here to instant.
  *
  * Hotkey capture reproduces the handoff's state machine: click a chord → the
  * row goes "listening" (accent ring) → modifiers collect live → a non-modifier
- * key WITH ≥1 modifier forms + auto-commits (persist + live re-register +
- * toast); no modifier → "Add a modifier"; a duplicate blocks and names the
- * clashing action; Esc/blur cancels. A chord that the OS rejects registers as
- * a persistent per-row "not registered" note.
+ * key WITH ≥1 NON-SHIFT modifier forms + auto-commits (persist + live
+ * re-register + toast); no modifier, or shift alone → "Add a modifier"; a
+ * duplicate blocks and names the clashing action; Esc/blur cancels. A chord
+ * that the OS rejects registers as a persistent per-row "not registered" note.
+ * The global shortcuts are SUSPENDED for the capture's duration
+ * (set_hotkeys_capture) — RegisterHotKey swallows registered chords
+ * system-wide, so without the suspension a bound chord fired its action
+ * instead of ever reaching the listener; every exit path resumes them.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -37,17 +41,34 @@ import { chordCaps, tokenCap } from "./lib/chords";
 const SECTIONS = ["connectors", "hotkeys", "playback", "general", "about", "data"] as const;
 type Section = (typeof SECTIONS)[number];
 
-// Desaturated warning literal (doctrine: never red-red, never accent). Not a
-// token — used only for conflict/failure treatments here.
-const WARN = "rgb(214,142,116)";
+// Desaturated warning (doctrine: never red-red, never accent) — reads the
+// --warn token (index.css; promoted from a literal here once a second surface
+// needed it). WARN_TEXT stays a local literal: a brightened text-on-wash
+// variant used only by the erase confirm below.
+const WARN = "rgb(var(--warn))";
 const WARN_TEXT = "rgb(240,205,192)";
 
 const CAP_STYLE = `
+/* The listening ring breathes OPACITY on a static-shadow pseudo — animating
+ * box-shadow itself repainted the chip every frame for the whole listening
+ * state (the transform/opacity-only rule; motion pass 2026-07-16). Base
+ * state = ring visible: under the global reduced-motion kill the animation
+ * collapses and the element reverts to this — a static ring still marks the
+ * listening state (the .resting-pulse base-state pattern). */
 @keyframes prefs-cap-listen {
-  0%,100% { box-shadow: 0 0 0 0 rgb(var(--accent)/0.34); }
-  50% { box-shadow: 0 0 0 4px rgb(var(--accent)/0); }
+  0%,100% { opacity: 1; }
+  50% { opacity: 0; }
 }
-.prefs-cap-listen { animation: prefs-cap-listen 1.4s var(--ease-in-out-tk) infinite; }
+.prefs-cap-listen { position: relative; }
+.prefs-cap-listen::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  box-shadow: 0 0 0 4px rgb(var(--accent)/0.34);
+  animation: prefs-cap-listen 1.4s var(--ease-in-out-tk) infinite;
+  pointer-events: none;
+}
 .prefs-scroll::-webkit-scrollbar { width: 8px; }
 .prefs-scroll::-webkit-scrollbar-thumb { background: rgb(var(--fg)/0.10); border-radius: 999px; }
 `;
@@ -110,13 +131,21 @@ type Capture = { id: string; live: string[]; conflict: string | null; needMod: b
 function SectionHeader({ title, desc }: { title: string; desc: string }) {
   return (
     <>
-      <p className="text-[18px] font-semibold text-fg">{title}</p>
+      {/* leading-[30px] = the close ×'s 30px box: with the detail pane's
+          pt-[14px] (= the ×'s top-3.5) every section title shares the ×'s
+          exact centerline — title, right-aligned section actions, and the ×
+          read as ONE top row (Thien, 2026-07-16). Change one, change all
+          three (pt, this leading, CloseX's top/size). */}
+      <p className="text-[18px] font-semibold leading-[30px] text-fg">{title}</p>
       <p className="mt-1 mb-6 text-[13px] text-muted">{desc}</p>
     </>
   );
 }
 
-/** A settings row: label + description on the left, control on the right. */
+/** A settings row: label + description on the left, control on the right.
+ * No horizontal padding: labels sit on the section header's left line and
+ * controls end on the connector cards'/hotkey table's right line — the old
+ * px-1 indented every row 4px off both (the alignment sweep, 2026-07-16). */
 function Row({
   label,
   desc,
@@ -130,7 +159,7 @@ function Row({
 }) {
   return (
     <div
-      className={`flex items-center gap-4 px-1 py-3.5 ${last ? "" : "border-b border-border/[0.06]"}`}
+      className={`flex items-center gap-4 py-3.5 ${last ? "" : "border-b border-border/[0.06]"}`}
     >
       <div className="min-w-0 flex-1">
         <p className="text-[13.5px] text-fg">{label}</p>
@@ -154,8 +183,10 @@ function Toggle({ on, onClick, label }: { on: boolean; onClick: () => void; labe
         on ? "bg-fg" : "bg-fg/15"
       }`}
     >
+      {/* Knob slides between two on-screen seats — the morph category rides
+          --ease-in-out-tk (enter/exit's ease-out reads as "shoved"). */}
       <span
-        className={`absolute left-[2px] top-[2px] h-[18px] w-[18px] rounded-full [transition:transform_var(--transition-duration-2)_var(--ease-out-tk),background-color_var(--transition-duration-2)] ${
+        className={`absolute left-[2px] top-[2px] h-[18px] w-[18px] rounded-full [transition:transform_var(--transition-duration-2)_var(--ease-in-out-tk),background-color_var(--transition-duration-2)_var(--ease-out-tk)] ${
           on ? "translate-x-[16px] bg-surface" : "bg-muted"
         }`}
       />
@@ -163,26 +194,38 @@ function Toggle({ on, onClick, label }: { on: boolean; onClick: () => void; labe
   );
 }
 
-/** A segmented control (launch mode). Selected = fg/12 fill. */
+/** A segmented control (launch mode). Selected = fg/12 fill.
+ * Seated on the window's control system: h-8 (= Ghost, the one button
+ * height) with rounded-lg outside and rounded (4px) segments — concentric
+ * with the 3px padding + 1px border (8−3−1); the old 36px/9px/7px box sat
+ * off both scales. `label` names the group for AT — the selected segment is
+ * otherwise only a wash. */
 function Segmented<T extends string | number>({
+  label,
   options,
   value,
   onPick,
 }: {
+  label: string;
   options: { label: string; value: T }[];
   value: T;
   onPick: (v: T) => void;
 }) {
   return (
-    <div className="inline-flex gap-0.5 rounded-[9px] border border-border/[0.07] bg-fg/[0.05] p-[3px]">
+    <div
+      role="group"
+      aria-label={label}
+      className="inline-flex h-8 items-center gap-0.5 rounded-lg border border-border/[0.07] bg-fg/[0.05] p-[3px]"
+    >
       {options.map((o) => {
         const on = o.value === value;
         return (
           <button
             key={String(o.value)}
             type="button"
+            aria-pressed={on}
             onClick={() => onPick(o.value)}
-            className={`rounded-[7px] px-3 py-[5px] text-[12px] font-medium [transition:background-color_var(--transition-duration-2),color_var(--transition-duration-2)] ${
+            className={`inline-flex h-full items-center rounded px-3 text-[12px] font-medium [transition:background-color_var(--transition-duration-2)_var(--ease-out-tk),color_var(--transition-duration-2)_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] active:scale-[0.97] ${
               on ? "bg-fg/12 text-fg" : "text-muted hover:text-fg"
             }`}
           >
@@ -209,7 +252,7 @@ function Ghost({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="inline-flex h-8 shrink-0 items-center whitespace-nowrap rounded-lg border border-border/12 bg-fg/[0.04] px-3.5 text-[12.5px] font-medium text-fg [transition:background-color_var(--transition-duration-2)] hover:bg-fg/[0.08] disabled:opacity-50"
+      className="inline-flex h-8 shrink-0 items-center whitespace-nowrap rounded-lg border border-border/12 bg-fg/[0.04] px-3.5 text-[12.5px] font-medium text-fg [transition:background-color_var(--transition-duration-2)_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/[0.08] active:scale-[0.97] disabled:opacity-50"
     >
       {children}
     </button>
@@ -318,7 +361,7 @@ function CloseX({ onClick }: { onClick: () => void }) {
       type="button"
       aria-label="Close preferences"
       onClick={onClick}
-      className="absolute right-4 top-3.5 z-10 grid h-[30px] w-[30px] place-items-center rounded-lg text-muted [transition:background-color_var(--transition-duration-2),color_var(--transition-duration-2)] hover:bg-fg/[0.08] hover:text-fg"
+      className="absolute right-4 top-3.5 z-10 grid h-[30px] w-[30px] place-items-center rounded-lg text-muted [transition:background-color_var(--transition-duration-2)_var(--ease-out-tk),color_var(--transition-duration-2)_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/[0.08] hover:text-fg active:scale-95"
     >
       <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
         <path d="M 4.5,4.5 L 11.5,11.5" />
@@ -358,8 +401,13 @@ export default function Prefs() {
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
   const toastTimer = useRef<number | undefined>(undefined);
+  // The last message survives past the null so the exit fades a FULL pill —
+  // clearing the text at timer-fire emptied it 140ms before the fade ended
+  // (motion pass, 2026-07-16). Content only swaps when the next toast lands.
+  const lastToastMsg = useRef<string>("");
   const toast = useCallback((msg: string) => {
     setToastMsg(msg);
+    lastToastMsg.current = msg;
     window.clearTimeout(toastTimer.current);
     toastTimer.current = window.setTimeout(() => setToastMsg(null), 1700);
   }, []);
@@ -453,8 +501,12 @@ export default function Prefs() {
       }
       const main = mainKeyToken(e);
       if (!main) return; // unsupported key — keep listening
-      if (mods.length === 0) {
-        setCapture({ ...cap, live: [main], conflict: null, needMod: true });
+      // ≥1 NON-shift modifier required: shift+letter is just typing a capital
+      // — shift+s registers fine and then swallows every capital S
+      // system-wide — so a shift-only chord routes to the same "add a
+      // modifier" note as a bare key.
+      if (!mods.some((m) => m !== "shift")) {
+        setCapture({ ...cap, live: [...mods, main], conflict: null, needMod: true });
         return;
       }
       const chord = [...mods, main].join("+");
@@ -471,6 +523,10 @@ export default function Prefs() {
   onKeyRef.current = onKey;
 
   const capturing = capture !== null;
+  // The row that entered capture — focus returns to its chord button on exit.
+  // Entering capture unmounts the focused button (the listening chip replaces
+  // it), which otherwise drops focus to <body> and strands keyboard users.
+  const captureReturnId = useRef<string | null>(null);
   useEffect(() => {
     if (!capturing) return;
     const kd = (e: KeyboardEvent) => onKeyRef.current(e);
@@ -480,6 +536,19 @@ export default function Prefs() {
     return () => {
       window.removeEventListener("keydown", kd, true);
       window.removeEventListener("blur", blur);
+      // EVERY capture exit funnels through this cleanup — commit, Esc, the
+      // esc chip, window blur, reset, unmount mid-capture: resume the
+      // suspended global shortcuts and restore focus. On a commit/reset this
+      // resume runs CONCURRENTLY with rebind_hotkey/reset_hotkeys (separate
+      // un-awaited invokes, separate tokio tasks) — safe only because the
+      // backend serializes registration (lib.rs REG_LOCK): serialized, every
+      // order lands the fresh table; unserialized, the interleaved loops
+      // could register a ghost of the old chord. The button is re-queried by
+      // id, not a stashed element — the exit remounted it, and a detached
+      // element's focus() is a silent no-op.
+      void commands.setHotkeysCapture(false);
+      const id = captureReturnId.current;
+      if (id) document.querySelector<HTMLElement>(`[data-chord-btn="${id}"]`)?.focus();
     };
   }, [capturing]);
 
@@ -505,8 +574,16 @@ export default function Prefs() {
       lastfmPending.current = null;
     }, 400);
   };
-  const closePrefs = () => {
+  const closePrefs = async () => {
     flushLastfm();
+    // The × can land mid-capture, and close DESTROYS this webview — the
+    // capture effect's cleanup invoke would race the teardown and could
+    // lose. Await the resume so register_all provably ran first (the
+    // cleanup's own resume then double-fires harmlessly — serialized by
+    // REG_LOCK). Belt: the Rust Destroyed handler also resumes on ANY prefs
+    // teardown (Alt+F4, taskbar Close, a crash — paths no JS here can
+    // catch), so a lost invoke can no longer strand the shortcuts.
+    if (captureRef.current) await commands.setHotkeysCapture(false).catch(() => {});
     commands.closePrefs();
   };
   const testKey = async () => {
@@ -630,7 +707,10 @@ export default function Prefs() {
                 {authError}
               </p>
             )}
-            <p className="mt-3 border-t border-border/[0.06] pt-3 text-[11.5px] leading-relaxed text-fg/40">
+            {/* text-muted, not fg/40: this line carries load-bearing prose
+                (why Connect may fail) and fg/40 sat under the 4.5:1 floor the
+                project holds text to (CLAUDE.md's accent clause). */}
+            <p className="mt-3 border-t border-border/[0.06] pt-3 text-[11.5px] leading-relaxed text-muted">
               Development mode — connecting is limited to allow-listed accounts. Queue control and
               playback need this connection.
             </p>
@@ -646,7 +726,10 @@ export default function Prefs() {
                 <p className="mt-px text-[12px] text-muted">Unlocks more-like-this recommendations.</p>
               </div>
             </div>
-            <div className="flex gap-2">
+            {/* h-8 = Ghost's height, items-center as belt-and-suspenders —
+                the old 34px input beside the 32px button showed 2px steps at
+                both edges (the alignment sweep, 2026-07-16). */}
+            <div className="flex items-center gap-2">
               <input
                 value={lastfmKey}
                 onChange={(e) => onLastfmInput(e.target.value)}
@@ -654,7 +737,7 @@ export default function Prefs() {
                 placeholder="API key"
                 spellCheck={false}
                 autoComplete="off"
-                className="h-[34px] min-w-0 flex-1 select-text rounded-lg border border-border/12 bg-black/25 px-3 text-[12.5px] text-fg outline-none [transition:border-color_var(--transition-duration-2)] focus:border-border/30"
+                className="h-8 min-w-0 flex-1 select-text rounded-lg border border-border/12 bg-black/25 px-3 text-[12.5px] text-fg outline-none [transition:border-color_var(--transition-duration-2)_var(--ease-out-tk)] focus:border-border/30"
               />
               <Ghost onClick={testKey}>{testLabel}</Ghost>
             </div>
@@ -664,20 +747,26 @@ export default function Prefs() {
 
       hotkeys: (
         <>
-          {/* pr-10 keeps "Reset to defaults" clear of the detail pane's
-              floating × (absolute top-right); it's the only section header
-              with a right-aligned action. */}
-          <div className="flex items-end justify-between pr-10">
-            <p className="text-[18px] font-semibold text-fg">Hotkeys</p>
+          {/* The only section header with a right-aligned action — it sits ON
+              the header line: items-center on the title's 30px line box, so
+              title, "Reset to defaults", and the × share one centerline
+              (Thien, 2026-07-16). pr-6 ends the row 8px left of the × (the ×
+              spans 16..46px from the pane's right edge; content ends at 30).
+              The z-10 lifts the button above the drag strip painted after
+              the content — the strip's h-6 band now overlaps this row's top. */}
+          <div className="flex items-center justify-between pr-6">
+            <p className="text-[18px] font-semibold leading-[30px] text-fg">Hotkeys</p>
             <button
               type="button"
               onClick={resetHotkeys}
-              className="rounded-md px-1.5 py-1 text-[12px] text-muted [transition:color_var(--transition-duration-2)] hover:text-fg"
+              className="relative z-10 rounded-md px-1.5 py-1 text-[12px] text-muted [transition:color_var(--transition-duration-2)_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:text-fg active:scale-[0.97]"
             >
               Reset to defaults
             </button>
           </div>
-          <p className="mt-1.5 mb-5 text-[13px] text-muted">
+          {/* mt-1 mb-6 = SectionHeader's desc rhythm exactly, so this
+              section's content block starts level with every other's. */}
+          <p className="mt-1 mb-6 text-[13px] text-muted">
             Click a shortcut to rebind it. Global shortcuts work anywhere, even when Palette is hidden.
           </p>
           <div className="overflow-hidden rounded-xl border border-border/[0.08]">
@@ -688,7 +777,7 @@ export default function Prefs() {
                 listening && capture.conflict
                   ? `Already used by ${capture.conflict} — press a different combination.`
                   : listening && capture.needMod
-                    ? "Add a modifier like Ctrl or Alt."
+                    ? "Add a modifier like Ctrl or Alt — Shift alone isn't enough."
                     : null;
               const showNote = !listening && !h.registered;
               return (
@@ -704,7 +793,7 @@ export default function Prefs() {
                       {showNote && (
                         <p
                           className="mt-0.5 flex items-center gap-1.5 text-[11.5px]"
-                          style={{ color: "rgba(214,142,116,0.9)" }}
+                          style={{ color: "rgb(var(--warn) / 0.9)" }}
                         >
                           <WarnTriangle />
                           Not registered — may be reserved by the system
@@ -713,7 +802,11 @@ export default function Prefs() {
                     </div>
                     {listening ? (
                       // Accent spot #2 of 2: the live capture ring.
+                      // role="status": the chip's states ("Press keys…", the
+                      // collected caps) announce to AT — capture is otherwise
+                      // a purely visual state machine.
                       <div
+                        role="status"
                         className="prefs-cap-listen inline-flex items-center gap-2 rounded-lg border border-accent/50 bg-accent/[0.06] py-[5px] pl-3 pr-1.5"
                       >
                         {caps.length === 0 ? (
@@ -731,7 +824,7 @@ export default function Prefs() {
                         <button
                           type="button"
                           onClick={() => setCapture(null)}
-                          className="grid h-6 place-items-center rounded-md bg-fg/[0.06] px-2 text-[10.5px] text-muted"
+                          className="grid h-6 place-items-center rounded-md bg-fg/[0.06] px-2 text-[10.5px] text-muted [transition:scale_90ms_var(--ease-out-tk)] active:scale-95"
                         >
                           esc
                         </button>
@@ -739,8 +832,25 @@ export default function Prefs() {
                     ) : (
                       <button
                         type="button"
-                        onClick={() => setCapture({ id: h.id, live: [], conflict: null, needMod: false })}
-                        className="inline-flex items-center gap-1 rounded-md p-1 [transition:background-color_var(--transition-duration-2)] hover:bg-fg/[0.05]"
+                        aria-label={`Change shortcut for ${h.label}`}
+                        title={`Change shortcut for ${h.label}`}
+                        data-chord-btn={h.id}
+                        onClick={async () => {
+                          // Suspend the global shortcuts BEFORE listening:
+                          // RegisterHotKey swallows registered chords
+                          // system-wide, so an un-suspended capture never SEES
+                          // a bound chord — pressing one fired its action
+                          // (Ctrl+Alt+S summoned Search over this window,
+                          // whose blur then cancelled the capture) and the
+                          // duplicate-conflict branch above was unreachable
+                          // for exactly the registered-duplicate case. The
+                          // await orders the OS release ahead of the first
+                          // keydown; the capture-exit cleanup resumes.
+                          captureReturnId.current = h.id;
+                          await commands.setHotkeysCapture(true).catch(() => {});
+                          setCapture({ id: h.id, live: [], conflict: null, needMod: false });
+                        }}
+                        className="inline-flex items-center gap-1 rounded-md p-1 [transition:background-color_var(--transition-duration-2)_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] hover:bg-fg/[0.05] active:scale-[0.97]"
                       >
                         {caps.map((c, k) => (
                           <span
@@ -753,8 +863,11 @@ export default function Prefs() {
                       </button>
                     )}
                   </div>
+                  {/* role="status", same reason as the chip: the clash /
+                      needs-a-modifier verdicts are the capture's answers and
+                      must announce, not just tint. */}
                   {conflict && (
-                    <p className="px-4 pb-2.5 text-[11.5px]" style={{ color: WARN }}>
+                    <p role="status" className="px-4 pb-2.5 text-[11.5px]" style={{ color: WARN }}>
                       {conflict}
                     </p>
                   )}
@@ -776,6 +889,7 @@ export default function Prefs() {
           </Row>
           <Row label="Default launch mode" desc="The size Palette opens at." last>
             <Segmented
+              label="Default launch mode"
               value={launch}
               onPick={pickLaunch}
               options={[
@@ -806,7 +920,10 @@ export default function Prefs() {
       about: (
         <>
           <SectionHeader title="About" desc="Palette — the now-playing player Windows should've had." />
-          <Row label="Version" desc={`${version || "…"} · up to date`}>
+          {/* No static "· up to date" claim — it sat there regardless of
+              update state, even beside its own button's "Update available"
+              toast. The button's toast is the narrator. */}
+          <Row label="Version" desc={version || "…"}>
             <Ghost onClick={checkUpdates}>Check for updates</Ghost>
           </Row>
           <Row label="Source" desc="github.com/thientran01/palette">
@@ -827,8 +944,11 @@ export default function Prefs() {
           <Row label="Data folder" desc="Where history, thumbnails, and settings are kept.">
             <Ghost onClick={() => commands.openDataFolder()}>Reveal</Ghost>
           </Row>
-          <div className="px-1 pb-1 pt-4">
-            <div className="flex items-center">
+          {/* Row's metrics by hand (py-3.5, gap-4 — this block can't BE a Row
+              because the confirm box expands below it), so the destructive
+              row sits on the same grid as its siblings above. */}
+          <div className="py-3.5">
+            <div className="flex items-center gap-4">
               <div className="min-w-0 flex-1">
                 <p className="text-[13.5px] text-fg">Clear play history</p>
                 <p className="mt-0.5 text-[12px] text-muted">
@@ -839,18 +959,18 @@ export default function Prefs() {
             </div>
             {confirmClear && (
               <div
-                className="mt-3 flex items-center gap-3 rounded-[10px] border p-3.5"
-                style={{ borderColor: "rgba(214,142,116,0.35)", background: "rgba(214,142,116,0.06)" }}
+                className="mt-3 flex items-center gap-3 rounded-xl border p-3.5"
+                style={{ borderColor: "rgb(var(--warn) / 0.35)", background: "rgb(var(--warn) / 0.06)" }}
               >
                 <p className="flex-1 text-[12.5px] text-fg">Erase all play history? This can't be undone.</p>
                 <Ghost onClick={() => setConfirmClear(false)}>Cancel</Ghost>
                 <button
                   type="button"
                   onClick={doClear}
-                  className="h-8 rounded-lg border px-3.5 text-[12.5px] font-medium"
+                  className="h-8 rounded-lg border px-3.5 text-[12.5px] font-medium [transition:scale_90ms_var(--ease-out-tk)] active:scale-[0.97]"
                   style={{
-                    borderColor: "rgba(214,142,116,0.5)",
-                    background: "rgba(214,142,116,0.14)",
+                    borderColor: "rgb(var(--warn) / 0.5)",
+                    background: "rgb(var(--warn) / 0.14)",
                     color: WARN_TEXT,
                   }}
                 >
@@ -889,9 +1009,14 @@ export default function Prefs() {
 
       {/* SIDEBAR */}
       <div className="flex w-[212px] shrink-0 flex-col border-r border-border/[0.06] bg-black/[0.16] p-2.5">
+        {/* mt-2 seats the wordmark's center on the ×'s 29px line — the whole
+            top band (Preferences · section title · Reset · ×) reads as one
+            row across the sidebar seam. mx-2.5 = the nav buttons' px-2.5, so
+            the wordmark, nav icons, and the version line share one left
+            line. */}
         <p
           data-tauri-drag-region
-          className="mx-2 mb-3.5 mt-0.5 text-[15px] font-semibold text-fg"
+          className="mx-2.5 mb-2.5 mt-2 text-[15px] font-semibold text-fg"
         >
           Preferences
         </p>
@@ -905,7 +1030,7 @@ export default function Prefs() {
                 setSection(s);
                 setConfirmClear(false);
               }}
-              className={`mb-0.5 flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] [transition:background-color_var(--transition-duration-2),color_var(--transition-duration-2)] ${
+              className={`mb-0.5 flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] [transition:background-color_var(--transition-duration-2)_var(--ease-out-tk),color_var(--transition-duration-2)_var(--ease-out-tk)] active:bg-fg/[0.10] ${
                 on ? "bg-fg/[0.08] font-medium text-fg" : "text-muted hover:bg-fg/[0.05]"
               }`}
             >
@@ -915,12 +1040,15 @@ export default function Prefs() {
           );
         })}
         <div className="flex-1" />
-        <p className="mx-2 text-[11px] tabular-nums text-fg/32">Palette {version || "…"}</p>
+        <p className="mx-2.5 text-[11px] tabular-nums text-muted/85">Palette {version || "…"}</p>
       </div>
 
       {/* DETAIL */}
       <div className="prefs-scroll relative min-w-0 flex-1 overflow-y-auto">
-        <div className="px-[30px] pb-10 pt-[26px]">{detail[section]}</div>
+        {/* pt-[14px] = CloseX's top-3.5: the section title's 30px line box
+            and the ×'s 30px button share the same top, so their centers meet
+            at 29px — the one header line (see SectionHeader). */}
+        <div className="px-[30px] pb-10 pt-[14px]">{detail[section]}</div>
         {/* Drag handle — a thin strip over the detail pane's empty top padding
             (the frameless window's title-bar grab area). Painted after the
             content so it sits above that padding, but the × (z-10) stays on
@@ -934,15 +1062,26 @@ export default function Prefs() {
         <CloseX onClick={closePrefs} />
       </div>
 
-      {/* TOAST */}
+      {/* TOAST — the VISIBLE pill is decorative (aria-hidden): its text rides
+          lastToastMsg so the fade-out keeps a FULL pill after toastMsg clears.
+          The announcement lives in a SEPARATE, always-present sr-only live
+          region below (matches App.tsx's identity announcer) that renders ONLY
+          the CURRENT toastMsg — so it announces on change and never leaves a
+          phantom node in the a11y tree (audit A7-7). The live region is never
+          aria-hidden and never toggled: flipping aria-hidden on a live region
+          in the same commit its text changes can suppress the announcement in
+          some Windows SRs (JAWS), the exact defeat of the toast's purpose. */}
       <div
-        aria-live="polite"
+        aria-hidden
         className={`pointer-events-none absolute bottom-[18px] left-1/2 z-30 rounded-full border border-border/12 bg-surface-2 px-4 py-2 text-[12px] text-fg shadow-lg shadow-black/40 [transition:opacity_var(--transition-duration-2)_var(--ease-out-tk),transform_var(--transition-duration-2)_var(--ease-out-tk)] ${
           toastMsg ? "translate-x-[-50%] translate-y-0 opacity-100" : "translate-x-[-50%] translate-y-2 opacity-0"
         }`}
       >
-        {toastMsg}
+        {toastMsg ?? lastToastMsg.current}
       </div>
+      <span className="sr-only" aria-live="polite">
+        {toastMsg ?? ""}
+      </span>
     </div>
   );
 }

@@ -163,6 +163,33 @@ src-tauri/src/
                 Spotify connected; skips inside the Spotify app bypass the
                 list; removing a fed front leaks that one track to
                 Spotify's queue
+  lastfm.rs     Last.fm track.getSimilar HTTP — the more-like-this brain
+                (Spotify's own /recommendations is gated for post-Nov-2024
+                apps). The API key is PERSONAL: settings.json
+                "lastfm_api_key", NEVER a const (public repo); it rides
+                the request URL urlenc'd and the module logs nothing.
+                no_data is a designed answer, not an error (the graph's
+                thin spot is recency, not language); every list tops with
+                same-artist entries (match 1.0–0.9) and degenerates into
+                filler below ~0.05 — the consumer (similar.rs) must
+                handle both shapes. validate_key backs the prefs
+                "Test key" button (ok/invalid/offline)
+  similar.rs    more-like-this + Search's discovery picks: current track →
+                Last.fm similars → Spotify resolution. more_like_this
+                appends to up-next via upnext::append ONE AT A TIME
+                (earned incremental arrival in the open panel), skipping
+                seed-artist entries first (genre discovery, not artist
+                radio) with MATCH_FLOOR (0.05) dropping the mush tail;
+                now-playing/dupe re-checked PER add — the walk takes
+                seconds and users interleave. discovery_picks returns
+                resolved tracks instead and fans BOUNDED: ≤2 seeds ×
+                ≤5 resolve tries each (a Spotify miss still costs a
+                search + gap), excluding by norm_key BEFORE resolving
+                (kept in lockstep with Search.tsx — a drift silently
+                stops excluding). One run at a time each: IN_FLIGHT +
+                a separate DISCOVERY_IN_FLIGHT so the empty-state fetch
+                and the queue button never block each other; blocking
+                HTTP on the spawn_blocking pool
   search.rs     the summon Search's window — Palette's FIRST second webview
                 (multi-window pioneer; focus mode reuses the seams). Created
                 ONCE hidden at setup (WebView2 cold-create costs ~100s of
@@ -227,12 +254,42 @@ src-tauri/src/
                 timeline, and #102's song-block wave was too small — both
                 Thien live verdicts), the console. Horizon + console live
                 OUTSIDE the upper-room swap, so the horizon survives every
-                track change and runs the announcement. Track changes exit
+                track change and runs the announcement (jump-suppressed for
+                play_now intermediates, the pill's isAnnounceSuppressed
+                wiring). Track changes exit
                 through the fetch interlude (lyricsLive flips while lyrics
                 re-key) — anything that must survive one lives outside the
-                swap.
+                swap. The room's QUEUE (2026-07-16) is a content surface in
+                the lyric column's exact box — QueuePanel scale="room",
+                opaque bg-surface over the still-running lyrics, always
+                mounted outside the swap; an open queue FORCES the split
+                composition so the identity stack holds the left seat even
+                with no lyrics (Esc peels the queue first).
                 This is the removed P3's want with the correct trigger:
                 invoked, never guessed
+  prefs.rs      the Preferences window — third webview on the search.rs
+                multi-window seams, but a NORMAL desktop window (opaque,
+                720×560 born-at-size, taskbar/Alt-Tab, NOT always-on-top,
+                never click-through) with focus.rs's CREATE-ON-OPEN +
+                DESTROY-ON-CLOSE lifecycle (opens rarely — no third
+                resident webview); recenters on the cursor's monitor per
+                open (window-state denylisted). Owns the window lifecycle,
+                the prefs_seed settings-read seam, and the small
+                data/connector commands; open() validates the section
+                against SECTIONS and rides it on the builder URL (no
+                event race — an already-open window is nudged via
+                "prefs-section"). The hotkey REBIND machinery lives in
+                lib.rs, co-located with the HK_* defaults and the
+                registration it re-runs
+  settings.rs   app-data settings.json, read-modify-write behind a module
+                mutex (set_value merges per key — save_companion once
+                wrote `{"companion": on}` WHOLESALE, the founding
+                clobber lesson) + write_atomic (sibling temp + same-volume
+                rename, atomic on NTFS): THE crash-safe replace shared by
+                every config writer — settings.json here,
+                spotify_tokens.json, upnext.json — so a crash mid-write
+                leaves old-or-new, never the truncated file plain
+                fs::write's O_TRUNC produces
   audio.rs      audio capture → FFT → smoothed auto-gained band energies at
                 ~30Hz. Capture is PROCESS-SCOPED (loopback.rs) so the bars
                 ride the SONG, not the device mix — whole-mix loopback heard
@@ -269,30 +326,36 @@ src/            React widget: pill ↔ card ↔ expanded modes; lib/posClock.ts 
                 /?spotify=off forces the queue gate, ?jump=partial the jump
                 failure caption
 src/Queue.tsx   the 11a queue & history UI: Palette's up-next list + the
-                "Earlier" history feed, TWO garments off ONE queueOpen bit —
-                a 312px popover floating above the pill/card (corner-aware:
-                opens away from the docked side; rides the mode resize on
-                the shell's 200ms EASE.inOut; max-height from the REAL
-                440px window: pill 330 / card 290) and, inside expanded, one
-                of three PEER LAYERS (lyrics · album · queue) that crossfade
-                in place under a fixed absolute now-playing header — opacity
-                only (200ms in / 140ms out EASE.out, no scale: the earlier
-                .98-exhale scale-overlay read as a panel opening and let the
-                layer behind peek at the edges, and a flex-flow header
-                reflowed the album column, 2026-07-12), visibility deferred,
-                inert when hidden; still always-mounted so scroll + feed
-                survive the swap; the shared header (lyrics + queue) is
+                "Earlier" history feed, garments off ONE queueOpen bit per
+                window — a 312px popover floating above the pill/card
+                (corner-aware: opens away from the docked side; rides the
+                mode resize on the shell's 200ms EASE.inOut; max-height from
+                the REAL 440px window: pill 330 / card 290); inside expanded,
+                one of three PEER LAYERS (lyrics · album · queue) that
+                crossfade in place under a fixed absolute now-playing header
+                — opacity only (200ms in / 140ms out EASE.out, no scale: the
+                earlier .98-exhale scale-overlay read as a panel opening and
+                let the layer behind peek at the edges, and a flex-flow
+                header reflowed the album column, 2026-07-12), visibility
+                deferred, inert when hidden; still always-mounted so scroll +
+                feed survive the swap; the shared header (lyrics + queue) is
                 absolute so it never reflows the album column, and chrome +
-                toggles never move. The
+                toggles never move; and in the FOCUS ROOM, the same panel at
+                scale="room" (QSCALE: 56px rows, 40px thumbs, type one rung
+                up — drag/ghost math parameterized by rowH) seated IN the
+                lyric column's exact box (2026-07-16: the 380px popover read
+                as a widget lost in the room). The
                 garment follows effectiveMode, so continuity across the
                 ladder is free. WHILE THE POPOVER IS OPEN THE HIT RECT
                 UNIONS ITS BOX (App's footprint effect) — a consumer that
                 forgets this puts clicks through to the desktop, the worst
-                failure class. Rows: 44px, hover-revealed actions
+                failure class (the focus garment is exempt: its window is
+                fully interactive). Rows: 44px base, hover-revealed actions
                 (history: play-now/+, uri-gated on enrichment; queue:
-                grip/×), pointer reorder with ±26px live swap, history→queue
-                ghost-chip drag (history itself never reorders), accent/16
-                flash + 1.6s aria-live toast, keyboard ↑/↓/Delete/Enter.
+                grip/×), pointer reorder with live swap at ±just-past-half a
+                row, history→queue ghost-chip drag (history itself never
+                reorders), accent/16 flash + 1.6s aria-live toast, keyboard
+                ↑/↓/Delete/Enter.
                 play_now suppresses the pill announcement for intermediates
                 (isAnnounceSuppressed) — the target announces once. The
                 queue toggle left the bracket cluster (2026-07-11: brackets
@@ -339,6 +402,11 @@ Design rule: chrome stays neutral (house semantic tokens); the album-art palette
   [key+Spotify-gated], rotating on a day-part block seed; ↑ at the top slot
   pull-refreshes both)
 
+The HK_* constants are DEFAULTS: rebindable in Preferences → Hotkeys, with
+overrides persisted in settings.json under "hotkeys" and read at registration
+(lib.rs resolve_chord/register_all — which also records each chord's
+OS-registration result so a reserved combo surfaces instead of failing silently).
+
 Commands route to the OS "current" media session, which Windows re-points to
 whichever app played most recently (pause AM while Spotify plays → next command
 hits Spotify). The controlled-app brand icon (PlayerBadge) was removed in the
@@ -352,7 +420,7 @@ being controlled.
 - `npm run tauri build` — release build → NSIS per-user installer at `src-tauri/target/release/bundle/nsis/Palette_<version>_x64-setup.exe` (unsigned; SmartScreen warns on other machines). Needs `TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/pulse.key)"` in the env now that updater artifacts are signed — without it the bundler errors after compiling (the `_PATH` variant does NOT work despite `tauri signer generate`'s help text — measured 2026-07-08).
 - `npm run dev` — frontend only (no Tauri window, limited use)
 
-Installed app: single-instance (relaunching surfaces the running widget), tray has an opt-in "Start at login" toggle (tauri-plugin-autostart, HKCU Run key — registers the current exe's path, so toggling from a dev build points it at the dev exe) and a "Hide on fullscreen" check item (the conceal switch, persisted to app-data settings.json under the legacy `companion` key; dev builds add "Simulate fullscreen (10s)" for conceal testing). Tray "Connect Spotify" ⇄ "Disconnect Spotify" runs the Web API OAuth (spotify.rs — label doubles as connection state and flow narration). Tray "Check for updates" runs the update flow on demand (label narrates Checking…/Installing…/Up to date). App icon source: five living-separator capsules on a dark rounded square; regenerate the set with `npx tauri icon <1024px.png>`.
+Installed app: single-instance (relaunching surfaces the running widget), tray has an opt-in "Start at login" toggle (tauri-plugin-autostart, HKCU Run key — registers the current exe's path, so toggling from a dev build points it at the dev exe) and a "Hide on fullscreen" check item (the conceal switch, persisted to app-data settings.json under the legacy `companion` key; dev builds add "Simulate fullscreen (10s)" for conceal testing). Tray "Preferences…" opens the prefs window (prefs.rs) and "Shortcuts / Help" opens it jumped to the Hotkeys section. Tray "Connect Spotify" ⇄ "Disconnect Spotify" runs the Web API OAuth (spotify.rs — label doubles as connection state and flow narration). Tray "Check for updates" runs the update flow on demand (label narrates Checking…/Installing…/Up to date). Tray "Open logs" reveals the log dir (`%LOCALAPPDATA%\com.thien.pulse\logs\pulse.log` — the supportability affordance next to update checks). App icon source: five living-separator capsules on a dark rounded square; regenerate the set with `npx tauri icon <1024px.png>`.
 
 Releases: bump `version` in tauri.conf.json (+ Cargo.toml/package.json to match), merge, then `git tag vX.Y.Z && git push origin vX.Y.Z` — the release.yml workflow builds, signs the updater artifacts, and publishes a GitHub Release with latest.json. Installed apps self-update at launch (release builds only; `#[cfg(not(debug_assertions))]`). Updater keypair: `~/.tauri/pulse.key` (private, empty password, mirrored in the repo's `TAURI_SIGNING_PRIVATE_KEY` secret — LOSING IT ORPHANS ALL INSTALLS) / pubkey pinned in tauri.conf.json.
 

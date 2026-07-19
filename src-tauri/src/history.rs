@@ -511,17 +511,40 @@ fn is_music(e: &HistoryEntry) -> bool {
     }
 }
 
-/// Append one entry line; returns its byte offset in the log.
+/// Append one entry line; returns its byte offset in the log. Heals a
+/// crash-torn tail first: if the file doesn't already end in a newline, the
+/// previous process died mid-append and this line would GLUE onto that partial
+/// one — serde_json then rejects the fused line and BOTH entries vanish from
+/// every later load_index/page. Prepend a newline so the append lands clean;
+/// the cost is one blank line, which both readers tolerate (from_slice/from_str
+/// skip it, offsets stay correct).
 fn append(dir: &Path, entry: &HistoryEntry) -> std::io::Result<u64> {
     std::fs::create_dir_all(dir)?;
     let path = log_path(dir);
-    let offset = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    let mut line = serde_json::to_string(entry).map_err(std::io::Error::other)?;
+    let mut offset = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let needs_heal = if offset > 0 {
+        // Read the last byte only; append writes still go to EOF regardless.
+        let mut f = std::fs::File::open(&path)?;
+        f.seek(SeekFrom::End(-1))?;
+        let mut tail = [0u8; 1];
+        f.read_exact(&mut tail)?;
+        tail[0] != b'\n'
+    } else {
+        false
+    };
+    let mut line = String::new();
+    if needs_heal {
+        line.push('\n'); // separate the torn partial from this entry
+        offset += 1; // the entry begins after the heal newline
+    }
+    line.push_str(&serde_json::to_string(entry).map_err(std::io::Error::other)?);
     line.push('\n');
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)?;
+    // One write_all so the heal newline + entry land together (no new tear
+    // introduced between them).
     file.write_all(line.as_bytes())?;
     Ok(offset)
 }

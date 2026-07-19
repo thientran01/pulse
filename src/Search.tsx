@@ -21,6 +21,16 @@
  * search window never renders position). Announcement suppression for a play
  * lives in the MAIN realm, armed by the backend's "spotify-jump" emit —
  * never armed from here.
+ *
+ * FULLY MONOCHROME (Thien, 2026-07-17): accent lives where the song is
+ * VISIBLE — widget and focus room render the playing track's identity, so
+ * the song's extracted color has an anchor there; this pane renders no
+ * now-playing content, and a song-colored queue flash arrived with no
+ * referent (tried both the resting hue and a synced song accent — both
+ * read wrong). The queued-row flash is a neutral fg/20 brightening (a
+ * clear pop above the fg/10 selection wash) + the "Queued ·" note; the
+ * realm runs no art→accent pipeline (the --accent var here only ever
+ * holds the resting value, effectively unused).
  */
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { commands, onSearchShown } from "./lib/backend";
@@ -252,7 +262,7 @@ async function computeResurfaced(
 /** A ghost of one result row — shown where real rows will land while a fetch
  * runs (discovery fill and first search results), so the wait fills its space
  * with the shape of the answer instead of a void. Geometry mirrors the real
- * row exactly (h-52, 32px thumb, gap-3 px-3, reason bar flush right → in-place
+ * row exactly (h-52, 32px thumb, gap-3 px-3.5, reason bar flush right → in-place
  * swap, zero shift); widths stagger so three read as content, not a grid.
  * Opacity-breathing only (.skeleton-pulse): the classic shimmer is a translate
  * sweep, and that motion vocabulary belongs to the waveform. The breathe is
@@ -276,7 +286,7 @@ function SkeletonRow({ index, reason = false }: { index: number; reason?: boolea
   const [titleW, artistW, reasonW] = SKELETON_WIDTHS[index % SKELETON_WIDTHS.length];
   const col = (n: number) => ({ animationDelay: `${n * SKELETON_COL_DELAY_MS}ms` });
   return (
-    <div role="presentation" aria-hidden className="flex h-[52px] items-center gap-3 px-3">
+    <div role="presentation" aria-hidden className="flex h-[52px] items-center gap-3 px-3.5">
       {/* Thumb one tone brighter than the text bars — real rows are bright
           art beside muted text, and a single tone read as a flat gray grid. */}
       <span
@@ -310,6 +320,62 @@ function SearchGlyph() {
     <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden>
       <circle cx="7" cy="7" r="4.4" />
       <path d="M 10.4,10.4 L 13.6,13.6" />
+    </svg>
+  );
+}
+
+/** One elevated keycap for the search-row hint. The old inline glyphs
+ * ("↵ play · ⇧↵ queue") sat in the same 11px muted run as their labels and
+ * read as compressed noise — you couldn't tell what to press (Thien,
+ * 2026-07-16). First cut was a cream neutral-inversion fill; Thien's live
+ * verdicts shaped the rest: "needs to look a bit more elevated" (Raycast's
+ * footer chips as the direction) → a RAISED dark key — fill one step above
+ * the bar, hairline top light + soft drop shadow for keycap depth; then
+ * "the icons are too cramped" → the UNICODE arrows were the problem (font
+ * glyphs go mushy at 11px), so the keys draw their own stroke SVGs in the
+ * house icon language (1.5 stroke, round caps — the search glyph's
+ * grammar) inside a slightly wider chip. Never accent. A one-off because
+ * these are single GLYPH caps, not chord strings (Keycaps.tsx). */
+function HintKey({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="inline-flex h-[18px] min-w-[20px] items-center justify-center rounded-[5px] border border-border/[0.08] bg-fg/[0.09] px-[3px] not-italic text-fg/90 shadow-[0_1px_2px_rgb(0_0_0/0.35),inset_0_1px_0_rgb(var(--fg)/0.07)]">
+      {children}
+    </kbd>
+  );
+}
+
+/** The three hint glyphs, stroke-drawn (never font arrows — see HintKey). */
+const hintSvg = {
+  viewBox: "0 0 16 16",
+  width: 12,
+  height: 12,
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 1.5,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+  "aria-hidden": true,
+};
+function EnterGlyph() {
+  return (
+    <svg {...hintSvg}>
+      <path d="M 12.5,4 L 12.5,9 L 4.5,9" />
+      <path d="M 7.5,6 L 4.5,9 L 7.5,12" />
+    </svg>
+  );
+}
+function ShiftGlyph() {
+  return (
+    <svg {...hintSvg}>
+      <path d="M 8,3 L 12.8,8.4 L 9.9,8.4 L 9.9,12.5 L 6.1,12.5 L 6.1,8.4 L 3.2,8.4 Z" />
+    </svg>
+  );
+}
+function UpGlyph() {
+  return (
+    <svg {...hintSvg}>
+      <path d="M 8,12.5 L 8,3.5" />
+      <path d="M 4.5,7 L 8,3.5 L 11.5,7" />
     </svg>
   );
 }
@@ -571,9 +637,13 @@ export default function Search() {
   const hasQuery = query.trim().length > 0;
   // Row-source flips (typing the first char, clearing) restart selection at
   // the top — without this the RAW selected can sit past the new list and
-  // ArrowUp reads as dead until it walks back into range.
+  // ArrowUp reads as dead until it walks back into range. The swap tick
+  // resets with it: after a pull, a type-then-clear round trip re-showed the
+  // SAME rows through the pull ripple — replayed motion for content that
+  // didn't change (unlicensed; the ripple is pull feedback only).
   useEffect(() => {
     setSelected(0);
+    setSwapTick(0);
   }, [hasQuery]);
 
   // Discovery appends BELOW history, so a late-arriving discovery fill never
@@ -654,16 +724,26 @@ export default function Search() {
       e.preventDefault();
       // Pull-to-refresh: Up while ALREADY at the top slot rolls a fresh set
       // (the phone gesture). Only in the empty state, with rows to replace,
-      // and never while a fetch is in flight (would answer "busy").
+      // and never while a fetch is in flight (would answer "busy"). No
+      // toast: the skeleton wait + the row-swap ripple ARE the refresh
+      // narration — the "Fresh picks" caption was double-speak (Thien,
+      // 2026-07-17).
       if (!hasQuery && sel === 0 && !gated && rows.length > 0 && !refreshBusy.current) {
         refreshCount.current += 1;
-        showNote("Fresh picks", 1600);
         void refreshEmptyState(refreshCount.current);
         return;
       }
       setSelected(Math.max(sel - 1, 0));
     } else if (e.key === "Enter" && rows[sel] && !gated) {
       e.preventDefault();
+      // A HELD Enter/Shift+Enter key-repeats, and the busy gate frees in a
+      // microtask (resolveUri resolves synchronously for enriched rows)
+      // before the next repeat keydown — so a repeat slips the gate and
+      // upnext_add, which has no dedupe, double-queues (audit A6-5). One
+      // physical press = one action: ignore auto-repeat outright. The play
+      // path dismisses on its first fire, but a held repeat still reached
+      // playNow twice before the hide landed — this covers both verbs.
+      if (e.repeat) return;
       if (e.shiftKey) void queueRow(rows[sel]);
       else void playRow(rows[sel]);
     }
@@ -683,7 +763,18 @@ export default function Search() {
       {/* The queue popover's shadow recipe (App.tsx) — not a third invented
           elevation; it also stays inside the 12px gutter, the transparent-
           window clip budget the card shadow once overflowed. */}
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border/10 bg-surface shadow-xl shadow-black/40">
+      <div
+        // Keep focus in the input: the root onKeyDown (Esc/arrows/Enter) lives
+        // on a non-focusable div, so a mousedown on non-interactive panel
+        // content moves focus to <body> and the pane goes keyboard-dead until
+        // the next click (audit A6-9). preventDefault suppresses the focus
+        // shift without touching click, so row clicks still play and the input
+        // keeps its native caret/selection.
+        onMouseDown={(e) => {
+          if (e.target !== inputRef.current) e.preventDefault();
+        }}
+        className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border/10 bg-surface shadow-xl shadow-black/40"
+      >
         {/* Search row — the search's one verb. */}
         <div className="flex items-center gap-3 border-b border-border/10 px-5 py-4">
           <span className={searching ? "text-fg" : "text-muted"}>
@@ -710,12 +801,43 @@ export default function Search() {
             className="search-input min-w-0 flex-1 bg-transparent text-[18px] text-fg outline-none placeholder:text-muted focus-visible:[outline:none]"
           />
           {!gated && (
-            <span className="shrink-0 text-[11px] text-muted/85">
+            <>
+              {/* AT mirror: the visual chips are glyph soup to a reader
+                  ("return symbol upwards arrow…") — hide them and say it in
+                  words, the skeletons' aria-hidden pattern. */}
+              <span className="sr-only">
+                Enter plays. Shift+Enter queues.
+                {!hasQuery && rows.length > 0 ? " Up arrow refreshes suggestions." : ""}
+              </span>
+              <span aria-hidden className="flex shrink-0 items-center gap-2 text-[11px] text-muted/85">
               {/* "↑ more" only when there ARE rows to re-roll — the Up guard
                   requires rows, and an empty-history user was being promised
-                  a no-op (quick-review catch). */}
-              ↵ play · ⇧↵ queue{!hasQuery && rows.length > 0 ? " · ↑ more" : ""}
-            </span>
+                  a no-op (quick-review catch). Raycast's footer grammar:
+                  verb label first, then its key(s); groups separated by a
+                  hairline, not middots. */}
+              <span className="flex items-center gap-1.5">
+                play
+                <HintKey><EnterGlyph /></HintKey>
+              </span>
+              <span className="h-3 w-px bg-border/10" />
+              <span className="flex items-center gap-1.5">
+                queue
+                <span className="flex items-center gap-[3px]">
+                  <HintKey><ShiftGlyph /></HintKey>
+                  <HintKey><EnterGlyph /></HintKey>
+                </span>
+              </span>
+              {!hasQuery && rows.length > 0 && (
+                <>
+                  <span className="h-3 w-px bg-border/10" />
+                  <span className="flex items-center gap-1.5">
+                    more
+                    <HintKey><UpGlyph /></HintKey>
+                  </span>
+                </>
+              )}
+              </span>
+            </>
           )}
         </div>
 
@@ -733,18 +855,23 @@ export default function Search() {
                 : ""}
         </span>
 
+        {/* One left line for the whole pane: the list container's p-1.5 (6px)
+            plus px-3.5 (14px) lands rows, headers, prose, and skeletons on
+            the SAME 20px inset as the search row's px-5 glyph — the input's
+            magnifier, section labels, and row thumbs share one vertical
+            line (the alignment sweep, 2026-07-16). */}
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-1.5 [scrollbar-width:none]">
           {!spotify.connected ? (
-            <div className="flex flex-col items-start gap-1.5 px-2.5 py-2.5">
+            <div className="flex flex-col items-start gap-1.5 px-3.5 py-2.5">
               <SpotifyConnectButton />
               <p className="m-0 text-[12px] text-muted/85">Connect Spotify to search and play.</p>
             </div>
           ) : offline ? (
-            <p className="m-0 px-2.5 py-2.5 text-[13px] text-muted">Spotify unreachable</p>
+            <p className="m-0 px-3.5 py-2.5 text-[13px] text-muted">Spotify unreachable</p>
           ) : (
             <>
               {!hasQuery && rows.length === 0 && (
-                <p className="m-0 px-2.5 py-2.5 text-[13px] text-muted">
+                <p className="m-0 px-3.5 py-2.5 text-[13px] text-muted">
                   Type to search Spotify — tracks you play will gather here.
                 </p>
               )}
@@ -759,7 +886,7 @@ export default function Search() {
                   <SkeletonRow key={i} index={i} />
                 ))}
               {hasQuery && !searching && rows.length === 0 && (
-                <p className="m-0 px-2.5 py-2.5 text-[13px] text-muted">No matches on Spotify</p>
+                <p className="m-0 px-3.5 py-2.5 text-[13px] text-muted">No matches on Spotify</p>
               )}
               <div
                 id="search-list"
@@ -785,7 +912,7 @@ export default function Search() {
                       {header && (
                         <p
                           role="presentation"
-                          className="m-0 px-2.5 pb-1.5 pt-2 text-[11px] uppercase tracking-widest text-muted"
+                          className="m-0 px-3.5 pb-1.5 pt-2 text-[11px] uppercase tracking-widest text-muted"
                         >
                           {header}
                         </p>
@@ -801,8 +928,8 @@ export default function Search() {
                       if (prev) setSelected(i);
                     }}
                     onClick={() => void playRow(row)}
-                    className={`flex h-[52px] cursor-pointer select-none items-center gap-3 rounded-md px-3 [transition:background-color_140ms_var(--ease-out-tk)] ${
-                      flashKeys.has(row.key) ? "bg-accent/15" : i === sel ? "bg-fg/10" : ""
+                    className={`flex h-[52px] cursor-pointer select-none items-center gap-3 rounded-md px-3.5 [transition:background-color_140ms_var(--ease-out-tk)] ${
+                      flashKeys.has(row.key) ? "bg-fg/20" : i === sel ? "bg-fg/10" : ""
                     } ${!hasQuery && swapTick > 0 ? "row-swap-in" : ""}`}
                     style={
                       // Stagger is LOCAL to each section's landing moment:
@@ -848,7 +975,7 @@ export default function Search() {
                   <>
                     <p
                       role="presentation"
-                      className="m-0 px-2.5 pb-1.5 pt-2 text-[11px] uppercase tracking-widest text-muted"
+                      className="m-0 px-3.5 pb-1.5 pt-2 text-[11px] uppercase tracking-widest text-muted"
                     >
                       Something different
                     </p>

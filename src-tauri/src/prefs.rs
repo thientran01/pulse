@@ -174,18 +174,52 @@ pub async fn prefs_seed(app: AppHandle) -> PrefsSeed {
     }
 }
 
-/// The generic persist seam (settings.rs is already atomic). Settings with a
-/// live side effect (autostart, the fullscreen conceal) go through their own
-/// commands so the tray mirror stays in sync; this covers the inert ones
-/// (reactive separator, launch mode, the Last.fm key, seenIntro).
-/// The "settings-changed" event lets any other open surface reflect the write.
+/// Keys the generic persist seam (`set_setting`) is allowed to write — the
+/// inert settings the prefs UI legitimately touches. DELIBERATELY excludes the
+/// security-relevant / side-effecting keys ("companion" fullscreen conceal,
+/// "hotkeys", "fsSeat", autostart): those have their own typed setters that
+/// keep the tray mirror and geometry in sync, and the generic seam must never
+/// be a back door around them.
+const SETTABLE_KEYS: [&str; 4] = [
+    "reactive_separator",
+    "launch_mode",
+    "lastfm_api_key",
+    "seenIntro",
+];
+/// Generous per-write ceiling on the serialized value — a real setting here is
+/// a bool, a short mode string, or a ~32-char API key; anything past this is a
+/// bloat attempt (settings.json is re-parsed on every read).
+const MAX_SETTING_BYTES: usize = 4096;
+
+/// The generic persist seam for the frontend's INERT settings (settings.rs is
+/// already atomic). Hardened as defense-in-depth — the frontend is first-party
+/// behind CSP, but a future renderer compromise must not clobber a
+/// security-relevant key or bloat the file: the key is ALLOW-LISTED against
+/// SETTABLE_KEYS and the serialized value length is capped, anything else is
+/// rejected with an Err. Settings with a live side effect (autostart, the
+/// fullscreen conceal) still go through their own commands so the tray mirror
+/// stays in sync. The "settings-changed" event lets any other open surface
+/// reflect the write.
 #[tauri::command]
-pub async fn set_setting(app: AppHandle, key: String, value: serde_json::Value) {
+pub async fn set_setting(
+    app: AppHandle,
+    key: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    if !SETTABLE_KEYS.contains(&key.as_str()) {
+        log::warn!("set_setting: rejected non-allow-listed key {key:?}");
+        return Err(format!("key not settable: {key}"));
+    }
+    if value.to_string().len() > MAX_SETTING_BYTES {
+        log::warn!("set_setting: rejected oversized value for key {key:?}");
+        return Err("value too large".to_string());
+    }
     crate::settings::set_value(&app, &key, value.clone());
     let _ = app.emit(
         "settings-changed",
         serde_json::json!({ "key": key, "value": value }),
     );
+    Ok(())
 }
 
 /// Validate a Last.fm API key against the live service (lastfm.rs). "ok" |

@@ -308,121 +308,145 @@ fn settle(raw: bool, settled: &mut bool, credit_ms: &mut u64) {
 /// conceal, feeds dock.rs's fullscreen seat context, and emits "presence"
 /// diff-suppressed (plus "presence-debug" raw while the debug flag is on).
 pub fn spawn(app: AppHandle) {
-    std::thread::spawn(move || {
-        let own_pid = std::process::id();
-        let mut fs_settled = false;
-        let mut disagree_ms: u64 = 0;
-        // The seat-swap signal, settled separately: fullscreen owns the
-        // WIDGET's monitor (rect method only — the global QUNS states can't
-        // say WHICH monitor, and a game on the other monitor must not
-        // re-seat the widget over a still-visible taskbar). The conceal
-        // keeps the broader OR'd verdict above.
-        let mut fs_mon_settled = false;
-        let mut mon_disagree_ms: u64 = 0;
-        loop {
-            let widget_hwnd = app
-                .get_webview_window("main")
-                .and_then(|w| w.hwnd().ok())
-                .map(|h| HWND(h.0));
+    std::thread::Builder::new()
+        .name("presence-watch".into())
+        .spawn(move || {
+            let own_pid = std::process::id();
+            let mut fs_settled = false;
+            let mut disagree_ms: u64 = 0;
+            // The seat-swap signal, settled separately: fullscreen owns the
+            // WIDGET's monitor (rect method only — the global QUNS states can't
+            // say WHICH monitor, and a game on the other monitor must not
+            // re-seat the widget over a still-visible taskbar). The conceal
+            // keeps the broader OR'd verdict above.
+            let mut fs_mon_settled = false;
+            let mut mon_disagree_ms: u64 = 0;
+            loop {
+                let widget_hwnd = app
+                    .get_webview_window("main")
+                    .and_then(|w| w.hwnd().ok())
+                    .map(|h| HWND(h.0));
 
-            let sampled = sample(widget_hwnd, own_pid);
-            // No foreground window (secure desktop): hold every derived
-            // state exactly where it was — emit nothing, decide nothing.
-            let Some(mut dbg) = sampled else {
-                // Also drop any accumulated hysteresis credit: pre-gap
-                // disagreement must not let one post-unlock tick flip the
-                // settled state early — the full window restarts (conservative
-                // in both directions; quick-review catch, 2026-07-09).
-                disagree_ms = 0;
-                mon_disagree_ms = 0;
-                std::thread::sleep(Duration::from_millis(PRESENCE_POLL_MS));
-                continue;
-            };
+                let sampled = sample(widget_hwnd, own_pid);
+                // No foreground window (secure desktop): hold every derived
+                // state exactly where it was — emit nothing, decide nothing.
+                let Some(mut dbg) = sampled else {
+                    // Also drop any accumulated hysteresis credit: pre-gap
+                    // disagreement must not let one post-unlock tick flip the
+                    // settled state early — the full window restarts (conservative
+                    // in both directions; quick-review catch, 2026-07-09).
+                    disagree_ms = 0;
+                    mon_disagree_ms = 0;
+                    std::thread::sleep(Duration::from_millis(PRESENCE_POLL_MS));
+                    continue;
+                };
 
-            let presence_st = app.state::<Presence>();
-            let sim = presence_st.sim_fs_active();
-            if sim {
-                dbg.fs_raw = true;
-            }
-            // The simulation drives the monitor-scoped verdict too, so the
-            // dev tray item exercises the seat swap alongside the conceal.
-            let fs_mon_raw = sim || (dbg.rect_verdict == "fullscreen" && dbg.on_widget_monitor);
-
-            settle(dbg.fs_raw, &mut fs_settled, &mut disagree_ms);
-            settle(fs_mon_raw, &mut fs_mon_settled, &mut mon_disagree_ms);
-
-            // The courtesy conceal, the engine's visibility action: settled
-            // fullscreen (companion on) hides the native window; episode end
-            // restores it and clears any manual-show snooze. All show/hide
-            // flows through apply_visibility, so a manual hide stays sticky
-            // and a snoozed episode stays visible without special cases here.
-            let vis = app.state::<crate::VisIntent>();
-            let companion = vis.companion.load(Ordering::Relaxed);
-            let mut restore_pending = false;
-            if fs_settled && companion {
-                // Defer (not skip) while a press is in flight: hiding the
-                // window mid-drag would yank it out from under the hand —
-                // the next 1s tick conceals once the button is up.
-                if !vis.concealed.load(Ordering::Relaxed) && !crate::dock::primary_button_down() {
-                    vis.concealed.store(true, Ordering::Relaxed);
-                    crate::apply_visibility(&app);
+                let presence_st = app.state::<Presence>();
+                let sim = presence_st.sim_fs_active();
+                if sim {
+                    dbg.fs_raw = true;
                 }
-            } else if vis.concealed.load(Ordering::Relaxed) {
-                vis.concealed.store(false, Ordering::Relaxed);
-                vis.conceal_snoozed.store(false, Ordering::Relaxed);
-                // Restore AFTER the emit below: the still-hidden webview
-                // gets the new state first, so the show lands with current
-                // layout/hover state instead of a stale frame. Hides stay
-                // immediate — there's nothing to mis-show on the way out.
-                restore_pending = true;
-            }
+                // The simulation drives the monitor-scoped verdict too, so the
+                // dev tray item exercises the seat swap alongside the conceal.
+                let fs_mon_raw = sim || (dbg.rect_verdict == "fullscreen" && dbg.on_widget_monitor);
 
-            // The seat context follows the fullscreen FACT, independent of
-            // the conceal switch: dock.rs re-seats against the monitor rect
-            // while fullscreen owns the widget's monitor and restores the
-            // exact desktop seat after. Runs after the conceal decision
-            // (an episode-start hide makes the swap an invisible jump) and
-            // before restore_pending's show (an episode-end restore shows
-            // at the desktop seat, never flashing the fullscreen one).
-            // Every tick — set_fullscreen_context is idempotent and doubles
-            // as the retry for a swap deferred mid-press.
-            crate::dock::set_fullscreen_context(&app, fs_mon_settled);
+                settle(dbg.fs_raw, &mut fs_settled, &mut disagree_ms);
+                settle(fs_mon_raw, &mut fs_mon_settled, &mut mon_disagree_ms);
 
-            let state = PresenceState {
-                fullscreen: fs_settled,
-                // "The engine is currently hiding the window": a snoozed
-                // episode is fullscreen but NOT concealed.
-                concealed: vis.concealed.load(Ordering::Relaxed)
-                    && !vis.conceal_snoozed.load(Ordering::Relaxed),
-            };
+                // The courtesy conceal, the engine's visibility action: settled
+                // fullscreen (companion on) hides the native window; episode end
+                // restores it and clears any manual-show snooze. All show/hide
+                // flows through apply_visibility, so a manual hide stays sticky
+                // and a snoozed episode stays visible without special cases here.
+                let vis = app.state::<crate::VisIntent>();
+                let companion = vis.companion.load(Ordering::Relaxed);
+                let mut restore_pending = false;
+                if fs_settled && companion {
+                    // Defer (not skip) while a press is in flight: hiding the
+                    // window mid-drag would yank it out from under the hand —
+                    // the next 1s tick conceals once the button is up.
+                    if !vis.concealed.load(Ordering::Relaxed) && !crate::dock::primary_button_down()
+                    {
+                        vis.concealed.store(true, Ordering::Relaxed);
+                        crate::apply_visibility(&app);
+                    }
+                } else if vis.concealed.load(Ordering::Relaxed) {
+                    vis.concealed.store(false, Ordering::Relaxed);
+                    vis.conceal_snoozed.store(false, Ordering::Relaxed);
+                    // Restore AFTER the emit below: the still-hidden webview
+                    // gets the new state first, so the show lands with current
+                    // layout/hover state instead of a stale frame. Hides stay
+                    // immediate — there's nothing to mis-show on the way out.
+                    restore_pending = true;
+                }
 
-            let presence = app.state::<Presence>();
-            {
-                let mut last = presence.last.lock().unwrap_or_else(PoisonError::into_inner);
-                if *last != Some(state) {
+                // The seat context follows the fullscreen FACT, independent of
+                // the conceal switch: dock.rs re-seats against the monitor rect
+                // while fullscreen owns the widget's monitor and restores the
+                // exact desktop seat after. Runs after the conceal decision
+                // (an episode-start hide makes the swap an invisible jump) and
+                // before restore_pending's show (an episode-end restore shows
+                // at the desktop seat, never flashing the fullscreen one).
+                // Every tick — set_fullscreen_context is idempotent and doubles
+                // as the retry for a swap deferred mid-press.
+                crate::dock::set_fullscreen_context(&app, fs_mon_settled);
+
+                let state = PresenceState {
+                    fullscreen: fs_settled,
+                    // "The engine is currently hiding the window": a snoozed
+                    // episode is fullscreen but NOT concealed.
+                    concealed: vis.concealed.load(Ordering::Relaxed)
+                        && !vis.conceal_snoozed.load(Ordering::Relaxed),
+                };
+
+                let presence = app.state::<Presence>();
+                // Diff + update under the lock; log + emit AFTER dropping it — a
+                // slow logger sink or IPC emit must not serialize the 1s watcher's
+                // state transitions behind `last` (its only other reader is the
+                // presence_state seed command).
+                let changed = {
+                    let mut last = presence.last.lock().unwrap_or_else(PoisonError::into_inner);
+                    if *last != Some(state) {
+                        *last = Some(state);
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if changed {
+                    // Verdicts only at Info: pulse.log is the support bundle
+                    // (release level = Info), and the foreground exe name
+                    // there would make it a timestamped what-was-fullscreen
+                    // timeline. The identifying detail (exe, rect, quns)
+                    // stays one level down at Debug — dev builds print it
+                    // (their level is Debug), release builds never do; the
+                    // dev overlay's presence-debug stream carries it live
+                    // either way.
                     log::info!(
-                        "presence: fullscreen={} concealed={} (fg={} rect={} quns={})",
+                        "presence: fullscreen={} concealed={}",
                         state.fullscreen,
                         state.concealed,
+                    );
+                    log::debug!(
+                        "presence: fg={} rect={} quns={}",
                         dbg.fg_exe,
                         dbg.rect_verdict,
                         dbg.quns_name
                     );
                     let _ = app.emit("presence", &state);
-                    *last = Some(state);
                 }
-            }
 
-            if restore_pending {
-                crate::apply_visibility(&app);
-            }
+                if restore_pending {
+                    crate::apply_visibility(&app);
+                }
 
-            if presence.debug.load(Ordering::Relaxed) {
-                dbg.fs_settled = fs_settled;
-                let _ = app.emit("presence-debug", &dbg);
-            }
+                if presence.debug.load(Ordering::Relaxed) {
+                    dbg.fs_settled = fs_settled;
+                    let _ = app.emit("presence-debug", &dbg);
+                }
 
-            std::thread::sleep(Duration::from_millis(PRESENCE_POLL_MS));
-        }
-    });
+                std::thread::sleep(Duration::from_millis(PRESENCE_POLL_MS));
+            }
+        })
+        .expect("spawn presence-watch thread");
 }

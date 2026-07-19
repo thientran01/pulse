@@ -282,8 +282,12 @@ pub fn tick(app: &AppHandle, np: &NowPlaying) {
     // Blocking HTTP must not run on the media loop thread.
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let ok = spotify::add_to_queue(&app, &front.uri).is_ok();
         let upnext = app.state::<UpNext>();
+        // RAII reset: a panic in the add/persist below must not leak
+        // feed_in_flight SET, which would stall the feeder for the rest of the
+        // run (see crate::spotify::FlagGuard).
+        let _flag = crate::spotify::FlagGuard::new(&upnext.feed_in_flight);
+        let ok = spotify::add_to_queue(&app, &front.uri).is_ok();
         if ok {
             let mut inner = lock(&upnext);
             // The list may have mutated during the HTTP round-trip. Only arm
@@ -300,7 +304,7 @@ pub fn tick(app: &AppHandle, np: &NowPlaying) {
                 );
             }
         }
-        upnext.feed_in_flight.store(false, Ordering::SeqCst);
+        // _flag resets feed_in_flight on drop (normal exit AND panic unwind).
     });
 }
 
@@ -324,10 +328,11 @@ fn request_reconcile(app: &AppHandle) {
     }
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let upnext = app.state::<UpNext>();
+        // RAII reset: a panic in reconcile_fed must not leak reconcile_in_flight
+        // SET (see crate::spotify::FlagGuard).
+        let _flag = crate::spotify::FlagGuard::new(&upnext.reconcile_in_flight);
         reconcile_fed(&app);
-        app.state::<UpNext>()
-            .reconcile_in_flight
-            .store(false, Ordering::SeqCst);
     });
 }
 

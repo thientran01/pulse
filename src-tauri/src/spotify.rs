@@ -10,12 +10,14 @@
 //! tradeoff: the file is user-profile-scoped and holds a refresh token
 //! limited to this app's scopes.
 //!
-//! Token-destruction policy (quick-review hardening, 2026-07-10): tokens are
-//! cleared ONLY on evidence the session itself is dead — a 400-class answer
-//! from the token endpoint (invalid_grant/invalid_client), or a fresh
-//! access token still answering 401. Transport failures, 5xx, and 403s
-//! (which Spotify also serves for non-scope reasons, e.g. Premium-required)
-//! never destroy a session a re-consent couldn't improve.
+//! Token-destruction policy (quick-review hardening, 2026-07-10; narrowed
+//! 2026-07-18): tokens are cleared ONLY on proof the session itself is dead —
+//! the token endpoint answering exactly 400 or 401 (the invalid_grant/
+//! invalid_client class), or a fresh access token still answering 401. Every
+//! other token-endpoint status (403/408/429, 5xx) and every transport failure
+//! takes the hand-back-the-old-token/offline path: none of those is evidence
+//! a re-consent could improve on, and the old blanket 4xx match destroyed a
+//! healthy session on a stray 429.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
@@ -30,6 +32,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
+
+use crate::settings::{json_capped, JSON_CAP};
 
 /// Public by design under PKCE (no secret exists for this app type).
 /// Prerequisite: create the app at developer.spotify.com/dashboard with
@@ -248,6 +252,31 @@ pub fn jump_active(app: &AppHandle) -> bool {
         .load(Ordering::SeqCst)
 }
 
+/// Resets an in-flight `AtomicBool` on drop. The four single-flight guards
+/// (jump/enrich here, feed/reconcile in upnext.rs) run their guarded work on
+/// the blocking pool; a panic in that region unwinds as a JoinError the caller
+/// swallows, and a flag cleared only by straight-line code AFTER the work would
+/// then leak SET forever — a leaked `jump_in_flight` PERMANENTLY disables
+/// history ingestion and swallows every queue-aware next (lib.rs gates on
+/// `!jump_active`). Hold one for the guarded region and the reset survives the
+/// unwind (similar.rs hardened the same shape in its spawn_blocking JoinError
+/// arm; this is the RAII sibling for the straight-line call sites).
+pub(crate) struct FlagGuard<'a>(&'a AtomicBool);
+
+impl<'a> FlagGuard<'a> {
+    /// Create AFTER the CAS that claimed the flag — the guard owns the reset,
+    /// not the acquisition.
+    pub(crate) fn new(flag: &'a AtomicBool) -> Self {
+        FlagGuard(flag)
+    }
+}
+
+impl Drop for FlagGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Emit the connection state AND re-sync the tray label to it — the label is
 /// derived state and every transition flows through here (tray, frontend
 /// command, background invalid_grant), so it can never go stale.
@@ -275,14 +304,39 @@ fn emit_device(app: &AppHandle) {
     let _ = app.emit("spotify-device", device);
 }
 
-fn save_tokens(inner: &Inner) {
-    let (Some(dir), Some(tokens)) = (&inner.dir, &inner.tokens) else {
-        return;
-    };
-    if let Ok(json) = serde_json::to_string(tokens) {
-        // Atomic replace: a crash mid-write must not blank a valid session to
-        // default (which reads as "disconnected" and forces a re-consent).
-        if let Err(e) = crate::settings::write_atomic(&tokens_path(dir), json.as_bytes()) {
+/// Serializes ALL mutations of the token file (commit_token_write's atomic
+/// replace and clear_tokens' remove/neutralize). settings::write_atomic is only
+/// concurrency-safe when callers serialize their own writes — it uses a FIXED
+/// per-target temp name, so two concurrent writers to spotify_tokens.json would
+/// race the same temp/final path and could corrupt or resurrect the file.
+/// settings.json is covered by settings.rs's WRITE_GATE; this is the token
+/// file's equivalent (the A2-3 fix moved these writes OFF the `inner` lock,
+/// which was the only thing serializing them before). Taken ONLY around the
+/// file I/O, AFTER `inner` is dropped — never held while acquiring `inner` or
+/// `refresh_gate` — so it can't deadlock (the whole point of the off-lock move).
+static TOKEN_WRITE_GATE: Mutex<()> = Mutex::new(());
+
+/// Serialize the current tokens to (path, bytes) for an UNLOCKED write. Called
+/// under the inner lock; `commit_token_write` performs the returned write after
+/// the guard drops — the media loop's per-beat `connected()`/feeder must never
+/// block behind a stalled or contended disk write held under the state mutex.
+fn stage_token_write(inner: &Inner) -> Option<(PathBuf, Vec<u8>)> {
+    let (dir, tokens) = (inner.dir.as_ref()?, inner.tokens.as_ref()?);
+    let json = serde_json::to_string(tokens).ok()?;
+    Some((tokens_path(dir), json.into_bytes()))
+}
+
+/// Perform a staged token write off the lock. Atomic replace: a crash
+/// mid-write must not blank a valid session to default (which reads as
+/// "disconnected" and forces a re-consent). Serialized against clear_tokens'
+/// file ops by TOKEN_WRITE_GATE so a concurrent disconnect can't race the
+/// shared temp/final path (both run on the blocking pool).
+fn commit_token_write(staged: Option<(PathBuf, Vec<u8>)>) {
+    if let Some((path, bytes)) = staged {
+        let _gate = TOKEN_WRITE_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Err(e) = crate::settings::write_atomic(&path, &bytes) {
             log::warn!("spotify: token save failed: {e}");
         }
     }
@@ -291,14 +345,39 @@ fn save_tokens(inner: &Inner) {
 /// Drop tokens + file; callers follow with emit_status.
 fn clear_tokens(app: &AppHandle) {
     let auth = app.state::<SpotifyAuth>();
-    {
+    // Clear the in-memory session under the lock, but remove the FILE off it —
+    // a stalled/contended unlink must not block the media loop's per-beat
+    // connected() behind the state mutex.
+    let path = {
         let mut inner = lock(&auth);
-        if let Some(dir) = &inner.dir {
-            let _ = std::fs::remove_file(tokens_path(dir));
-        }
+        let path = inner.dir.as_ref().map(|dir| tokens_path(dir));
         inner.tokens = None;
         inner.now_uri = None;
         inner.active_device = None;
+        path
+    };
+    let Some(path) = path else { return };
+    // Serialize the file ops against a concurrent commit_token_write (an
+    // in-flight refresh's save) — both run on the blocking pool and race the
+    // same temp/final path otherwise (TOKEN_WRITE_GATE; taken after `inner`
+    // dropped, so no lock-order hazard).
+    let _gate = TOKEN_WRITE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // A swallowed delete failure (the old `let _ =`) leaves the token file on
+    // disk, and init() RESURRECTS the disconnected session next launch. If the
+    // unlink can't land (locked file, EPERM), neutralize the file instead: `{}`
+    // fails to deserialize into Tokens, so init() reads no session and the
+    // disconnect still sticks.
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            log::warn!("spotify: token file delete failed ({e}); neutralizing");
+            if let Err(e2) = crate::settings::write_atomic(&path, b"{}") {
+                log::warn!("spotify: token file neutralize failed: {e2}");
+            }
+        }
     }
 }
 
@@ -384,10 +463,14 @@ pub fn start_connect(app: &AppHandle) {
     }
     let app = app.clone();
     std::thread::spawn(move || {
+        // RAII reset (the jump/enrich/feed/reconcile family): a panic in
+        // run_consent (port bind, HTTP, parse) unwinds this spawned thread, and
+        // the old straight-line `store(false)` after it was then skipped —
+        // leaking connect_in_flight SET forever blocks every reconnect this
+        // session. The guard resets on the normal AND the unwind path.
+        let auth = app.state::<SpotifyAuth>();
+        let _flag = FlagGuard::new(&auth.connect_in_flight);
         let outcome = run_consent(&app);
-        app.state::<SpotifyAuth>()
-            .connect_in_flight
-            .store(false, Ordering::SeqCst);
         match outcome {
             Ok(()) => emit_status(&app),
             Err(msg) => {
@@ -439,9 +522,12 @@ fn run_consent(app: &AppHandle) -> Result<(), String> {
     let tokens = exchange_code(&code, &redirect, &verifier)?;
 
     let auth = app.state::<SpotifyAuth>();
-    let mut inner = lock(&auth);
-    inner.tokens = Some(tokens);
-    save_tokens(&inner);
+    let staged = {
+        let mut inner = lock(&auth);
+        inner.tokens = Some(tokens);
+        stage_token_write(&inner)
+    };
+    commit_token_write(staged);
     Ok(())
 }
 
@@ -567,7 +653,7 @@ fn token_request(form: &[(&str, &str)]) -> Result<Tokens, String> {
         }
         Err(e) => return Err(format!("offline: {e}")),
     };
-    let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
+    let v: serde_json::Value = json_capped(resp, JSON_CAP).map_err(|e| e.to_string())?;
     let access = v["access_token"]
         .as_str()
         .ok_or("no access_token")?
@@ -609,9 +695,9 @@ fn exchange_code(code: &str, redirect: &str, verifier: &str) -> Result<Tokens, S
 /// through `refresh_gate`; the state lock is never held across HTTP. On a
 /// refresh that CAN'T run (offline, 5xx) the old token is returned — callers
 /// distinguish "refresh actually happened" by the token changing.
-/// Err = "disconnected" (no/dead session) — 400-class token-endpoint answers
-/// (invalid_grant, invalid_client) clear the session, transient failures
-/// never do.
+/// Err = "disconnected" (no/dead session) — ONLY token-endpoint 400/401
+/// (invalid_grant, invalid_client) clear the session; every other status and
+/// every transient failure never does (module-header policy).
 fn ensure_access(app: &AppHandle) -> Result<String, &'static str> {
     let auth = app.state::<SpotifyAuth>();
     {
@@ -664,23 +750,33 @@ fn ensure_access(app: &AppHandle) -> Result<String, &'static str> {
                 fresh.scope = old_scope;
             }
             let access = fresh.access_token.clone();
-            let mut inner = lock(&auth);
-            inner.tokens = Some(fresh);
-            save_tokens(&inner);
+            let staged = {
+                let mut inner = lock(&auth);
+                inner.tokens = Some(fresh);
+                stage_token_write(&inner)
+            };
+            commit_token_write(staged);
             Ok(access)
         }
-        // 400-class served answer: the grant itself is dead (revoked,
-        // rotated away, bad client) — only a re-consent heals it. Clearing
-        // here also heals the "stale tokens presented as connected forever"
-        // restart state.
-        Err(e) if e.starts_with("token endpoint 4") => {
+        // 400/401 served answer — the dead-grant PROOF class (invalid_grant,
+        // invalid_client): the grant itself is dead (revoked, rotated away,
+        // bad client) and only a re-consent heals it. Clearing here also
+        // heals the "stale tokens presented as connected forever" restart
+        // state. Exactly these two codes: the old blanket 4xx match also
+        // caught 403/408/429, destroying a healthy session on a stray
+        // rate-limit (token_request formats every non-2xx as
+        // "token endpoint {code}: {body}", and nothing on the token path
+        // honors Retry-After — api_call_impl's 429 arm covers only
+        // api.spotify.com).
+        Err(e) if e.starts_with("token endpoint 400:") || e.starts_with("token endpoint 401:") => {
             log::warn!("spotify refresh rejected: {e}");
             clear_tokens(app);
             emit_status(app);
             Err("disconnected")
         }
-        // Transport failure or 5xx: the session may be fine — hand back the
-        // old token and let the caller treat a repeat 401 as offline.
+        // Everything else — transport failure, 403/408/429, 5xx: the session
+        // may be fine — hand back the old token and let the caller treat a
+        // repeat 401 as offline.
         Err(e) => {
             log::warn!("spotify refresh unavailable: {e}");
             Ok(old_access)
@@ -746,9 +842,11 @@ fn api_call_impl(
                 // A GET's body is the answer — a garbled one is a failure.
                 // POST answers (200/202) may carry no body; that's success.
                 if method == "GET" {
-                    return r.into_json().map(Some).map_err(|_| "offline");
+                    return json_capped::<serde_json::Value>(r, JSON_CAP)
+                        .map(Some)
+                        .map_err(|_| "offline");
                 }
-                return Ok(r.into_json().ok());
+                return Ok(json_capped::<serde_json::Value>(r, JSON_CAP).ok());
             }
             Err(ureq::Error::Status(401, _)) if !refreshed => {
                 refreshed = true;
@@ -907,10 +1005,11 @@ pub fn play_now(app: &AppHandle, uri: &str) -> &'static str {
     {
         return "busy";
     }
+    // RAII reset: a panic inside jump() (parse, HTTP, unwrap) would otherwise
+    // leak jump_in_flight SET forever, permanently disabling history ingestion
+    // and swallowing every queue-aware next.
+    let _flag = FlagGuard::new(&auth.jump_in_flight);
     let outcome = jump(app, uri);
-    app.state::<SpotifyAuth>()
-        .jump_in_flight
-        .store(false, Ordering::SeqCst);
     // NO jump-cancel on "diverged" — upnext::try_queue_skip deliberately
     // lets suppression ride out its window there (the outcome is genuinely
     // uncertain; skips DID happen), and a blanket cancel here would undo
@@ -1122,6 +1221,10 @@ pub fn enrich_now(app: &AppHandle) {
     }
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // RAII reset up front — a panic in the read/parse below would otherwise
+        // leak enrich_in_flight SET and stop all further enrichment this run.
+        let auth = app.state::<SpotifyAuth>();
+        let _flag = FlagGuard::new(&auth.enrich_in_flight);
         if let Ok(Some(v)) = api_call(
             &app,
             "GET",
@@ -1150,9 +1253,7 @@ pub fn enrich_now(app: &AppHandle) {
                 emit_device(&app);
             }
         }
-        app.state::<SpotifyAuth>()
-            .enrich_in_flight
-            .store(false, Ordering::SeqCst);
+        // _flag resets enrich_in_flight on drop (normal exit AND panic unwind).
     });
 }
 

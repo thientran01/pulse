@@ -328,8 +328,10 @@ export function onUpNextChanged(cb: (list: QueueTrack[]) => void): () => void {
   };
 }
 
-/** Fires when play history is wiped (prefs Data → Clear play history). Live
- * feed surfaces (queue/search) reset on it. Mock: never fires. */
+/** Fires when play history is wiped (prefs Data → Clear play history). The
+ * queue's Earlier feed resets on it (useHistoryFeed — entries, paging
+ * latches, and the module thumb/uri caches); Search doesn't subscribe — it
+ * recomputes its resurfacing rows on every summon. Mock: never fires. */
 export function onHistoryCleared(cb: () => void): () => void {
   if (!IN_TAURI) return () => {};
   const un = listen("history-cleared", () => cb());
@@ -356,6 +358,16 @@ export function onHistoryAppended(cb: (e: HistoryEntry) => void): () => void {
 // (the pill — where the track-change announcement lives) via the console.
 if (!IN_TAURI) {
   (window as unknown as { __mockNext?: () => void }).__mockNext = () => mockSkip(1);
+}
+
+// Preview affordance: an in-song dropout — zero bands for `ms` while status
+// stays "playing" (the process-loopback packet gap the Waveform's playing
+// grace exists for; the real trigger only exists in the installed app).
+let mockSilenceUntil = 0;
+if (!IN_TAURI) {
+  (window as unknown as { __mockSilence?: (ms: number) => void }).__mockSilence = (ms) => {
+    mockSilenceUntil = Date.now() + ms;
+  };
 }
 
 /** Mutate the mock payload, advancing the seq stamp like the backend does. */
@@ -610,7 +622,7 @@ export function onAudioBands(cb: (b: AudioBands) => void): () => void {
   }
   // Mock: musical-ish motion so preview exercises the reactive layer.
   const id = window.setInterval(() => {
-    if (mock.status !== "playing") {
+    if (mock.status !== "playing" || Date.now() < mockSilenceUntil) {
       cb({ bass: 0, mid: 0, high: 0, level: 0, spectrum: new Array<number>(SPECTRUM_BINS).fill(0) });
       return;
     }
@@ -1110,7 +1122,14 @@ export const commands = {
    * seenIntro). Side-effect settings use their own commands. */
   setSetting(key: string, value: unknown): void {
     if (IN_TAURI) {
-      void invoke("set_setting", { key, value });
+      // set_setting now returns Result — it rejects a non-allow-listed key or an
+      // oversized value (e.g. a >4KB paste into the Last.fm key field). Rust
+      // already log::warn!s the reason; swallow here so a rejected persist never
+      // surfaces as an "Uncaught (in promise)". First-party UI only sends the
+      // four allow-listed keys, so this path is near-unreachable in practice.
+      void invoke("set_setting", { key, value }).catch((e) => {
+        console.warn(`set_setting rejected for ${key}:`, e);
+      });
     } else {
       (mockSettings as Record<string, unknown>)[key] = value;
     }
@@ -1127,6 +1146,16 @@ export const commands = {
       return snap;
     }
     return invoke<HotkeyInfo[]>("rebind_hotkey", { id, chord });
+  },
+  /** Suspend (true) / resume (false) the global shortcuts while the prefs
+   * hotkey capture listens: registered chords are swallowed system-wide by
+   * RegisterHotKey, so an un-suspended capture can never SEE a bound chord —
+   * pressing one fired its action instead (Ctrl+Alt+S summoned Search over
+   * the prefs window). Awaitable so capture starts only after the OS truly
+   * released the chords; idempotent both directions. Mock: no OS registry —
+   * every chord already reaches the page. */
+  async setHotkeysCapture(active: boolean): Promise<void> {
+    if (IN_TAURI) await invoke("set_hotkeys_capture", { active });
   },
   /** Clear all overrides + re-register defaults. Returns the fresh table. */
   async resetHotkeys(): Promise<HotkeyInfo[]> {

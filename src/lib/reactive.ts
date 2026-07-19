@@ -27,8 +27,10 @@ let enabledSetting = true;
 
 /** The separator may bloom only when reduced motion is off AND the user hasn't
  * turned it off in prefs. Drives both the visual subscription and the backend
- * capture gate (no audio work for a suppressed separator). */
-function reactiveOn(): boolean {
+ * capture gate (no audio work for a suppressed separator). Exported for the
+ * Waveform's settle-window choice: the single ZERO_BANDS payload apply() sends
+ * on shutoff must settle on the prompt window, not the in-song-silence grace. */
+export function reactiveOn(): boolean {
   return !mq.matches && enabledSetting;
 }
 

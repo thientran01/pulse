@@ -164,11 +164,33 @@ fn resolve_chord(app: &AppHandle, id: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
+/// Serializes every registration mutation — register_all and the capture
+/// suspend loop. Unserialized, two in-flight register_alls interleave per
+/// main-thread hop (each per-shortcut call is its own hop), and the commit
+/// path provably runs two: commitRebind's rebind_hotkey and the capture
+/// cleanup's resume are separate un-awaited invokes, each a tokio task. The
+/// interleavings are all bad — the loser of a duplicate on_shortcut records
+/// a working row as registered=false, and a resume whose resolve_chord reads
+/// pre-write settings registers the OLD chord as a ghost the winning table
+/// doesn't know, so no future register_all ever unregisters it. Hotkey
+/// DISPATCH never takes this lock, so the unregister_all deadlock documented
+/// below doesn't apply — but a MAIN-THREAD caller must never wait on it
+/// while a worker holds it (the worker's per-shortcut hops need the main
+/// thread free): setup's call is safe (the event loop isn't serving
+/// commands yet, nothing can hold the lock), and the prefs-Destroyed resume
+/// spawns off-main for exactly this reason.
+static REG_LOCK: Mutex<()> = Mutex::new(());
+
 /// Unregister everything and register the resolved chords fresh — the ONE
-/// registration path (setup, a rebind, a reset). Records each shortcut's
-/// OS-registration result into HotkeyState and emits "hotkeys-changed" so an
-/// open prefs window reflects the new table (and any registration failure).
+/// registration path (setup, a rebind, a reset, the capture resume, the
+/// prefs-Destroyed backstop), serialized under REG_LOCK. Records each
+/// shortcut's OS-registration result into HotkeyState and emits
+/// "hotkeys-changed" so an open prefs window reflects the new table (and any
+/// registration failure).
 pub(crate) fn register_all(app: &AppHandle) {
+    let _reg = REG_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let gs = app.global_shortcut();
     // Unregister the PREVIOUS set one-by-one — deliberately NOT
     // gs.unregister_all(). In tauri-plugin-global-shortcut 2.3.2,
@@ -256,39 +278,101 @@ async fn reset_hotkeys(app: AppHandle) -> Vec<HotkeyInfo> {
     hotkey_snapshot(&app)
 }
 
+/// Suspend (true) / resume (false) the global shortcuts around the prefs
+/// hotkey capture. While capture listens, a registered chord never reaches
+/// the prefs webview — RegisterHotKey swallows it system-wide — so pressing
+/// a BOUND Palette chord during capture fired its action instead (Ctrl+Alt+S
+/// summoned Search over the prefs window, whose blur then cancelled the
+/// capture) and the UI's registered-duplicate conflict branch was
+/// unreachable. Suspend uses the same per-shortcut unregister loop
+/// register_all opens with — NEVER unregister_all (the cross-thread deadlock
+/// documented there) — and never holds HotkeyState across a gs call
+/// (hotkey_snapshot clones out of the lock). HotkeyState itself is left
+/// intact so resume's register_all resolves the same table. Idempotent both
+/// ways: a re-suspend unregisters already-gone chords (errors ignored), and
+/// a resume after commit's own register_all just rebuilds the same set —
+/// idempotence that holds CONCURRENTLY too, because both the suspend loop
+/// and register_all serialize under REG_LOCK (an in-flight resume finishing
+/// second would otherwise re-register chords INTO the capture).
+#[tauri::command]
+async fn set_hotkeys_capture(app: AppHandle, active: bool) {
+    if active {
+        let _reg = REG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let gs = app.global_shortcut();
+        for prev in hotkey_snapshot(&app) {
+            let _ = gs.unregister(prev.chord.as_str());
+        }
+    } else {
+        register_all(&app);
+    }
+}
+
 // Every command that touches GSMTC (or the network) is `async` — NOT for
 // concurrency, but to move it OFF the main thread. Tauri runs sync commands
 // on the webview IPC (main/STA) thread, where WinRT's blocking `.get()` can
 // never observe its completion (the STA is parked in the wait) — a cold-cache
 // snapshot there deadlocks the whole app. Async commands run on the async
-// runtime's worker pool, where blocking waits complete normally.
+// runtime's worker pool — but that pool is the tokio CORE workers, which
+// blocking work must ALSO leave; off_core below is the second hop.
+
+/// Run a command body's sync GSMTC/WinRT work on the DEDICATED blocking pool
+/// (the defer_main_action discipline), never on the tokio core worker the
+/// async command body lands on. Core workers are a small fixed pool that does
+/// NOT replenish: one wedged `.get()` eats a worker permanently — invisibly,
+/// because the media-loop stage watchdog's telemetry (media set_stage) is
+/// loop-thread-gated and never sees command-path calls — and a few repeated
+/// presses exhaust the pool, silently killing ALL webview IPC while hotkeys
+/// (already on the blocking pool via defer_main_action) keep working.
+/// spawn_blocking threads replenish, so a wedge costs one thread, not the
+/// runtime. JoinError = the closure panicked; degrade to `default` instead of
+/// a dead IPC call — loudly, or a release build swallows the panic invisibly
+/// (the media_lyrics rule).
+async fn off_core<T: Send + 'static>(default: T, f: impl FnOnce() -> T + Send + 'static) -> T {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .unwrap_or_else(|e| {
+            log::error!("command blocking work panicked: {e}");
+            default
+        })
+}
 
 #[tauri::command]
 async fn media_play_pause(app: AppHandle) -> bool {
-    let ok = media::play_pause();
-    emit_now(&app);
-    ok
+    off_core(false, move || {
+        let ok = media::play_pause();
+        emit_now(&app);
+        ok
+    })
+    .await
 }
 
 #[tauri::command]
 async fn media_next(app: AppHandle) -> bool {
-    // Queue-aware: a next pressed in Pulse lands on the up-next front when
-    // there is one (upnext::try_queue_skip) — the mid-song skip is the one
-    // transition the feed-late model missed. Falls through to the plain
-    // GSMTC skip otherwise.
-    if upnext::try_queue_skip(&app) {
-        return true;
-    }
-    let ok = media::next();
-    emit_now(&app);
-    ok
+    off_core(false, move || {
+        // Queue-aware: a next pressed in Pulse lands on the up-next front when
+        // there is one (upnext::try_queue_skip) — the mid-song skip is the one
+        // transition the feed-late model missed. Falls through to the plain
+        // GSMTC skip otherwise.
+        if upnext::try_queue_skip(&app) {
+            return true;
+        }
+        let ok = media::next();
+        emit_now(&app);
+        ok
+    })
+    .await
 }
 
 #[tauri::command]
 async fn media_prev(app: AppHandle) -> bool {
-    let ok = media::prev();
-    emit_now(&app);
-    ok
+    off_core(false, move || {
+        let ok = media::prev();
+        emit_now(&app);
+        ok
+    })
+    .await
 }
 
 // The seek commands deliberately do NOT snapshot afterwards: the player hasn't
@@ -298,12 +382,12 @@ async fn media_prev(app: AppHandle) -> bool {
 
 #[tauri::command]
 async fn media_seek_rel(delta_ms: i64) -> bool {
-    media::seek_rel_ms(delta_ms)
+    off_core(false, move || media::seek_rel_ms(delta_ms)).await
 }
 
 #[tauri::command]
 async fn media_seek_abs(position_ms: i64) -> bool {
-    media::seek_abs_ms(position_ms)
+    off_core(false, move || media::seek_abs_ms(position_ms)).await
 }
 
 /// Per-window frontend votes on audio reactivity (false under OS
@@ -381,28 +465,44 @@ async fn media_art(app: AppHandle, art_id: String) -> Option<String> {
 /// the next real emit.
 #[tauri::command]
 async fn now_playing(app: AppHandle) -> Stamped {
-    let my_seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let np = media::snapshot(&app.state::<ArtCache>());
-    let last = app.state::<LastEmit>();
-    let mut st = last
-        .0
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if my_seq >= st.published_seq {
-        st.published_seq = my_seq;
-        return Stamped {
-            seq: my_seq,
-            now: np,
-        };
-    }
-    // Outrun: a snapshot that STARTED after ours already published. Hand back
-    // the freshest published payload instead; fall back to our own read when
-    // nothing has ever been emitted (only reachable seed-vs-seed, where the
-    // winner's data went to a different webview's clock).
-    Stamped {
-        seq: st.published_seq,
-        now: st.payload.clone().unwrap_or(np),
-    }
+    // The whole claim→snapshot→publish sequence rides off_core as ONE
+    // closure: seq is still claimed immediately before the snapshot with no
+    // lock held across it (the #103 ordering — seq order == snapshot-START
+    // order), just on a blocking-pool thread instead of a core worker. The
+    // JoinError default (seq 0, empty payload) is below every live seq, so
+    // posClock discards it and the seed degrades to "no data", not bad data.
+    off_core(
+        Stamped {
+            seq: 0,
+            now: media::NowPlaying::default(),
+        },
+        move || {
+            let my_seq = SEQ.fetch_add(1, Ordering::Relaxed);
+            let np = media::snapshot(&app.state::<ArtCache>());
+            let last = app.state::<LastEmit>();
+            let mut st = last
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if my_seq >= st.published_seq {
+                st.published_seq = my_seq;
+                return Stamped {
+                    seq: my_seq,
+                    now: np,
+                };
+            }
+            // Outrun: a snapshot that STARTED after ours already published.
+            // Hand back the freshest published payload instead; fall back to
+            // our own read when nothing has ever been emitted (only reachable
+            // seed-vs-seed, where the winner's data went to a different
+            // webview's clock).
+            Stamped {
+                seq: st.published_seq,
+                now: st.payload.clone().unwrap_or(np),
+            }
+        },
+    )
+    .await
 }
 
 /// Monotonic stamp on every now-playing payload — the frontend position
@@ -468,9 +568,10 @@ pub(crate) fn emit_now(app: &AppHandle) -> media::NowPlaying {
 // on the main/STA thread and freezing the Win32 message pump — GSMTC `.get()`
 // reached from a hotkey/tray action (which dispatch ON the main thread), or a
 // lock / cross-thread window op. Two guards live here:
-//   1. defer_main_action — runs those actions OFF the main thread, the same
-//      off-main discipline the async transport commands and the single-instance
-//      handler already use.
+//   1. defer_main_action — runs those actions OFF the main thread on the
+//      dedicated blocking pool — the discipline the async transport commands
+//      reach via off_core and the single-instance summons routes through
+//      directly.
 //   2. spawn_main_thread_watchdog — logs a UI-pump stall BEFORE Windows
 //      force-closes, so any future regression names itself in pulse.log instead
 //      of vanishing silently (a hang bypasses the panic hook — nothing is
@@ -519,7 +620,9 @@ pub(crate) fn defer_main_action(app: &AppHandle, f: impl FnOnce(&AppHandle) + Se
 /// fresh when idle.
 fn spawn_main_thread_watchdog(app: AppHandle) {
     MAIN_TICK_MS.store(now_ms(), Ordering::Relaxed);
-    std::thread::spawn(move || {
+    std::thread::Builder::new()
+        .name("main-watchdog".into())
+        .spawn(move || {
         let mut warned = false;
         let mut media_stall_peak: i64 = 0;
         loop {
@@ -556,7 +659,8 @@ fn spawn_main_thread_watchdog(app: AppHandle) {
                 media_stall_peak = 0;
             }
         }
-    });
+        })
+        .expect("spawn main-watchdog thread");
 }
 
 /// Visibility INTENT — the single owner of WHY the MAIN window is shown or
@@ -772,10 +876,12 @@ async fn set_start_at_login(app: AppHandle, enabled: bool) -> bool {
     app.autolaunch().is_enabled().unwrap_or(enabled)
 }
 
-/// Prefs "Hide on fullscreen" toggle — mirrors the tray.
+/// Prefs "Hide on fullscreen" toggle — mirrors the tray. Rides off_core:
+/// switching OFF during a live conceal releases it through apply_visibility,
+/// whose show path runs emit_now — a sync GSMTC snapshot.
 #[tauri::command]
 async fn set_hide_on_fullscreen(app: AppHandle, enabled: bool) {
-    set_companion(&app, enabled);
+    off_core((), move || set_companion(&app, enabled)).await
 }
 
 /// Frontend-initiated connect (the queue UI's gate state, PR 4) — same flow
@@ -961,8 +1067,12 @@ pub fn run() {
             // active conceal episode. This callback runs in a WndProc on
             // the main/STA thread (SendMessageW from the second process) —
             // apply_visibility's emit_now touches GSMTC, which must never
-            // block there (see the async-command note above), so the whole
-            // reconcile defers to the async pool.
+            // block there (see the async-command note above). The reconcile
+            // defers via defer_main_action (blocking pool), NOT a plain
+            // async spawn: the sync snapshot on a core worker is the
+            // off_core wedge class, and a summons lands exactly when the
+            // widget looks dead — relaunch-spam during a wedge episode
+            // would eat a non-replenishing core worker per press.
             let vis = app.state::<VisIntent>();
             // During the focus takeover, Pulse IS surfaced — the summons is
             // already satisfied, and the flag-clears below would silently
@@ -974,14 +1084,13 @@ pub fn run() {
             if vis.concealed.load(Ordering::Relaxed) {
                 vis.conceal_snoozed.store(true, Ordering::Relaxed);
             }
-            let app = app.clone();
-            tauri::async_runtime::spawn(async move {
-                apply_visibility(&app);
+            defer_main_action(app, |app| {
+                apply_visibility(app);
                 // Unconditional refresh, preserving the old handler's
                 // behavior for an ALREADY-visible widget (apply_visibility
                 // only emits on an actual show). Diff-suppressed — a
                 // redundant call costs nothing.
-                emit_now(&app);
+                emit_now(app);
                 if let Some(win) = app.get_webview_window("main") {
                     let _ = win.set_focus();
                 }
@@ -994,7 +1103,17 @@ pub fn run() {
         // builds also keep a Stdout target so `tauri dev` still prints inline.
         .plugin(
             tauri_plugin_log::Builder::new()
-                .level(log::LevelFilter::Info)
+                // Level is a hard cap: Info in release keeps identifying
+                // detail (presence's foreground exe) out of pulse.log — the
+                // support bundle — while dev builds lower to Debug so the
+                // crate's log::debug! diagnostics (audio reopen-backoff
+                // cadence, presence detail) actually print; without the dev
+                // branch every debug! line is dead in ALL builds.
+                .level(if cfg!(debug_assertions) {
+                    log::LevelFilter::Debug
+                } else {
+                    log::LevelFilter::Info
+                })
                 // Bound disk use: rotate at 5 MB, keep one old file.
                 .max_file_size(5_000_000)
                 .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
@@ -1073,6 +1192,7 @@ pub fn run() {
             prefs::open_repo,
             rebind_hotkey,
             reset_hotkeys,
+            set_hotkeys_capture,
             set_start_at_login,
             set_hide_on_fullscreen,
             check_for_updates,
@@ -1123,6 +1243,23 @@ pub fn run() {
                     }
                     if window.label() == focus::LABEL {
                         focus::on_destroyed(window.app_handle());
+                    }
+                    // Prefs can die NATIVELY mid-capture — Alt+F4, the
+                    // taskbar Close, a webview crash — teardown paths where
+                    // the capture cleanup's resume invoke never runs (React
+                    // cleanups don't fire on webview destruction), which
+                    // would leave every global shortcut suspended
+                    // system-wide until the next rebind or relaunch. Resume
+                    // unconditionally: register_all is idempotent (a
+                    // no-capture close rebuilds the same table) and
+                    // REG_LOCK-serialized against closePrefs' awaited
+                    // resume. Spawned OFF this main-thread handler —
+                    // register_all blocks on per-shortcut main-thread hops
+                    // and can wait on REG_LOCK, either of which would
+                    // deadlock if run inline here (see REG_LOCK).
+                    if window.label() == prefs::LABEL {
+                        let app = window.app_handle().clone();
+                        tauri::async_runtime::spawn_blocking(move || register_all(&app));
                     }
                 }
                 _ => {}
@@ -1318,13 +1455,16 @@ pub fn run() {
                         let on = !app.state::<VisIntent>().companion.load(Ordering::Relaxed);
                         set_companion(app, on);
                     }),
-                    "spotify" => {
+                    // Off the pump like "toggle"/"companion": disconnect does
+                    // token-file I/O (and connected() takes the state lock), so
+                    // it must not run on the message pump.
+                    "spotify" => defer_main_action(app, |app| {
                         if spotify::connected(app) {
                             spotify::disconnect(app);
                         } else {
                             spotify::start_connect(app);
                         }
-                    }
+                    }),
                     #[cfg(debug_assertions)]
                     "simfs" => {
                         app.state::<presence::Presence>()
@@ -1413,121 +1553,124 @@ pub fn run() {
             // a fully covered widget still captures. Occlusion detection isn't
             // exposed through Tauri; accepted for v1.
             let handle = app.handle().clone();
-            std::thread::spawn(move || {
-                // Explicit MTA: media.rs's wait_op timeouts rely on WinRT
-                // completions arriving on the COM threadpool — make the
-                // implicit-MTA assumption explicit (S_FALSE double-init is
-                // fine; same idiom as audio.rs).
-                let _ = unsafe {
-                    windows::Win32::System::Com::CoInitializeEx(
-                        None,
-                        windows::Win32::System::Com::COINIT_MULTITHREADED,
-                    )
-                };
-                // Stage telemetry + dev sim-wedge key off this mark; the
-                // watchdog reads media::beat_age_ms (stage transitions +
-                // the per-iteration beat below).
-                media::mark_media_loop_thread();
-                let (wake_tx, wake_rx) = std::sync::mpsc::channel::<media::Wake>();
-                // None → GSMTC unavailable; the loop degrades to pure polling.
-                let mut watch = media::SessionWatch::new(wake_tx);
-                let mut resubscribe = true;
-                // Event wakes force a full snapshot; heartbeat ticks first
-                // probe tick_key and skip the snapshot (metadata marshal, art
-                // work, emit) when nothing moved — except while the art probe
-                // window is open, which needs every tick.
-                let mut force_snapshot = true;
-                let mut last_tick: Option<media::TickKey> = None;
-                // Hidden-window history cadence: probe every Nth heartbeat
-                // (~5s) so listens keep logging under P1 conceal — the ONE
-                // narrow exception to "no work while hidden" (no art
-                // marshal, no emit; media::history_probe).
-                const HISTORY_PROBE_BEATS: u32 = 10;
-                let mut hidden_beats = 0u32;
-                loop {
-                    media::beat();
-                    if let Some(w) = watch.as_mut() {
-                        w.resubscribe(std::mem::take(&mut resubscribe));
-                    }
-                    // Widened for focus mode: main hides behind the takeover
-                    // (VisIntent.focus_open), and a loop gated on main alone
-                    // would stop emitting — a frozen player in the focus
-                    // window (verified in planning). The audio capture
-                    // switch below inherits this for free.
-                    let visible = handle
-                        .get_webview_window("main")
-                        .and_then(|w| w.is_visible().ok())
-                        .unwrap_or(true)
-                        || handle
-                            .get_webview_window(focus::LABEL)
-                            .and_then(|w| w.is_visible().ok())
-                            .unwrap_or(false);
-                    let playing = if visible {
-                        hidden_beats = 0;
-                        let tick = media::tick_key();
-                        let probing = media::art_probing(&handle.state::<ArtCache>());
-                        let p = if std::mem::take(&mut force_snapshot)
-                            || probing
-                            || tick != last_tick
-                        {
-                            let np = emit_now(&handle);
-                            // A play_now jump flickers intermediate tracks as
-                            // "playing" (and a slow skip can hold one past the
-                            // 1s history floor) — those are navigation, not
-                            // listening. upnext::tick still runs: it owns the
-                            // jump-aware bookkeeping.
-                            if !spotify::jump_active(&handle) {
-                                history::ingest(&handle, &np);
-                            }
-                            upnext::tick(&handle, &np);
-                            np.status == "playing"
-                        } else {
-                            tick.as_ref().is_some_and(|k| k.3 == "playing")
-                        };
-                        last_tick = tick;
-                        p
-                    } else {
-                        hidden_beats += 1;
-                        if hidden_beats >= HISTORY_PROBE_BEATS {
-                            hidden_beats = 0;
-                            let np = media::history_probe();
-                            if !spotify::jump_active(&handle) {
-                                history::ingest(&handle, &np);
-                            }
-                            upnext::tick(&handle, &np);
-                        }
-                        false
+            std::thread::Builder::new()
+                .name("media-loop".into())
+                .spawn(move || {
+                    // Explicit MTA: media.rs's wait_op timeouts rely on WinRT
+                    // completions arriving on the COM threadpool — make the
+                    // implicit-MTA assumption explicit (S_FALSE double-init is
+                    // fine; same idiom as audio.rs).
+                    let _ = unsafe {
+                        windows::Win32::System::Com::CoInitializeEx(
+                            None,
+                            windows::Win32::System::Com::COINIT_MULTITHREADED,
+                        )
                     };
-                    // Grace-expiry sweep for a vanish-pending entry (a gone
-                    // session produces no ticks to ride).
-                    history::tick(&handle);
-                    let reactive = reactive_effective(&ui_reactive);
-                    // The capture's process-scoping target rides the same
-                    // beat as the switch: whichever app GSMTC says is
-                    // playing is the app whose audio the waveform should
-                    // hear (loopback.rs — never the whole device mix).
-                    audio::set_target(last_tick.as_ref().map(|k| k.0.as_str()).unwrap_or(""));
-                    audio_switch.store(visible && playing && reactive, Ordering::Relaxed);
-                    use std::sync::mpsc::RecvTimeoutError;
-                    match wake_rx.recv_timeout(Duration::from_millis(POLL_INTERVAL_MS)) {
-                        Ok(first) => {
-                            let mut changed = matches!(first, media::Wake::SessionChanged);
-                            std::thread::sleep(Duration::from_millis(EVENT_SETTLE_MS));
-                            while let Ok(w) = wake_rx.try_recv() {
-                                changed |= matches!(w, media::Wake::SessionChanged);
-                            }
-                            resubscribe = changed;
-                            force_snapshot = true;
+                    // Stage telemetry + dev sim-wedge key off this mark; the
+                    // watchdog reads media::beat_age_ms (stage transitions +
+                    // the per-iteration beat below).
+                    media::mark_media_loop_thread();
+                    let (wake_tx, wake_rx) = std::sync::mpsc::channel::<media::Wake>();
+                    // None → GSMTC unavailable; the loop degrades to pure polling.
+                    let mut watch = media::SessionWatch::new(wake_tx);
+                    let mut resubscribe = true;
+                    // Event wakes force a full snapshot; heartbeat ticks first
+                    // probe tick_key and skip the snapshot (metadata marshal, art
+                    // work, emit) when nothing moved — except while the art probe
+                    // window is open, which needs every tick.
+                    let mut force_snapshot = true;
+                    let mut last_tick: Option<media::TickKey> = None;
+                    // Hidden-window history cadence: probe every Nth heartbeat
+                    // (~5s) so listens keep logging under P1 conceal — the ONE
+                    // narrow exception to "no work while hidden" (no art
+                    // marshal, no emit; media::history_probe).
+                    const HISTORY_PROBE_BEATS: u32 = 10;
+                    let mut hidden_beats = 0u32;
+                    loop {
+                        media::beat();
+                        if let Some(w) = watch.as_mut() {
+                            w.resubscribe(std::mem::take(&mut resubscribe));
                         }
-                        Err(RecvTimeoutError::Timeout) => {}
-                        // Only reachable when SessionWatch never constructed
-                        // (it owns the last sender) — plain sleep poll.
-                        Err(RecvTimeoutError::Disconnected) => {
-                            std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
+                        // Widened for focus mode: main hides behind the takeover
+                        // (VisIntent.focus_open), and a loop gated on main alone
+                        // would stop emitting — a frozen player in the focus
+                        // window (verified in planning). The audio capture
+                        // switch below inherits this for free.
+                        let visible = handle
+                            .get_webview_window("main")
+                            .and_then(|w| w.is_visible().ok())
+                            .unwrap_or(true)
+                            || handle
+                                .get_webview_window(focus::LABEL)
+                                .and_then(|w| w.is_visible().ok())
+                                .unwrap_or(false);
+                        let playing = if visible {
+                            hidden_beats = 0;
+                            let tick = media::tick_key();
+                            let probing = media::art_probing(&handle.state::<ArtCache>());
+                            let p = if std::mem::take(&mut force_snapshot)
+                                || probing
+                                || tick != last_tick
+                            {
+                                let np = emit_now(&handle);
+                                // A play_now jump flickers intermediate tracks as
+                                // "playing" (and a slow skip can hold one past the
+                                // 1s history floor) — those are navigation, not
+                                // listening. upnext::tick still runs: it owns the
+                                // jump-aware bookkeeping.
+                                if !spotify::jump_active(&handle) {
+                                    history::ingest(&handle, &np);
+                                }
+                                upnext::tick(&handle, &np);
+                                np.status == "playing"
+                            } else {
+                                tick.as_ref().is_some_and(|k| k.3 == "playing")
+                            };
+                            last_tick = tick;
+                            p
+                        } else {
+                            hidden_beats += 1;
+                            if hidden_beats >= HISTORY_PROBE_BEATS {
+                                hidden_beats = 0;
+                                let np = media::history_probe();
+                                if !spotify::jump_active(&handle) {
+                                    history::ingest(&handle, &np);
+                                }
+                                upnext::tick(&handle, &np);
+                            }
+                            false
+                        };
+                        // Grace-expiry sweep for a vanish-pending entry (a gone
+                        // session produces no ticks to ride).
+                        history::tick(&handle);
+                        let reactive = reactive_effective(&ui_reactive);
+                        // The capture's process-scoping target rides the same
+                        // beat as the switch: whichever app GSMTC says is
+                        // playing is the app whose audio the waveform should
+                        // hear (loopback.rs — never the whole device mix).
+                        audio::set_target(last_tick.as_ref().map(|k| k.0.as_str()).unwrap_or(""));
+                        audio_switch.store(visible && playing && reactive, Ordering::Relaxed);
+                        use std::sync::mpsc::RecvTimeoutError;
+                        match wake_rx.recv_timeout(Duration::from_millis(POLL_INTERVAL_MS)) {
+                            Ok(first) => {
+                                let mut changed = matches!(first, media::Wake::SessionChanged);
+                                std::thread::sleep(Duration::from_millis(EVENT_SETTLE_MS));
+                                while let Ok(w) = wake_rx.try_recv() {
+                                    changed |= matches!(w, media::Wake::SessionChanged);
+                                }
+                                resubscribe = changed;
+                                force_snapshot = true;
+                            }
+                            Err(RecvTimeoutError::Timeout) => {}
+                            // Only reachable when SessionWatch never constructed
+                            // (it owns the last sender) — plain sleep poll.
+                            Err(RecvTimeoutError::Disconnected) => {
+                                std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
+                            }
                         }
                     }
-                }
-            });
+                })
+                .expect("spawn media-loop thread");
             Ok(())
         })
         .build(tauri::generate_context!())

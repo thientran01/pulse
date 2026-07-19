@@ -315,15 +315,36 @@ pub fn simulate_wedge(ms: i64) {
 static MANAGER: Mutex<Option<Manager>> = Mutex::new(None);
 
 fn manager() -> Option<Manager> {
+    // Fast path: hand back the cached singleton without touching RequestAsync.
+    {
+        let cached = MANAGER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(m) = cached.as_ref() {
+            return Some(m.clone());
+        }
+    }
+    // Cold/failed: RequestAsync UNLOCKED. Holding MANAGER across RequestAsync +
+    // wait_op (up to OP_TIMEOUT_MS) serialized EVERY GSMTC caller — transport
+    // commands and hotkeys included — behind a ~2s re-request during a GSMTC
+    // restart. The manager is a singleton (sessions come and go underneath it),
+    // so a racing second requester is harmless: fill-if-still-empty on re-lock,
+    // last-writer-wins either way. A failed request stays uncached and retries
+    // on the next call (unchanged).
+    let requested = Manager::RequestAsync()
+        .ok()
+        .and_then(|op| wait_op(op, OP_TIMEOUT_MS, Stage::ManagerRequest))?;
     let mut cached = MANAGER
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if cached.is_none() {
-        *cached = Manager::RequestAsync()
-            .ok()
-            .and_then(|op| wait_op(op, OP_TIMEOUT_MS, Stage::ManagerRequest));
+        *cached = Some(requested.clone());
+        Some(requested)
+    } else {
+        // Another caller filled it while we requested — prefer the winner (both
+        // are valid singletons); our just-made one drops.
+        cached.clone()
     }
-    cached.clone()
 }
 
 pub fn current_session() -> Option<Session> {

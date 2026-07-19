@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+use crate::settings::{json_capped, JSON_CAP};
+
 const UA: &str = "Palette/0.1.0 (https://github.com/thientran01/palette)";
 // LRCLIB normally answers in <1s but degrades to 7-9s first-byte under load
 // (measured 2026-07-07) — a 5s timeout lost every race on a cold cache. The
@@ -189,7 +191,7 @@ fn get_exact(
     if !album.is_empty() {
         req = req.query("album_name", album);
     }
-    Ok(classify(req.call())?.and_then(|r| r.into_json().ok()))
+    Ok(classify(req.call())?.and_then(|r| json_capped::<LrclibRecord>(r, JSON_CAP).ok()))
 }
 
 fn search(artist: &str, title: &str, duration_s: i64) -> Result<Option<LrclibRecord>, Offline> {
@@ -204,7 +206,7 @@ fn search(artist: &str, title: &str, duration_s: i64) -> Result<Option<LrclibRec
         Some(r) => r,
         None => return Ok(None),
     };
-    let Ok(records) = resp.into_json::<Vec<LrclibRecord>>() else {
+    let Ok(records) = json_capped::<Vec<LrclibRecord>>(resp, JSON_CAP) else {
         return Ok(None);
     };
     Ok(pick(records, duration_s))

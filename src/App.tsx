@@ -24,9 +24,10 @@ import { WidgetMenu, WIDGET_MENU_W, WIDGET_MENU_H } from "./WidgetMenu";
 import { VOCAL_LEAD_MS } from "./lib/lrc";
 import { PlayPauseButton, ProgressBar, Transport, useProgressDom } from "./Transport";
 import { LyricsPanel, lyricsKeyOf, useLyrics, type LyricsState } from "./LyricsPanel";
-import { extractAccent } from "./lib/palette";
+import { useArt, useArtAccent } from "./lib/artAccent";
 import * as posClock from "./lib/posClock";
 import { initReactive, setReactiveEnabledSetting } from "./lib/reactive";
+import { MODE_SIZES, WINDOW_MAX, type Mode } from "./lib/sizes";
 import { DUR, EASE } from "./lib/tokens";
 import {
   armSuppression,
@@ -49,32 +50,9 @@ import {
 } from "./types";
 
 
-type Mode = "pill" | "card" | "expanded";
-
-/** Each mode's FOOTPRINT (shell + gutter), in logical px. The native window
- * itself never resizes: it lives at WINDOW_MAX from birth (tauri.conf.json)
- * and every mode change is the shell's 200ms EASE.inOut CSS glide inside it,
- * clip-revealing the incoming mode's already-final ModeContent plane while
- * the content layers crossfade. (Resizing a WebView2 window at all costs one
- * wrong frame: per-frame animation shakes, a snap blinks — measured live
- * 2026-07-09/10.) These sizes still drive the shell/plane boxes and the
- * click-through hit rect (dock.rs). */
-const MODE_SIZES: Record<Mode, [number, number]> = {
-  pill: [300, 48],
-  // anchored-cluster handoff: 52px art row, full-width progress, bottom
-  // transport. 138 = SHELL_CHROME 14 + the card column's sum: pt-3 12 +
-  // art 52 + gap 6 + progress 16 + gap 6 + h-7 transport 28 + pb-1 4 = 124.
-  // Re-derive when the column changes — 132 drifted 6px short after #46's
-  // pb-1 and #51's shell chrome, and the art overflowed its row for a week.
-  card: [380, 138],
-  expanded: [380, 440], // lyrics home; big-art fallback gets breathing room
-};
-
-/** The window's permanent size = the largest mode. Keep in sync with
- * tauri.conf.json width/height (the window must be BORN at this size —
- * matching them means the launch dock is pure positioning, no resize, no
- * first-frame artifact). */
-const WINDOW_MAX: [number, number] = MODE_SIZES.expanded;
+// Mode/MODE_SIZES/WINDOW_MAX live in lib/sizes.ts (2026-07-18) — main.tsx's
+// crash-fallback import needed WINDOW_MAX, and a non-component export here
+// would break Fast Refresh for this whole module.
 
 
 /** Fields that change what the React tree shows — position fields excluded,
@@ -95,30 +73,9 @@ function sameIdentity(a: NowPlaying | null, b: NowPlaying): boolean {
   return a !== null && IDENTITY_FIELDS.every((k) => a[k] === b[k]);
 }
 
-function useArt(artId: string | null): string | null {
-  const [url, setUrl] = useState<string | null>(null);
-  const lastId = useRef<string | null>(null);
-  useEffect(() => {
-    if (artId === lastId.current) return;
-    if (!artId) {
-      lastId.current = null;
-      setUrl(null);
-      return;
-    }
-    let alive = true;
-    void commands.art(artId).then((u) => {
-      if (!alive) return;
-      setUrl(u);
-      // Only latch on success — a null (cache already advanced past this id)
-      // retries on the next payload instead of leaving the cover blank.
-      if (u) lastId.current = artId;
-    });
-    return () => {
-      alive = false;
-    };
-  }, [artId]);
-  return artId ? url : null;
-}
+// useArt / useArtAccent moved to src/lib/artAccent.ts (2026-07-17) when
+// Search became the third realm needing them — one copy, every window
+// follows the song's color.
 
 /** Feed the history thumb cache (history.rs): downscale the current cover to
  * a 96px JPEG once per ART REVISION — a rev bump means the first capture had
@@ -166,26 +123,6 @@ function useHistoryThumb(artId: string | null): void {
 // LyricsState / lyricsKeyOf / useLyrics / useLyricIndex / LyricsPanel moved
 // to src/LyricsPanel.tsx (2026-07-11) so the focus window's realm imports
 // the lyric surface without importing the whole widget.
-
-/** Retint the accent layer from the current cover; house accent when absent. */
-function useArtAccent(artUrl: string | null): void {
-  useEffect(() => {
-    const root = document.documentElement;
-    if (!artUrl) {
-      root.style.removeProperty("--accent");
-      return;
-    }
-    let alive = true;
-    void extractAccent(artUrl).then((rgb) => {
-      if (!alive) return;
-      if (rgb) root.style.setProperty("--accent", rgb);
-      else root.style.removeProperty("--accent");
-    });
-    return () => {
-      alive = false;
-    };
-  }, [artUrl]);
-}
 
 /** Hover hold before the full-text tooltip shows — reading intent, not a
  * flyby. Native `title` waits about this long; this is the styled stand-in. */
@@ -250,8 +187,11 @@ function TruncateTip({ text, className }: { text: string; className: string }) {
             }}
             // w-max up to the window's width minus the header's left gutter
             // (44px art + gaps) — long strings wrap instead of truncating
-            // again inside their own tooltip.
-            className="absolute left-0 top-full z-20 mt-1.5 w-max max-w-[250px] whitespace-normal break-words rounded-md border border-border/10 bg-surface-2 px-2 py-1 text-xs leading-4 text-fg shadow-lg shadow-black/40"
+            // again inside their own tooltip. pointer-events-none: aria-hidden
+            // decoration must never hit-test — open (and through its exit) it
+            // sat over the artist line, eating that line's hover-hold and
+            // feeding mousedown to the window drag (motion pass, 2026-07-16).
+            className="pointer-events-none absolute left-0 top-full z-20 mt-1.5 w-max max-w-[250px] whitespace-normal break-words rounded-md border border-border/10 bg-surface-2 px-2 py-1 text-xs leading-4 text-fg shadow-lg shadow-black/40"
           >
             {text}
           </motion.span>
@@ -427,7 +367,7 @@ function EmptyState({ mode, searchChord }: { mode: Mode; searchChord: string }) 
   return (
     <div className="flex h-full w-full flex-col items-center justify-center gap-2">
       {restingRow}
-      <p className="flex items-center gap-1.5 text-[12px] text-muted/80">
+      <p className="flex items-center gap-1.5 text-[12px] text-muted/85">
         Press <Keycaps chord={searchChord} size="sm" /> to play something
       </p>
     </div>
@@ -650,8 +590,11 @@ function ViewToggle({
   onToggle: () => void;
 }) {
   return (
+    // right-[7px] = the corner chrome's right rail (ModeCluster/QueueSeat's
+    // documented seat math): this 28px button and the bracket cluster below
+    // it share one vertical line on the right edge — right-2 sat it 1px off.
     <div
-      className="pointer-events-none absolute right-2 top-2 z-10 opacity-0 transition-opacity duration-2 ease-out-tk group-data-[hot]/widget:pointer-events-auto group-data-[hot]/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100"
+      className="pointer-events-none absolute right-[7px] top-2 z-10 opacity-0 transition-opacity duration-2 ease-out-tk group-data-[hot]/widget:pointer-events-auto group-data-[hot]/widget:opacity-100 group-has-[:focus-visible]/widget:pointer-events-auto group-has-[:focus-visible]/widget:opacity-100"
       onMouseDown={(e) => e.stopPropagation()}
     >
       <button
@@ -912,11 +855,14 @@ function ExpandedView({
                   re-bloom the capsules from the dot. */}
               {headerShown && (
                 <span className="ml-1 flex shrink-0 items-center">
-                  <Waveform size="md" trailing />
+                  <Waveform size="md" trailing playing={np.status === "playing"} />
                 </span>
               )}
             </div>
-            <TruncateTip text={np.artist} className="text-[13px] text-muted" />
+            {/* text-xs leading-4 = the card's metadata rung exactly, so the
+                artist line holds size through the card⇄expanded morph (the
+                15px title above already does; 13px here visibly stepped). */}
+            <TruncateTip text={np.artist} className="text-xs leading-4 text-muted" />
           </div>
         </div>
 
@@ -937,68 +883,91 @@ function ExpandedView({
           )}
         </div>
 
-        {/* Album view — big cover centered in the full box (headerless, no pt);
-            the identity when lyrics are off or missing. Absolute inset-0, so it
-            never reflows regardless of the header's presence. */}
+        {/* Album view — the identity when lyrics are off or missing.
+            Absolute inset-0, so it never reflows regardless of the header's
+            presence. NOT justify-center (2026-07-17, Thien's live catch):
+            centering [art·meta·wave] as one column split the slack at the
+            column ends — the cluster floated high and the hero dot hugged
+            the console, orphaned ~40px from the caption it belongs to. Now
+            the cluster seats on a fixed pt-8 (the "cluster down" knob) and
+            the hero takes the flex REMAINDER with the dot centered in it —
+            equidistant between the caption and the progress bar (the focus
+            horizon's equidistant rule at widget scale). */}
         <div
           inert={active !== "album"}
-          className={`absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface ${layer(active === "album")}`}
+          className={`absolute inset-0 flex flex-col items-center bg-surface pt-8 ${layer(active === "album")}`}
         >
           <Art url={artUrl} size={190} radiusPx={12} />
-          <div className="min-w-0 self-stretch text-center">
+          {/* Metadata: title + artist, then a HEIGHT-RESERVED device-tag slot.
+              The tag mounts only when a non-PC device is playing, but the slot
+              holds its row height whether or not it's present: the tag
+              refreshes on track change and a LATE "spotify-device" event lands
+              after the view settled — an un-reserved conditional row nudged the
+              centered hero wave ~8px on that flip (98337fd dropped the reserve
+              reasoning only about the top-pinned art). Reserved, nothing below
+              shifts on device flips (the art is TOP-PINNED at pt-8, so it never
+              moved — this restores the same guarantee for the wave). */}
+          <div className="mt-3 min-w-0 self-stretch text-center">
             <p className="truncate text-sm font-medium text-fg">{np.title}</p>
             <p className="truncate text-xs text-muted">
               {np.artist}
               {np.album && <SeparatorDot />}
               {np.album}
             </p>
-            {/* The device tag, with its name (the album view has room) — the
-                audio is on a non-PC device, which is why the hero waveform
-                below sits at rest. */}
-            {remoteDevice && (
-              <div className="mt-1 flex justify-center">
-                <DeviceTag device={remoteDevice} playing={playing} showName />
-              </div>
-            )}
-            {/* Height-reserved caption slot: the caption fading in must not
-                re-center the column and shift the art (it did — every lyrics
-                miss nudged the 190px cover ~7px). "Finding lyrics…" waits
-                400ms so fast fetches never flash it; the miss caption fades
-                back out once read (captionExpired), aria-hidden going with it
-                so AT doesn't announce a caption sighted users can't see. */}
-            <p className="mt-0.5 h-[15px] text-[10px] text-muted">
-              {lyrics.status !== "synced" && (
-                <span
-                  key={lyrics.status}
-                  aria-hidden={captionExpired || undefined}
-                  className={`inline-block ${
-                    captionExpired
-                      ? "animate-[caption-out_260ms_var(--ease-out-tk)_both]"
-                      : `animate-[caption-in_200ms_var(--ease-out-tk)_both] ${
-                          lyrics.status === "loading" ? "[animation-delay:400ms]" : ""
-                        }`
-                  }`}
-                >
-                  {lyrics.status === "loading"
-                    ? "Finding lyrics…"
-                    : lyrics.status === "offline"
-                      ? "Lyrics unavailable — offline"
-                      : "No synced lyrics"}
-                </span>
-              )}
-            </p>
-          </div>
-          {/* The living separator at hero size, filling the dead zone between
-              the metadata and the transport. The metadata line keeps a static
-              middot so the reactive surface isn't on screen twice. Mounted
-              only while the album view is active — one living Waveform per
-              state (the header's md carries lyrics + queue); lastAlive bridges
-              the mount so the toggle doesn't re-bloom it from the dot. */}
-          {active === "album" && (
-            <div className="mt-3">
-              <Waveform size="lg" />
+            <div className="mt-1 flex h-4 justify-center">
+              {remoteDevice && <DeviceTag device={remoteDevice} playing={playing} showName />}
             </div>
-          )}
+          </div>
+          {/* Caption + hero fill the flex remainder as THREE zones: an
+              upper flex-1 that CENTERS the caption, the wave at its natural
+              size, and a matching lower flex-1 spacer. The two equal
+              spacers center the WAVE between the metadata and the console
+              (its approved seat), while the caption floats centered in the
+              gap ABOVE it — so "No synced lyrics" sits ~equidistant between
+              the artist line and the wave instead of glued to the bars
+              (it crowded them before — Thien, 2026-07-17: "too close to the
+              waveform, looks like it's directly on top"; a single centered
+              caption+wave group left the caption pinned to the wave). The
+              caption keeps its height-reserved h-4 slot so its fade never
+              nudges anything; the metadata line keeps a static middot so the
+              reactive surface isn't on screen twice.
+              This container is ALWAYS mounted — only the hero Waveform below
+              is gated to the active view. Gating the whole block (98337fd
+              swept the caption inside the Waveform's gate) re-mounted an
+              already-EXPIRED caption on every album re-entry (e.g. a queue
+              close) and replayed its 260ms caption-out ghost; a persistently
+              mounted span lets aria-hidden/opacity settle it once and hold. */}
+          <div className="flex min-h-0 flex-1 flex-col items-center">
+            <div className="flex flex-1 items-center">
+              <p className="h-4 text-[11px] leading-4 text-muted">
+                {lyrics.status !== "synced" && (
+                  <span
+                    key={lyrics.status}
+                    aria-hidden={captionExpired || undefined}
+                    className={`inline-block ${
+                      captionExpired
+                        ? "animate-[caption-out_260ms_var(--ease-out-tk)_both]"
+                        : `animate-[caption-in_200ms_var(--ease-out-tk)_both] ${
+                            lyrics.status === "loading" ? "[animation-delay:400ms]" : ""
+                          }`
+                    }`}
+                  >
+                    {lyrics.status === "loading"
+                      ? "Finding lyrics…"
+                      : lyrics.status === "offline"
+                        ? "Lyrics unavailable — offline"
+                        : "No synced lyrics"}
+                  </span>
+                )}
+              </p>
+            </div>
+            {/* Gated to the active view — one living Waveform per state (the
+                header's md carries lyrics + queue; two mounted ran two
+                rAF/bands loops). lastAlive bridges the mount/unmount so the
+                album toggle doesn't re-bloom the capsules from the dot. */}
+            {active === "album" && <Waveform size="lg" playing={np.status === "playing"} />}
+            <div className="flex-1" />
+          </div>
         </div>
 
         {/* Queue view — the same fixed header sits above it; the list is the
@@ -1011,7 +980,19 @@ function ExpandedView({
           onMouseDown={(e) => e.stopPropagation()}
           className={`absolute inset-0 flex flex-col bg-surface pt-[52px] ${layer(active === "queue")}`}
         >
-          <QueuePanel np={np} connected={spotifyConnected} open={queueOpen} />
+          {/* -mx-2 cancels the rows'/labels' px-2, seating the row thumbs and
+              section labels on the header art's left line — one vertical
+              line, cover over cover (Thien, 2026-07-16). Hover washes keep
+              their 8px overhang, now bleeding into the px-3 gutter (all
+              bg-surface, no seam). Popover/room garments keep the inset —
+              they have no header art to answer to. The sparkle nudge
+              (-mr-1 via data-sparkle) puts the persistent more-like-this
+              button's center on the 21px corner-chrome rail (ViewToggle
+              above, expand bracket below — Thien, 2026-07-16); row actions
+              stay on the content column, they're transient hover reveals. */}
+          <div className="-mx-2 flex min-h-0 flex-1 flex-col [&_[data-sparkle]]:-mr-1">
+            <QueuePanel np={np} connected={spotifyConnected} open={queueOpen} />
+          </div>
         </div>
       </div>
       {/* Hoisted chrome, like progress/transport below: the toggle keeps its
@@ -1267,6 +1248,24 @@ function App() {
   // change must announce).
   useEffect(() => onSpotifyJump(armSuppression), []);
   useEffect(() => onSpotifyJumpCancel(clearSuppression), []);
+  // The track-change announcement's AT twin: the visual choreography is all
+  // aria-hidden (the Waveform ladder, the pill title fade), so identity
+  // changes reach a screen reader only through this text. Ref-gated — the
+  // first identity after mount seeds silently (launch is not a change) — and
+  // held by the SAME suppression the visual ladder rides (a play_now jump's
+  // intermediates stay silent; the landing's unsuppressed render announces
+  // once). No parallel suppression machinery: announceSuppressed above IS
+  // the gate.
+  const [announceText, setAnnounceText] = useState("");
+  const announcedKey = useRef<string | null>(null);
+  useEffect(() => {
+    const key = lyricsKeyOf(np);
+    if (!np || !key || key === announcedKey.current || announceSuppressed) return;
+    const first = announcedKey.current === null;
+    announcedKey.current = key;
+    if (first) return;
+    setAnnounceText(np.artist ? `${np.title} — ${np.artist}` : np.title);
+  }, [np, announceSuppressed]);
 
   // Which work-area corner the window docks to (dock.rs owns the derivation;
   // bottom-right until it reports). ModeContent pins the content plane there.
@@ -1420,12 +1419,51 @@ function App() {
   const hitCommanded = useRef<[number, number] | null>(null);
   // The popover extends the interactive footprint past the mode box — the
   // hit rect must union it while open or its clicks fall through to the
-  // desktop (the worst failure class in this app). Height derived from the
-  // real 440px window: shell inset (6) + gap (12) + popover + inset (6).
+  // desktop (the worst failure class in this app).
   const popoverVisible = queueOpen && mode !== "expanded" && !nothing;
+  // The popover CONTENT-sizes under its max-height cap (a 2-row list ends
+  // far short of the pill's 330 cap), so the union must use its REAL box:
+  // a full-cap union put the dead band above a short popover inside the hit
+  // rect, and the root mousedown there (which excludes only
+  // button/[role=slider]) started a native window drag from what looked
+  // like bare desktop. Measured off the wrapper via ResizeObserver — live as
+  // rows load/collapse, and through the mode glide's max-height ride. null
+  // until the first measurement lands: the union falls back to the full-cap
+  // formula then, because the hit rect must NEVER be narrower than anything
+  // visible (one over-tall frame is invisible; a hole over a visible surface
+  // is the failure class above). Cleared on close so a stale height can't
+  // seed the next open.
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const [popMeasuredH, setPopMeasuredH] = useState<number | null>(null);
+  // The open's FIRST footprint command rides the full-cap fallback; the
+  // measured command one commit later shrinks past nothing visible (the band
+  // above a content-sized popover never painted), so that ONE shrink skips
+  // the glide defer below — deferred, the dead band the measurement exists
+  // to remove stayed drag-interactive for DUR[3]+80 after every open. Holds
+  // the mode|overlay context of a just-commanded fallback rect: if either
+  // moved by the time the measurement lands, the shrink is no longer purely
+  // the measurement and takes the normal defer.
+  const popFallbackKey = useRef<string | null>(null);
+  useEffect(() => {
+    const el = popoverRef.current;
+    if (!popoverVisible || !el) {
+      setPopMeasuredH(null);
+      return;
+    }
+    // offsetHeight: border-box, integral CSS px — the same logical-px space
+    // set_hit_size speaks.
+    const measure = () => setPopMeasuredH(el.offsetHeight);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [popoverVisible]);
   useEffect(() => {
     const [mw, mh] = MODE_SIZES[mode];
-    const popH = Math.min(330, WINDOW_MAX[1] - mh - POPOVER_GAP);
+    // Measured real height once known, else the max-height cap it renders
+    // under (a FULL popover measures exactly that cap, so the full-list
+    // numbers are unchanged: pill 318×384, card's 296 band).
+    const popH = popMeasuredH ?? Math.min(330, WINDOW_MAX[1] - mh - POPOVER_GAP);
     // Popover extent from the docked corner: the 6px near-side inset + its
     // box (NOT the full 12px both-sides gutter — a fatter rect would let the
     // widget capture a 6px band of desktop past the popover's far edge).
@@ -1437,6 +1475,9 @@ function App() {
     // to the desktop. Max'd with the popover extent so it never shrinks below it.
     const w1 = overlayOpen ? Math.max(pw, WINDOW_MAX[0]) : pw;
     const h1 = overlayOpen ? Math.max(ph, WINDOW_MAX[1]) : ph;
+    const ctxKey = `${mode}|${overlayOpen}`;
+    const firstMeasure = popMeasuredH !== null && popFallbackKey.current === ctxKey;
+    popFallbackKey.current = popoverVisible && popMeasuredH === null ? ctxKey : null;
     const [cw, ch] = hitCommanded.current ?? [w1, h1];
     const uw = Math.max(w1, cw);
     const uh = Math.max(h1, ch);
@@ -1449,11 +1490,11 @@ function App() {
           hitCommanded.current = [w1, h1];
           commands.setHitSize(w1, h1);
         },
-        reducedMotion ? 0 : DUR[3] + 80,
+        reducedMotion || firstMeasure ? 0 : DUR[3] + 80,
       );
     }
     return () => window.clearTimeout(timer);
-  }, [mode, reducedMotion, popoverVisible, overlayOpen]);
+  }, [mode, reducedMotion, popoverVisible, popMeasuredH, overlayOpen]);
 
   const morph = {
     // Opacity ONLY — no scale. The shell's size glide is the mode swap's
@@ -1599,6 +1640,7 @@ function App() {
                 <Waveform
                   trailing={!np.artist}
                   announceKey={announceSuppressed ? undefined : (lyricsKeyOf(np) ?? undefined)}
+                  playing={np.status === "playing"}
                 />
                 <TrackFadeSpan
                   key={`a:${lyricsKeyOf(np)}`}
@@ -1682,7 +1724,7 @@ function App() {
                 <div className="flex min-w-0 items-center">
                   <p className="min-w-0 truncate text-[15px] font-medium text-fg">{np.title}</p>
                   <span className="ml-1 flex shrink-0 items-center">
-                    <Waveform size="md" trailing />
+                    <Waveform size="md" trailing playing={np.status === "playing"} />
                   </span>
                 </div>
                 {/* The device tag rides the metadata line, icon-only (name in
@@ -1739,23 +1781,28 @@ function App() {
           shell inside the never-resizing window (never inside it: the shell
           clips). Right-aligned to the docked corner's side; opens away from
           the shell (above when docked bottom, below when docked top — the
-          prototype only modeled bottom-right). Its `bottom`/`top` ride the
-          mode resize on the shell's own 200ms EASE.inOut so it glides with
-          the garment change; reveal is 140ms opacity with visibility
+          prototype only modeled bottom-right). Its `bottom`/`top` AND
+          `max-height` ride the mode resize on the shell's own 200ms
+          EASE.inOut so it glides with the garment change (max-height was
+          missing from the list — with a content-full list, stepping the
+          ladder glided the near edge while the far edge snapped 34px,
+          motion pass 2026-07-16); reveal is 140ms opacity with visibility
           deferred (always mounted — the scroll position and history feed
           survive closing). Max height re-derived from the REAL 440px window
           (prototype frame was 520): pill 330, card 290. While open, the hit
-          rect unions this box (see the footprint effect above). */}
+          rect unions this box's MEASURED height (the footprint effect above
+          holds the ref — content-sized, not the cap). */}
       {!nothing && (
         <div
+          ref={popoverRef}
           inert={!popoverVisible}
           onMouseDown={(e) => e.stopPropagation()}
           className={`absolute z-30 flex flex-col rounded-xl border border-border/10 bg-surface p-1.5 shadow-xl shadow-black/40 ${
             corner.endsWith("right") ? "right-1.5" : "left-1.5"
           } ${
             popoverVisible
-              ? "visible opacity-100 [transition:opacity_140ms_var(--ease-out-tk),top_200ms_var(--ease-in-out-tk),bottom_200ms_var(--ease-in-out-tk)]"
-              : "invisible opacity-0 [transition:opacity_140ms_var(--ease-out-tk),top_200ms_var(--ease-in-out-tk),bottom_200ms_var(--ease-in-out-tk),visibility_0s_140ms]"
+              ? "visible opacity-100 [transition:opacity_140ms_var(--ease-out-tk),top_200ms_var(--ease-in-out-tk),bottom_200ms_var(--ease-in-out-tk),max-height_200ms_var(--ease-in-out-tk)]"
+              : "invisible opacity-0 [transition:opacity_140ms_var(--ease-out-tk),top_200ms_var(--ease-in-out-tk),bottom_200ms_var(--ease-in-out-tk),max-height_200ms_var(--ease-in-out-tk),visibility_0s_140ms]"
           }`}
           style={{
             width: POPOVER_W,
@@ -1817,6 +1864,13 @@ function App() {
           onClose={() => setMenu(null)}
         />
       )}
+      {/* The AT announcement region — OUTSIDE the mode-keyed swap so a mode
+          change never remounts (and re-fires) it; sr-only, so nothing
+          paints. Content set only on a real, unsuppressed identity change
+          (the effect above). */}
+      <span className="sr-only" aria-live="polite">
+        {announceText}
+      </span>
       {/* Broken-art detector — OUTSIDE the mode-keyed subtree so the data URL
           isn't re-decoded on every mode switch, only per track. */}
       {artUrl && artUrl !== brokenArtUrl && (

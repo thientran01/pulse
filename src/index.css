@@ -16,7 +16,14 @@
   --fg: 245 239 230; /* cream near-white — never #fff */
   --muted: 161 152 140; /* secondary text */
   --border: 245 239 230; /* = fg; always used at 5–15% alpha */
-  --accent: 232 122 90; /* the ONE brand hue; art palette may retint */
+  --accent: 168 140 250; /* twilight violet — the ONE brand hue; art palette may
+                            retint. Replaced the ember orange (232 122 90,
+                            Thien 2026-07-17): it shared --warn's salmon family
+                            and AM-red territory; the violet is maximally
+                            distinct from both and pairs with the warm cream */
+  --warn: 214 142 116; /* desaturated warning — never red-red, never accent;
+                          promoted from a Prefs-local literal once a second
+                          surface (SpotifyConnectButton) needed it */
 }
 
 [data-theme="light"] {
@@ -25,7 +32,8 @@
   --fg: 31 26 18;
   --muted: 110 102 92;
   --border: 31 26 18;
-  --accent: 184 66 38; /* same hue, darkened to ≥4.5:1 on light surface (accent carries lyric text in M3) */
+  --accent: 104 66 201; /* same twilight hue, darkened to ≥4.5:1 (measured 5.7:1) on light surface (accent carries lyric text in M3) */
+  --warn: 168 84 52; /* same desaturated family, darkened for light surface */
 }
 
 @theme {
@@ -40,6 +48,7 @@
   --color-muted: rgb(var(--muted));
   --color-border: rgb(var(--border));
   --color-accent: rgb(var(--accent));
+  --color-warn: rgb(var(--warn));
 
   /* Motion tokens — the single source of truth /emil-pass binds to. */
   --ease-out-tk: cubic-bezier(0.16, 1, 0.3, 1);
@@ -209,8 +218,8 @@ body {
 
 /* Lyrics arrival cascade: rows radiate outward from the current line — each
  * row's --cascade-delay is its distance from the mount anchor (see
- * CASCADE_* in App.tsx). Inert without .lyrics-entering on the list, which
- * LyricsPanel removes once the entrance settles. */
+ * CASCADE_* in src/LyricsPanel.tsx). Inert without .lyrics-entering on the
+ * list, which LyricsPanel removes once the entrance settles. */
 @keyframes lyric-cascade-in {
   from {
     opacity: 0;
@@ -228,12 +237,16 @@ body {
 }
 
 /* The accent marker ignites LAST — color as the closing beat, the separator
- * ladder's grammar. Scoped to the ANCHOR row only: a mid-entrance line
- * advance ignites the new row's marker instantly instead of inheriting the
- * hold. 600ms ≈ cascade base + capped stagger + row animation; keep in sync
- * with ENTRANCE_DONE_MS in App.tsx. */
+ * ladder's grammar. An ANIMATION, not a transition-delay: the marker mounts
+ * already-visible inside the anchor row, so no opacity change ever fired and
+ * the delayed transition was dead — the accent actually landed FIRST, with
+ * the row's own fade (motion pass, 2026-07-16). `both` back-fills opacity 0
+ * through the 600ms hold, then it ignites over 200ms, ending exactly at
+ * ENTRANCE_DONE_MS (800ms, src/LyricsPanel.tsx — keep the three in sync).
+ * Scoped to the ANCHOR row only: a mid-entrance line advance ignites the
+ * new row's marker instantly instead of inheriting the hold. */
 .lyrics-entering [data-anchor] [data-marker] {
-  transition-delay: 600ms;
+  animation: caption-in 200ms var(--ease-out-tk) 600ms both;
 }
 
 /* Track-change title beat (the pill): the incoming title/artist fade in

@@ -10,6 +10,7 @@
  * hand edits while the app is closed), and hand edits during a live write
  * lose politely (last writer wins whole-file).
  */
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -83,11 +84,41 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("pulse");
     let tmp = dir.join(format!(".{name}.tmp"));
-    std::fs::write(&tmp, bytes)?;
+    // fsync the temp BEFORE the rename. `fs::write` only lands the bytes in the
+    // page cache; the rename is metadata-ordered but the DATA is not, so a power
+    // loss after the rename can still commit a torn/empty file (the exact
+    // failure this atomic-replace exists to prevent, just moved one step later).
+    // sync_all() forces the bytes durable first, so the rename only ever exposes
+    // a fully-written temp. The handle is dropped (closed) before the rename —
+    // Windows won't MoveFileExW over/from an open handle.
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
     if let Err(e) = std::fs::rename(&tmp, path) {
         // Don't leak the temp if the swap failed.
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
     Ok(())
+}
+
+/// Shared hard cap for reading a JSON HTTP response body. ureq's `into_json`
+/// has NO size limit, so a hostile or compromised endpoint could stream a
+/// multi-GB body and OOM the parse; every JSON payload the app reads (lyrics,
+/// Last.fm similars, Spotify player/token state) is a small document, so 2 MiB
+/// clears them all with headroom.
+pub(crate) const JSON_CAP: u64 = 2 * 1024 * 1024;
+
+/// Capped replacement for `ureq::Response::into_json`: parse the body reading
+/// at most `cap` bytes. A body that would exceed the cap fails to parse, which
+/// every caller already treats as offline/None — the safe read for a payload
+/// that large. Lives here beside `write_atomic` as the crate's shared
+/// robust-I/O helpers.
+pub(crate) fn json_capped<T: serde::de::DeserializeOwned>(
+    resp: ureq::Response,
+    cap: u64,
+) -> serde_json::Result<T> {
+    serde_json::from_reader(resp.into_reader().take(cap))
 }

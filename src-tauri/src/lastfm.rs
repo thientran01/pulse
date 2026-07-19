@@ -16,6 +16,7 @@
  */
 use std::time::Duration;
 
+use crate::settings::{json_capped, JSON_CAP};
 use crate::spotify::urlenc;
 
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -45,13 +46,13 @@ pub fn validate_key(key: &str) -> &'static str {
         .timeout(TIMEOUT)
         .call();
     let v: serde_json::Value = match resp {
-        Ok(r) => match r.into_json() {
+        Ok(r) => match json_capped(r, JSON_CAP) {
             Ok(v) => v,
             Err(_) => return "offline",
         },
         // Last.fm serves its application errors as 4xx WITH a JSON body — read
         // it so a rejected key reports as invalid, not offline.
-        Err(ureq::Error::Status(_, r)) => match r.into_json() {
+        Err(ureq::Error::Status(_, r)) => match json_capped(r, JSON_CAP) {
             Ok(v) => v,
             Err(_) => return "offline",
         },
@@ -88,10 +89,10 @@ pub fn get_similar(
         .timeout(TIMEOUT)
         .call();
     let v: serde_json::Value = match resp {
-        Ok(r) => r.into_json().map_err(|_| "offline")?,
+        Ok(r) => json_capped(r, JSON_CAP).map_err(|_| "offline")?,
         // Last.fm serves its application errors as 4xx WITH a JSON body —
         // read it so an invalid key reports as no_key, not offline.
-        Err(ureq::Error::Status(_, r)) => r.into_json().map_err(|_| "offline")?,
+        Err(ureq::Error::Status(_, r)) => json_capped(r, JSON_CAP).map_err(|_| "offline")?,
         Err(_) => return Err("offline"),
     };
     if let Some(code) = v["error"].as_i64() {
