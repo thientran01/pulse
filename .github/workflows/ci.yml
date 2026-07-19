@@ -1,6 +1,6 @@
 name: CI
 
-# Push/PR gate for main. Windows-only because Pulse is a Windows-only app
+# Push/PR gate for main. Windows-only because Palette is a Windows-only app
 # (GSMTC / WASAPI / Win32) — its Rust tests won't even compile elsewhere.
 # Mirrors release.yml's setup (checkout → node 22 + npm cache → rust stable →
 # rust-cache on src-tauri) but runs the actual build + tests instead of the
