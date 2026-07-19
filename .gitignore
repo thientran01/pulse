@@ -33,3 +33,7 @@ spikes/*/target/
 
 # review-agent scratch dumps (mangled scratchpad paths land in the repo root)
 *.diff
+
+# Local dev-harness config (launch.json etc.); root CLAUDE.md lives outside
+# this dir and stays tracked.
+.claude/
