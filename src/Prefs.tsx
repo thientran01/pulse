@@ -1062,21 +1062,26 @@ export default function Prefs() {
         <CloseX onClick={closePrefs} />
       </div>
 
-      {/* TOAST */}
+      {/* TOAST — the VISIBLE pill is decorative (aria-hidden): its text rides
+          lastToastMsg so the fade-out keeps a FULL pill after toastMsg clears.
+          The announcement lives in a SEPARATE, always-present sr-only live
+          region below (matches App.tsx's identity announcer) that renders ONLY
+          the CURRENT toastMsg — so it announces on change and never leaves a
+          phantom node in the a11y tree (audit A7-7). The live region is never
+          aria-hidden and never toggled: flipping aria-hidden on a live region
+          in the same commit its text changes can suppress the announcement in
+          some Windows SRs (JAWS), the exact defeat of the toast's purpose. */}
       <div
-        aria-live="polite"
-        // The div stays mounted at opacity-0 rendering the last toast text (so
-        // the fade-out keeps its words) — but that leaves a phantom node in the
-        // a11y tree between toasts (audit A7-7). aria-hidden while empty pulls
-        // it from the tree; the polite announcement already fired before the
-        // hide lands, so nothing is lost.
-        aria-hidden={!toastMsg || undefined}
+        aria-hidden
         className={`pointer-events-none absolute bottom-[18px] left-1/2 z-30 rounded-full border border-border/12 bg-surface-2 px-4 py-2 text-[12px] text-fg shadow-lg shadow-black/40 [transition:opacity_var(--transition-duration-2)_var(--ease-out-tk),transform_var(--transition-duration-2)_var(--ease-out-tk)] ${
           toastMsg ? "translate-x-[-50%] translate-y-0 opacity-100" : "translate-x-[-50%] translate-y-2 opacity-0"
         }`}
       >
         {toastMsg ?? lastToastMsg.current}
       </div>
+      <span className="sr-only" aria-live="polite">
+        {toastMsg ?? ""}
+      </span>
     </div>
   );
 }
