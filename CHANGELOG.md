@@ -8,6 +8,10 @@ Installed apps self-update at launch, so most users are always on the latest rel
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-07-19
+
+The 1.0-readiness release: the feature arc since 0.7.2 plus a full audit pass — robustness, security, and accessibility hardening across the backend and every window.
+
 ### Added
 
 - `Playing on <device>` tag: when Spotify plays on a phone or speaker while this PC is only the controller, the card, expanded, and focus views say where the audio is — explaining a quiet waveform.
@@ -15,6 +19,7 @@ Installed apps self-update at launch, so most users are always on the latest rel
 - Queue rows added from history carry the album cover, with a glyph fallback for dead art URLs.
 - Uninstalling always removes the Spotify tokens from disk; play history, preferences, and caches survive unless the uninstaller's "Delete the application data" checkbox is ticked.
 - A Content-Security-Policy on every window.
+- Accessibility: track changes are announced to screen readers; history rows can be played now from the keyboard (`Shift`+`Enter`); the hotkey-rebind capture, the right-click menu, and the first-run bubble are fully keyboard-operable.
 
 ### Changed
 
@@ -25,11 +30,26 @@ Installed apps self-update at launch, so most users are always on the latest rel
 - A design polish pass: one-line alignment across preferences, search, and the queue; bright keycap hint glyphs in Search; and a 16-fix motion sweep.
 - Hotkey seeks now spin the transport glyph, exactly like clicking the button.
 - Launch got lighter: the play-history index builds in the background instead of on the launch path, and the hidden widget's click-through watcher wakes far less often.
+- Rebinding a hotkey now suspends the live shortcuts while capturing, so a currently-bound combo is captured instead of firing its action; modifier-less and shift-only chords are refused (they would swallow ordinary typing).
+- Card mode is 6px taller so the album art no longer overflows its row.
+- Release logs no longer record the name of the app that was fullscreen (kept to debug builds only).
 
 ### Fixed
 
 - In-song silence no longer collapses and re-blooms the separator bars — a settle grace holds them while the track is still playing.
 - The separator demotes a silent process capture to the device fallback instead of stranding the bars at zero. Apple Music lossless in WASAPI *exclusive* mode remains uncapturable by anything — documented, with the user-side workaround, in [docs/smtc-support-matrix.md](docs/smtc-support-matrix.md).
+- A rare freeze where a Windows media read on the wrong thread could wedge every in-app control while hotkeys kept working.
+- Seeking a short distance — such as clicking a nearby lyric line — no longer flashes the position and lyric highlight backward before catching up.
+- Clearing play history now empties the open queue and history feed immediately, not just on the next launch.
+- A render error in any window now shows a working "Reload" button instead of an overlay whose clicks fell through to the desktop.
+- The queue popover no longer let clicks land on the desktop (or start a window drag) in the gap above a short list.
+- Spotify no longer forces a full re-login on a transient rate-limit or an ambiguous error — only genuine dead-session proof clears the tokens.
+- Broad robustness hardening: config writes flush to disk before the atomic rename (crash-safe), network responses are size-bounded, internal in-flight guards survive a panic, and Spotify token-file writes are serialized.
+
+### Security
+
+- Trimmed window capabilities to what the app actually uses (dropped the unused open-URL / reveal-path and window-geometry grants), and the generic settings writer now allow-lists keys and caps value size.
+- CI and release workflows pin their actions by commit SHA and run with a least-privilege token.
 
 ## [0.7.2] - 2026-07-14
 
@@ -190,7 +210,8 @@ First public release.
 - Synced lyrics (LRCLIB with disk cache), album-art adaptive accents, an audio-reactive "living separator", corner docking, morphing icons, and a monotonic position clock owning playback time.
 - Ships as a per-user NSIS installer — single-instance, opt-in start-at-login — with a GitHub Releases auto-update pipeline and an in-app updater.
 
-[Unreleased]: https://github.com/thientran01/palette/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/thientran01/palette/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/thientran01/palette/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/thientran01/palette/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/thientran01/palette/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/thientran01/palette/compare/v0.6.4...v0.7.0
