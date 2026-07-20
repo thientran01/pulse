@@ -259,12 +259,15 @@ src-tauri/src/
                 wiring). Track changes exit
                 through the fetch interlude (lyricsLive flips while lyrics
                 re-key) — anything that must survive one lives outside the
-                swap. The room's QUEUE (2026-07-16) is a content surface in
-                the lyric column's exact box — QueuePanel scale="room",
-                opaque bg-surface over the still-running lyrics, always
-                mounted outside the swap; an open queue FORCES the split
-                composition so the identity stack holds the left seat even
-                with no lyrics (Esc peels the queue first).
+                swap. The room's QUEUE ("Ledger Room", 2026-07-19) is a
+                content surface seated in the right column but re-anchored to
+                BALANCE the art: --queue-w widens it past art width and
+                --queue-top/--queue-h center the box on the ALBUM-ART CENTER
+                (art-width/11vh-top read as a widget floating top-left) —
+                QueuePanel scale="room", opaque bg-surface over the
+                still-running lyrics, always mounted outside the swap; an open
+                queue FORCES the split composition so the identity stack holds
+                the left seat even with no lyrics (Esc peels the queue first).
                 This is the removed P3's want with the correct trigger:
                 invoked, never guessed
   prefs.rs      the Preferences window — third webview on the search.rs
@@ -341,10 +344,13 @@ src/Queue.tsx   the 11a queue & history UI: Palette's up-next list + the
                 feed survive the swap; the shared header (lyrics + queue) is
                 absolute so it never reflows the album column, and chrome +
                 toggles never move; and in the FOCUS ROOM, the same panel at
-                scale="room" (QSCALE: 56px rows, 40px thumbs, type one rung
-                up — drag/ghost math parameterized by rowH) seated IN the
-                lyric column's exact box (2026-07-16: the 380px popover read
-                as a widget lost in the room). The
+                scale="room" ("Ledger Room" QSCALE: 72px "ledger" rows w/ a
+                second artist·album line + a right-aligned duration/relative-
+                time cell, 52px thumbs — drag/ghost math parameterized by
+                rowH/swapAt) in a column widened past art width and centered
+                on the art (2026-07-19: the 56px art-width box still read as
+                a widget lost in the room; Earlier recedes by opacity, empty
+                up-next is a framed drop-panel). The
                 garment follows effectiveMode, so continuity across the
                 ladder is free. WHILE THE POPOVER IS OPEN THE HIT RECT
                 UNIONS ITS BOX (App's footprint effect) — a consumer that

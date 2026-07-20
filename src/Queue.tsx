@@ -1063,7 +1063,9 @@ export function QueuePanel({
             Last.fm key (an enabled button whose only answer is "add a key" is a
             dead-end, 1.0 ship-blocker); with a key it disables in place when
             the queue gate is closed or a run is in flight. */}
-        {hasKey && (
+        {/* Hidden when the room empty-state panel shows its own "More like this"
+            CTA (below) — one affordance at a time, no duplicate control. */}
+        {hasKey && !(room && upnextEmpty) && (
           <button
             type="button"
             // The expanded garment nudges this onto the corner-chrome rail
@@ -1120,8 +1122,8 @@ export function QueuePanel({
               <span className="text-muted">
                 <PlusGlyph size={20} />
               </span>
-              <p className="m-0 text-[15px] text-muted">Queue is empty</p>
-              <p className="m-0 text-[13px] text-muted/70">
+              <p className={`m-0 ${s.prose} text-muted`}>Queue is empty</p>
+              <p className={`m-0 ${s.label} text-muted`}>
                 Press + on a track below, or drag one up here
               </p>
               {hasKey && (
@@ -1131,7 +1133,7 @@ export function QueuePanel({
                   title={np?.title ? `More like ${np.title}` : "More like this"}
                   aria-disabled={!queueLive || !np?.title || seeding || undefined}
                   onClick={moreLikeThis}
-                  className={`mt-1 inline-flex items-center gap-1.5 rounded-lg border border-border/15 bg-surface-2 px-3 py-1.5 text-[13px] text-fg [transition:background-color_140ms_var(--ease-out-tk),opacity_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] ${
+                  className={`mt-1 inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-border/15 bg-surface-2 px-3 ${s.label} text-fg [transition:background-color_140ms_var(--ease-out-tk),opacity_140ms_var(--ease-out-tk),scale_90ms_var(--ease-out-tk)] ${
                     !queueLive || !np?.title || seeding
                       ? "pointer-events-none opacity-40"
                       : "hover:bg-fg/10 active:scale-95"
@@ -1183,7 +1185,7 @@ export function QueuePanel({
         aria-label="Earlier"
         className={`flex flex-col ${
           room
-            ? "opacity-[0.82] [transition:opacity_200ms_var(--ease-out-tk)] hover:opacity-100 focus-within:opacity-100"
+            ? "opacity-[0.85] [transition:opacity_200ms_var(--ease-out-tk)] hover:opacity-100 focus-within:opacity-100"
             : ""
         }`}
       >
