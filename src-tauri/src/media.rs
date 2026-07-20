@@ -599,11 +599,12 @@ fn base_snapshot(session: &Session) -> (NowPlaying, bool) {
             p.Title().map(|h| h.to_string()).unwrap_or_default(),
             p.Artist().map(|h| h.to_string()).unwrap_or_default(),
             p.AlbumTitle().map(|h| h.to_string()).unwrap_or_default(),
-            // MediaPlaybackType — the signal history uses to drop video
-            // (Netflix/anime/browser) from music-only surfaces. Nullable:
-            // a null IReference, read error, or Unknown(0) all fall to
-            // "unknown" (kept — never lose a real listen). Match the
-            // numeric tuple like playback_info's PlaybackStatus(4).
+            // MediaPlaybackType, stored faithfully on the entry. NOTE: this is
+            // NOT a reliable video filter for browsers — Chrome/Edge report
+            // Music(1) even for Netflix/YouTube/anime video, so history::is_music
+            // gates "music" on the PLAYER, not this tag (see its doc). A null
+            // IReference, read error, or Unknown(0) all fall to "unknown". Match
+            // the numeric tuple like playback_info's PlaybackStatus(4).
             match p.PlaybackType().ok().and_then(|r| r.Value().ok()) {
                 Some(MediaPlaybackType(1)) => "music",
                 Some(MediaPlaybackType(2)) => "video",

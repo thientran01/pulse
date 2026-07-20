@@ -497,17 +497,24 @@ impl Inner {
     }
 }
 
-/// Music gate for the READ surfaces (search + queue). Conservative: only a
-/// POSITIVE video/image kind is dropped, so a music app that mislabels its
-/// PlaybackType as Unknown is never lost. "" is the pre-feature legacy row
-/// (no media_kind persisted) — those fall back to the player bucket, which
-/// keeps old Apple Music/Spotify listens and hides old browser/video ones.
-/// Persistence is untouched; this only governs what surfaces.
+/// Music gate for the READ surfaces (search + queue). Persistence is untouched;
+/// this only governs what surfaces.
+///
+/// `MediaPlaybackType` is NOT trustworthy for browsers: Chrome/Edge report
+/// `Music` even for Netflix/YouTube/anime video (measured — every browser row
+/// in a real history.jsonl came back "music", zero "video"/"unknown"). So a
+/// self-reported "music"/"unknown" is only believed from a dedicated music
+/// player — the PLAYER bucket, not the kind tag, is the real music boundary.
+/// A POSITIVE "video"/"image" is always dropped (well-behaved apps that DO
+/// label their video). "" (pre-feature legacy rows) takes the same player gate.
+/// Trade-off: music played through a browser or a non-AM/Spotify app won't
+/// surface — extend the allow-list here (and `player_kind` in media.rs) to add
+/// another trusted music player.
 fn is_music(e: &HistoryEntry) -> bool {
     match e.media_kind.as_str() {
         "video" | "image" => false,
-        "" => matches!(e.player.as_str(), "apple_music" | "spotify"),
-        _ => true, // "music", "unknown", any future kind
+        // "music" / "unknown" / "" — trust only a dedicated music player.
+        _ => matches!(e.player.as_str(), "apple_music" | "spotify"),
     }
 }
 
