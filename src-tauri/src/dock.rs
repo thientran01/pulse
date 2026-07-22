@@ -1,27 +1,39 @@
 /*
- * Corner docking: the widget anchors to one of the four corners of the
- * monitor's work area, but the OFFSET is free — the corner is a gravity
- * well, not a cage. Drags stay free; on release the nearest corner is
- * derived (it stays the anchor IDENTITY: shell-seat glide direction,
- * hit-rect anchor, queue popover direction all key on it, and all anchor
- * to the corner of the WINDOW rect, so they work at any position). A drop
- * within MAGNET_PX of the canonical seat glides home; a drop within
- * RAIL_PX of a seat coordinate settles that axis onto the margin rail;
- * anywhere else the drop stands, clamped on-screen. The same settle rule
- * classifies the restored position at launch: near a seat → re-seat
- * (heals DPI drift and disconnected monitors, exactly the old behavior),
- * else the free position survives — the magnet radius IS the
- * snapped-vs-free classifier, so no persisted bit can drift out of sync.
+ * Free placement with edge snapping: the widget goes ANYWHERE on screen and
+ * stays where it was dropped. On release each axis settles independently —
+ * within RAIL_PX of an edge line it snaps to that line, otherwise it keeps
+ * exactly the coordinate it was dropped at; the visible widget is clamped
+ * on-screen and nothing else moves it. There is no corner magnet (removed
+ * 2026-07-21 on Thien's live verdict: a drop NEAR a corner was pulled INTO
+ * it, "I just want it to align with the nearest edge... and stay at that Y
+ * level"), and no fullscreen special case — Palette never repositions
+ * itself in response to another app.
  *
- * The fullscreen seat: while settled fullscreen content owns the WIDGET's
- * monitor (presence.rs's monitor-scoped verdict — never the global QUNS
- * states, which can't say WHICH monitor), the widget re-seats against the
- * FULL MONITOR RECT: the taskbar is covered, and work-area seats float a
- * taskbar-height too high over game HUDs. The fullscreen position is its
- * own remembered seat (drags mid-episode update it; persisted
- * corner-relative in settings.json as "fsSeat" so resolution changes
- * adapt); the episode ending restores the exact desktop position — the
- * same episode/restore grammar as the courtesy conceal.
+ * Edge lines, per axis: the MARGIN_LOGICAL inset of BOTH the work area and
+ * the full monitor rect, on both sides; the nearest within RAIL_PX wins.
+ * Left/right/top the two rects coincide, so there is one line. The bottom
+ * has two ~a-taskbar apart — above the taskbar (the familiar seat) and
+ * flush with the true screen bottom. That second line is what retires the
+ * old fullscreen seat: it already exists on the desktop, so a near-bottom
+ * drop over a fullscreen game lands flush without anyone sensing anything.
+ *
+ * The settle runs in FOOTPRINT coordinates — the visible widget, not the
+ * window. The shell seats at the docked corner INSIDE the fixed
+ * WINDOW_MAX window (App.tsx SHELL_SEAT), so placing the window instead let
+ * a corner flip re-seat the visible widget by WINDOW_MAX - MODE_SIZE across
+ * a stationary window: 80×392px in pill mode, i.e. crossing the screen
+ * midline threw the widget most of a screen height. Deriving the window
+ * origin from the settled footprint (window = footprint - corner_offset)
+ * absorbs the flip, which is the precondition for "place it anywhere"
+ * meaning anything in pill and card. The window may hang off-screen as a
+ * result — it is transparent and click-through out there, and only the
+ * footprint is clamped.
+ *
+ * The corner is still DERIVED on every settle (from the footprint's center)
+ * and is still the anchor IDENTITY — shell-seat glide direction, hit-rect
+ * anchor, queue popover direction, mode-glide growth all key on it, and all
+ * anchor to the corner of the WINDOW rect, so they work at any position. It
+ * just no longer pulls.
  *
  * The window NEVER RESIZES after launch: it is born at the largest mode's
  * size (tauri.conf.json = App.tsx WINDOW_MAX) and every mode change is the
@@ -39,13 +51,14 @@
  * Corner persistence is derived, not stored: tauri-plugin-window-state
  * restores the last position, and the first positioning call (or the launch
  * Moved event) settles it — which also self-heals positions persisted on a
- * now-disconnected monitor.
+ * now-disconnected monitor (the clamp does that work; with the magnet gone
+ * there is no re-seat, so a free placement always survives a relaunch).
  */
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 use windows::core::BOOL;
 use windows::Win32::Foundation::HWND;
@@ -57,15 +70,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
-/// Gap between the window and the work-area edges, in logical px.
+/// Gap between the widget and the screen edges when an axis snaps, in
+/// logical px.
 const MARGIN_LOGICAL: f64 = 12.0;
-/// Free placement: a drop within this of the canonical corner seat glides
-/// home. Doubles as the launch-time snapped-vs-free classifier — one rule,
-/// two sites, so they can't disagree.
-const MAGNET_PX: f64 = 80.0;
-/// A free drop within this of a seat coordinate settles that axis onto the
-/// margin rail (per-axis; must stay < MAGNET_PX so the magnet wins near a
-/// full seat). Near-edge drops end up tidy-aligned; mid-screen drops stand.
+/// The ONLY snap: a drop within this of an edge line settles that axis onto
+/// the margin rail. Per-axis and independent, so a drop near the left edge
+/// tidies X and leaves Y exactly where it landed. Mid-screen drops stand
+/// untouched — this is the whole placement rule, there is no corner magnet.
 const RAIL_PX: f64 = 24.0;
 /// Snap-glide duration = DUR[3] in src/lib/tokens.ts. Keep in sync.
 const SNAP_MS: u64 = 200;
@@ -114,7 +125,8 @@ impl Corner {
         }
     }
 
-    /// Inverse of as_str, for the persisted fullscreen seat.
+    /// Inverse of as_str, for the persisted corner (settings.json
+    /// "dockCorner").
     fn from_str(s: &str) -> Option<Self> {
         match s {
             "top-left" => Some(Corner::TopLeft),
@@ -123,38 +135,6 @@ impl Corner {
             "bottom-right" => Some(Corner::BottomRight),
             _ => None,
         }
-    }
-}
-
-/// Which rect corner math runs against: the work area on the desktop; the
-/// full monitor rect during a fullscreen episode (the taskbar is covered).
-#[derive(Clone, Copy, PartialEq)]
-enum Space {
-    Desktop,
-    Fullscreen,
-}
-
-/// The remembered fullscreen position, as a logical offset from its corner's
-/// canonical monitor-rect seat — corner-relative so resolution/DPI changes
-/// re-resolve instead of landing off-screen.
-#[derive(Clone, Copy)]
-struct FsSeat {
-    corner: Corner,
-    dx: f64,
-    dy: f64,
-}
-
-impl FsSeat {
-    fn to_json(self) -> Value {
-        json!({ "corner": self.corner.as_str(), "dx": self.dx, "dy": self.dy })
-    }
-
-    fn from_json(v: &Value) -> Option<Self> {
-        Some(FsSeat {
-            corner: Corner::from_str(v.get("corner")?.as_str()?)?,
-            dx: v.get("dx")?.as_f64()?,
-            dy: v.get("dy")?.as_f64()?,
-        })
     }
 }
 
@@ -189,33 +169,20 @@ pub struct Dock {
     /// The interactive footprint (logical px, anchored at the docked
     /// corner) the frontend reports per mode — everything outside it is
     /// click-through. None (pre-report) = the whole window is interactive.
+    /// This is a UNION: it swells to cover the queue popover and goes
+    /// whole-window under a transient overlay, so it is the right rect for
+    /// clicks and the WRONG one for placement (see mode_size).
     hit_size: Mutex<Option<(f64, f64)>>,
+    /// The mode's own box (MODE_SIZES, logical px) — what PLACEMENT uses.
+    /// It must track App.tsx's SHELL_SEAT exactly, because the corner-flip
+    /// compensation only cancels the frontend's FLIP if both sides measure
+    /// the same rect; hit_size's popover union would compensate for a box
+    /// the shell never moves by, re-opening the teleport it fixes.
+    mode_size: Mutex<Option<(f64, f64)>>,
     /// When the docked corner last CHANGED (not launch-derived) — hit_rect
     /// widens to the whole window for HIT_GRACE_MS after it while the shell
     /// glides to its new seat.
     corner_changed: Mutex<Option<Instant>>,
-    /// Presence's monitor-scoped verdict: fullscreen content owns the
-    /// widget's monitor. What sync_seat reconciles toward.
-    want_fs: AtomicBool,
-    /// The seat currently applied — diverges from want_fs only while a swap
-    /// is deferred (mid-press) and the presence tick hasn't retried yet.
-    seated_fs: AtomicBool,
-    /// Exact position + corner at fullscreen-episode start, restored
-    /// verbatim (clamped) when the episode ends.
-    desktop_return: Mutex<Option<((i32, i32), Corner)>>,
-    /// The remembered fullscreen seat (settings.json "fsSeat"). None →
-    /// first episode defaults to the same corner against the monitor rect.
-    fs_seat: Mutex<Option<FsSeat>>,
-    /// Serializes sync_seat end to end: it's reachable from the presence
-    /// tick AND from apply_visibility (hotkey/tray/any thread), and two
-    /// callers both past the want==seated check would double-capture
-    /// desktop_return — the second one reading a position the first
-    /// already moved (3-agent quick-review convergence, 2026-07-12).
-    seat_gate: Mutex<()>,
-    /// A "desktopReturn" persisted by a quit mid-episode, stashed by init
-    /// (logical px) for set_window_size to settle instead of the
-    /// window-state position — which IS the fullscreen seat in that case.
-    launch_pos: Mutex<Option<(f64, f64)>>,
     /// The hit watcher parks here while the window is hidden (a hidden window
     /// takes no clicks, so there's nothing to poll for). apply_visibility's
     /// show path calls notify_shown, waking it within a frame so the
@@ -236,13 +203,8 @@ impl Default for Dock {
             last_moved: Mutex::new(Instant::now()),
             watcher_armed: AtomicBool::new(false),
             hit_size: Mutex::new(None),
+            mode_size: Mutex::new(None),
             corner_changed: Mutex::new(None),
-            want_fs: AtomicBool::new(false),
-            seated_fs: AtomicBool::new(false),
-            desktop_return: Mutex::new(None),
-            fs_seat: Mutex::new(None),
-            seat_gate: Mutex::new(()),
-            launch_pos: Mutex::new(None),
             show_signal: (Mutex::new(false), Condvar::new()),
         }
     }
@@ -266,28 +228,45 @@ struct WorkArea {
     h: i32,
 }
 
-/// The window's monitor rect for the given space (work area on the desktop,
-/// full monitor rect during a fullscreen episode), falling back to the
-/// primary monitor — a position persisted on a now-disconnected monitor must
-/// still resolve somewhere visible so the settle math can pull the window
-/// back on-screen.
-fn space_rect(window: &WebviewWindow, space: Space) -> Option<WorkArea> {
+/// Both rects placement math cares about. `work` (monitor minus taskbar) is
+/// the familiar seat and the one `reset_position` homes to; `mon` (the full
+/// monitor) is what the widget is CLAMPED to — it may sit over the taskbar if
+/// that's where it was put. Each contributes its own pair of edge lines per
+/// axis, which is what lets a near-bottom drop choose between "above the
+/// taskbar" and "flush with the screen" without any fullscreen sensing.
+struct Rects {
+    work: WorkArea,
+    mon: WorkArea,
+}
+
+/// The monitor the VISIBLE widget is on — the one containing (cx, cy), which
+/// callers pass as the footprint's center. Asking the WINDOW instead
+/// (current_monitor = largest intersection) can answer with a neighbouring
+/// display now that the window sits up to WINDOW_MAX − MODE_SIZE away from
+/// the widget, and the drop would be clamped onto the wrong screen. Falls
+/// back to the window's monitor, then the primary — a position persisted on a
+/// now-disconnected monitor must still resolve somewhere visible so the clamp
+/// can pull the widget back on-screen.
+fn monitor_rects(window: &WebviewWindow, cx: i32, cy: i32) -> Option<Rects> {
     let monitor = window
-        .current_monitor()
-        .ok()
-        .flatten()
+        .available_monitors()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|m| {
+            let (p, s) = (m.position(), m.size());
+            cx >= p.x && cx < p.x + s.width as i32 && cy >= p.y && cy < p.y + s.height as i32
+        })
+        .or_else(|| window.current_monitor().ok().flatten())
         .or_else(|| window.primary_monitor().ok().flatten())?;
-    Some(match space {
-        Space::Desktop => {
-            let r = monitor.work_area();
-            WorkArea {
-                x: r.position.x,
-                y: r.position.y,
-                w: r.size.width as i32,
-                h: r.size.height as i32,
-            }
-        }
-        Space::Fullscreen => WorkArea {
+    let wa = monitor.work_area();
+    Some(Rects {
+        work: WorkArea {
+            x: wa.position.x,
+            y: wa.position.y,
+            w: wa.size.width as i32,
+            h: wa.size.height as i32,
+        },
+        mon: WorkArea {
             x: monitor.position().x,
             y: monitor.position().y,
             w: monitor.size().width as i32,
@@ -342,20 +321,9 @@ fn apply_pos(window: &WebviewWindow, x: i32, y: i32, size: Option<(i32, i32)>) {
     }
 }
 
-/// One instant positioning op: epoch bump (kills any in-flight glide) +
-/// animating guard around a single move. For moves the user can't watch
-/// (the window is hidden) — visible moves glide via animate_to.
-fn jump_to(window: &WebviewWindow, x: i32, y: i32) {
-    let dock = window.state::<Dock>();
-    dock.animating.fetch_add(1, Ordering::SeqCst);
-    dock.epoch.fetch_add(1, Ordering::SeqCst);
-    apply_pos(window, x, y, None);
-    dock.animating.fetch_sub(1, Ordering::SeqCst);
-}
-
-/// Clamp an origin so the w×h window sits inside `rect`, keeping the
-/// top-left reachable when the window outgrows it (mirrors corner_origin's
-/// rule — the chromeless drag surface must stay on-screen).
+/// Clamp an origin so the w×h footprint sits inside `rect`, keeping the
+/// top-left reachable when it outgrows it (mirrors corner_origin's rule —
+/// the chromeless drag surface must stay on-screen).
 fn clamp_origin(pos: (i32, i32), rect: &WorkArea, w: i32, h: i32) -> (i32, i32) {
     (
         pos.0.clamp(rect.x, (rect.x + rect.w - w).max(rect.x)),
@@ -363,44 +331,91 @@ fn clamp_origin(pos: (i32, i32), rect: &WorkArea, w: i32, h: i32) -> (i32, i32) 
     )
 }
 
-/// The settle decision for a released (or launch-restored) position: derive
-/// the corner identity from `center`, clamp the window into `rect`, then
-/// apply the corner magnet and the per-axis edge rails. Pure — callers apply
-/// the returned corner + target.
+/// Snap one axis to the nearest of `lines` within `rail`, else leave it
+/// exactly where it is. Ties are impossible in practice — the two rects'
+/// lines on a side either coincide (deduped by "nearest", which then picks
+/// either identical value) or differ by a taskbar thickness.
+fn snap_axis(v: i32, lines: [i32; 4], rail: i32) -> i32 {
+    let mut best: Option<(i32, i32)> = None; // (distance, line)
+    for line in lines {
+        let d = (v - line).abs();
+        if d <= rail && best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, line));
+        }
+    }
+    best.map_or(v, |(_, line)| line)
+}
+
+/// The settle decision for a released (or launch-restored) FOOTPRINT — the
+/// visible widget, not the window (see the module comment: the window origin
+/// is derived from this, so a corner change can't re-seat the shell across a
+/// stationary window). Pure: clamp on-screen, snap each axis to the nearest
+/// edge line, then read the corner identity off where it actually landed.
+///
+/// `rails` is false only before the frontend has reported a footprint size,
+/// where the "footprint" is really the whole window: railing the window's FAR
+/// edges would move the visible widget onto a line it isn't at, so the launch
+/// settle clamps and nothing more.
 fn settle_target(
-    center: (i32, i32),
-    pos: (i32, i32),
-    size: (i32, i32),
-    rect: &WorkArea,
+    fpos: (i32, i32),
+    fsize: (i32, i32),
+    rects: &Rects,
     scale: f64,
+    rails: bool,
 ) -> (Corner, (i32, i32)) {
-    let (w, h) = size;
+    let (fw, fh) = fsize;
     let margin = (MARGIN_LOGICAL * scale).round() as i32;
-    let corner = nearest_corner(center.0, center.1, rect);
-    let seat = corner_origin(corner, rect, w, h, margin);
     // Clamp first: a half-off-screen drop lands flush, and its now-margin-off
     // distance is the rails' problem below.
-    let (x, y) = clamp_origin(pos, rect, w, h);
-    // Magnet: near the canonical seat, glide home — the anchor's convenience.
-    let (dx, dy) = ((x - seat.0) as i64, (y - seat.1) as i64);
-    let magnet = (MAGNET_PX * scale).round() as i64;
-    if dx * dx + dy * dy <= magnet * magnet {
-        return (corner, seat);
-    }
-    // Rails: per-axis, the seat coordinate IS the margin rail on the
-    // corner's side — a near-edge drop settles flush instead of a few px off.
-    let rail = (RAIL_PX * scale).round() as i32;
-    let x = if (x - seat.0).abs() <= rail {
-        seat.0
+    let (x, y) = clamp_origin(fpos, &rects.mon, fw, fh);
+    let (x, y) = if rails {
+        let rail = (RAIL_PX * scale).round() as i32;
+        (
+            snap_axis(
+                x,
+                [
+                    rects.work.x + margin,
+                    rects.work.x + rects.work.w - fw - margin,
+                    rects.mon.x + margin,
+                    rects.mon.x + rects.mon.w - fw - margin,
+                ],
+                rail,
+            ),
+            snap_axis(
+                y,
+                [
+                    rects.work.y + margin,
+                    rects.work.y + rects.work.h - fh - margin,
+                    rects.mon.y + margin,
+                    rects.mon.y + rects.mon.h - fh - margin,
+                ],
+                rail,
+            ),
+        )
     } else {
-        x
+        (x, y)
     };
-    let y = if (y - seat.1).abs() <= rail {
-        seat.1
-    } else {
-        y
-    };
+    // Corner from where it LANDED — every consumer of the corner (shell seat,
+    // popover direction, mode-glide growth) is asking "which screen edge is
+    // this thing against", so the settled position is the honest input.
+    let corner = nearest_corner(x + fw / 2, y + fh / 2, &rects.mon);
     (corner, (x, y))
+}
+
+/// Where the footprint sits INSIDE the window: the shell seats at the docked
+/// corner (App.tsx SHELL_SEAT), so `window_origin = footprint_origin - this`.
+/// Saturating at 0 keeps a footprint reported larger than the window (never
+/// happens — footprint_rect min()s it — but the arithmetic must not go
+/// negative and drag the window off by the difference) harmless.
+fn corner_offset(corner: Corner, win: (i32, i32), fp: (i32, i32)) -> (i32, i32) {
+    let dx = (win.0 - fp.0).max(0);
+    let dy = (win.1 - fp.1).max(0);
+    match corner {
+        Corner::TopLeft => (0, 0),
+        Corner::TopRight => (dx, 0),
+        Corner::BottomLeft => (0, dy),
+        Corner::BottomRight => (dx, dy),
+    }
 }
 
 /// Physical state of the primary mouse button (drag may still be in flight).
@@ -586,13 +601,35 @@ fn spawn_animation(
         .expect("spawn dock-anim thread");
 }
 
-/// The mode footprint anchored at the docked corner (physical px, screen
-/// coords), or the whole window before the first hit-size report. The raw
-/// geometry — NO corner-glide grace. The snap decision keys on THIS: it
-/// wants the footprint at the committed corner (where the shell is headed),
-/// not the whole-window fallback, so a settle within the grace window can't
-/// derive — and, during a fullscreen episode, PERSIST — a window-center
-/// corner (quick-review catch, 2026-07-13).
+/// A logical-px box anchored at the docked corner of the window rect
+/// (physical px, screen coords), or the whole window when `size` is None.
+/// The raw geometry — NO corner-glide grace.
+fn anchored_rect(
+    window: &WebviewWindow,
+    size: Option<(f64, f64)>,
+    wx: i32,
+    wy: i32,
+    ww: i32,
+    wh: i32,
+) -> (i32, i32, i32, i32) {
+    let Some((sw, sh)) = size else {
+        return (wx, wy, ww, wh);
+    };
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let hw = ((sw * scale).round() as i32).min(ww);
+    let hh = ((sh * scale).round() as i32).min(wh);
+    let corner = window
+        .state::<Dock>()
+        .corner
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .unwrap_or(Corner::BottomRight);
+    let (ox, oy) = corner_offset(corner, (ww, wh), (hw, hh));
+    (wx + ox, wy + oy, hw, hh)
+}
+
+/// The interactive footprint — hit_size's popover/overlay UNION. Feeds the
+/// click-through gate only.
 fn footprint_rect(
     window: &WebviewWindow,
     wx: i32,
@@ -600,26 +637,51 @@ fn footprint_rect(
     ww: i32,
     wh: i32,
 ) -> (i32, i32, i32, i32) {
-    let dock = window.state::<Dock>();
-    let hit = *dock.hit_size.lock().unwrap_or_else(PoisonError::into_inner);
-    let Some((hw, hh)) = hit else {
-        return (wx, wy, ww, wh);
-    };
-    let scale = window.scale_factor().unwrap_or(1.0);
-    let hw = ((hw * scale).round() as i32).min(ww);
-    let hh = ((hh * scale).round() as i32).min(wh);
-    let corner = dock
-        .corner
+    let size = *window
+        .state::<Dock>()
+        .hit_size
         .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .unwrap_or(Corner::BottomRight);
-    let (l, t) = match corner {
-        Corner::TopLeft => (wx, wy),
-        Corner::TopRight => (wx + ww - hw, wy),
-        Corner::BottomLeft => (wx, wy + wh - hh),
-        Corner::BottomRight => (wx + ww - hw, wy + wh - hh),
-    };
-    (l, t, hw, hh)
+        .unwrap_or_else(PoisonError::into_inner);
+    anchored_rect(window, size, wx, wy, ww, wh)
+}
+
+/// The VISIBLE widget's box — the mode's own MODE_SIZES rect, never the
+/// popover union. Every placement decision keys on this: the snap wants the
+/// widget at the committed corner (where the shell is headed), and the
+/// corner-flip compensation must measure exactly the rect App.tsx's FLIP
+/// moves. Falls back to hit_size, then the whole window, so a settle before
+/// the frontend has reported anything still behaves.
+fn placement_rect(
+    window: &WebviewWindow,
+    wx: i32,
+    wy: i32,
+    ww: i32,
+    wh: i32,
+) -> (i32, i32, i32, i32) {
+    let dock = window.state::<Dock>();
+    let size = (*dock
+        .mode_size
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner))
+    .or(*dock.hit_size.lock().unwrap_or_else(PoisonError::into_inner));
+    anchored_rect(window, size, wx, wy, ww, wh)
+}
+
+/// The window origin that puts a settled footprint at `landing`, plus a
+/// safety clamp keeping the WINDOW itself on-screen. The clamp is inert on
+/// any display taller than ~832 logical px — the corner tracks the widget's
+/// screen quadrant, so the window always fits — and exists only so that on a
+/// short display, stepping UP the mode ladder (which grows the shell to fill
+/// the window) can't paint the widget off the edge.
+fn window_origin(
+    corner: Corner,
+    landing: (i32, i32),
+    win: (i32, i32),
+    fp: (i32, i32),
+    rect: &WorkArea,
+) -> (i32, i32) {
+    let (ox, oy) = corner_offset(corner, win, fp);
+    clamp_origin((landing.0 - ox, landing.1 - oy), rect, win.0, win.1)
 }
 
 /// The interactive rect for the click-through gate: footprint_rect, but the
@@ -638,279 +700,217 @@ fn hit_rect(window: &WebviewWindow, wx: i32, wy: i32, ww: i32, wh: i32) -> (i32,
     footprint_rect(window, wx, wy, ww, wh)
 }
 
+/// Persist the docked corner (settings.json "dockCorner"). window-state
+/// restores the window RECT, but the widget sits at one of four corners
+/// INSIDE it — and which one is not recoverable from the rect. Re-deriving it
+/// from the window's center puts it in the wrong screen quadrant across a
+/// ~200px band around each midline (the window center sits ~196px off the
+/// footprint center in pill mode), and the shell then seats at the opposite
+/// end of the window: a 392px teleport on relaunch. One string is the decoder
+/// ring. Written off-thread — set_corner is reachable from the main thread
+/// (set_window_size is a sync command) and a settings write is a
+/// read-modify-write; a lost write costs one stale launch, nothing more.
+fn persist_corner(app: &AppHandle, corner: Corner) {
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("dock-persist".into())
+        .spawn(move || {
+            crate::settings::set_value(&app, "dockCorner", Value::from(corner.as_str()));
+        });
+}
+
 /// Store the docked corner. If it CHANGED from an existing corner AND the
 /// shell will visibly glide to the new seat (`gliding`), open the hit-rect
 /// grace window so the click-through gate stays whole-window until the
-/// shell lands (see corner_changed / HIT_GRACE_MS). Launch derivation (no
-/// prior corner) and hidden jumps pass false — neither animates a visible
-/// shell across the fixed window.
-fn set_corner(dock: &Dock, corner: Corner, gliding: bool) {
+/// shell lands (see corner_changed / HIT_GRACE_MS). Launch derivation and
+/// hidden jumps pass false — neither animates a visible shell across the
+/// fixed window.
+fn set_corner(app: &AppHandle, dock: &Dock, corner: Corner, gliding: bool) {
     let mut c = dock.corner.lock().unwrap_or_else(PoisonError::into_inner);
-    if gliding && c.is_some() && *c != Some(corner) {
+    let changed = *c != Some(corner);
+    if gliding && c.is_some() && changed {
         *dock
             .corner_changed
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
     }
     *c = Some(corner);
+    drop(c);
+    if changed {
+        persist_corner(app, corner);
+    }
 }
 
-/// Settle a released drag: derive the corner from the VISIBLE widget's
-/// center (the shell sits corner-anchored inside the WINDOW_MAX window, so
-/// the window center can be a couple hundred px off what the user actually
-/// dragged), run the magnet/rails/clamp decision, glide there. During a
-/// fullscreen episode the settle runs against the monitor rect and the
-/// landing becomes the remembered fullscreen seat (the desktop position
-/// waits in desktop_return).
+/// Settle a released drag. Everything is expressed in the VISIBLE widget's
+/// coordinates (footprint_rect) — the shell sits corner-anchored inside the
+/// WINDOW_MAX window, so the window rect is up to 80×392px away from what the
+/// user actually dragged — and the window origin is derived from the landing
+/// LAST, using the settled corner. That derivation is what absorbs a corner
+/// change: without it the flip re-seats the shell across a stationary window
+/// and the widget jumps most of a screen height (see the module comment).
 fn settle_release(window: &WebviewWindow) {
     let dock = window.state::<Dock>();
-    let space = if dock.seated_fs.load(Ordering::SeqCst) {
-        Space::Fullscreen
-    } else {
-        Space::Desktop
-    };
-    let Some(rect) = space_rect(window, space) else {
-        return;
-    };
     let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
         return;
     };
     let (w, h) = (size.width as i32, size.height as i32);
-    // The snap corner keys on the VISIBLE widget's center (footprint_rect) —
-    // the shell sits corner-anchored inside WINDOW_MAX, so a pill dropped
-    // just below the midline would snap UP if judged by the window center.
-    let (hx, hy, hw, hh) = footprint_rect(window, pos.x, pos.y, w, h);
+    let (fx, fy, fw, fh) = placement_rect(window, pos.x, pos.y, w, h);
+    let Some(rects) = monitor_rects(window, fx + fw / 2, fy + fh / 2) else {
+        return;
+    };
     let scale = window.scale_factor().unwrap_or(1.0);
-    let (corner, target) = settle_target(
-        (hx + hw / 2, hy + hh / 2),
-        (pos.x, pos.y),
-        (w, h),
-        &rect,
-        scale,
-    );
+    let (corner, landing) = settle_target((fx, fy), (fw, fh), &rects, scale, true);
+    let target = window_origin(corner, landing, (w, h), (fw, fh), &rects.mon);
     // A real corner CHANGE glides the shell to its new seat (App.tsx FLIP) —
-    // open the hit-rect grace window for that visible glide.
-    set_corner(&dock, corner, true);
+    // open the hit-rect grace window for that visible glide. The native glide
+    // below runs the compensating distance in the OPPOSITE direction over the
+    // same SNAP_MS/EASE.out, so the two cancel and the widget holds still.
+    set_corner(window.app_handle(), &dock, corner, true);
     emit_corner(window, corner);
-    if space == Space::Fullscreen {
-        // The landing is the new fullscreen seat: remember it corner-relative
-        // (logical) and persist. File IO is fine here — this runs on the
-        // drag-release watcher thread, never the main thread.
-        let margin = (MARGIN_LOGICAL * scale).round() as i32;
-        let seat = corner_origin(corner, &rect, w, h, margin);
-        let fs = FsSeat {
-            corner,
-            dx: (target.0 - seat.0) as f64 / scale,
-            dy: (target.1 - seat.1) as f64 / scale,
-        };
-        *dock.fs_seat.lock().unwrap_or_else(PoisonError::into_inner) = Some(fs);
-        crate::settings::set_value(window.app_handle(), "fsSeat", fs.to_json());
-    }
     animate_to(window, (pos.x, pos.y), target);
 }
 
-/// Load the persisted fullscreen seat, and consume any "desktopReturn"
-/// left by a quit mid-episode — window-state persisted the FULLSCREEN
-/// position then, and settling that as the launch position would silently
-/// replace a free desktop placement. Call once from setup (file IO belongs
-/// here, not in the sync set_window_size command — main-thread rule).
+/// Seed the docked corner from settings.json — the decoder ring the launch
+/// settle needs to find the visible widget inside the restored window rect
+/// (see persist_corner). Absent (fresh install, or the first launch after the
+/// 2026-07-21 change) leaves it None, which the launch settle reads as "treat
+/// the whole window as the widget", exactly the pre-2026-07-21 behavior, so an
+/// upgrade lands where the last version would have put it and the first drag
+/// makes it exact.
+///
+/// Also nulls the two keys the removed fullscreen seat used to own ("fsSeat",
+/// "desktopReturn") — dead weight in a dogfooded settings.json. Call once from
+/// setup; file IO belongs here, not in the sync set_window_size command
+/// (main-thread rule).
 pub fn init(app: &AppHandle) {
-    let dock = app.state::<Dock>();
-    if let Some(seat) = crate::settings::get_value(app, "fsSeat")
+    if let Some(corner) = crate::settings::get_value(app, "dockCorner")
         .as_ref()
-        .and_then(FsSeat::from_json)
+        .and_then(Value::as_str)
+        .and_then(Corner::from_str)
     {
-        *dock.fs_seat.lock().unwrap_or_else(PoisonError::into_inner) = Some(seat);
-    }
-    if let Some(v) = crate::settings::get_value(app, "desktopReturn") {
-        if let (Some(x), Some(y)) = (
-            v.get("x").and_then(Value::as_f64),
-            v.get("y").and_then(Value::as_f64),
-        ) {
-            *dock
-                .launch_pos
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = Some((x, y));
-        }
-        if !v.is_null() {
-            crate::settings::set_value(app, "desktopReturn", Value::Null);
-        }
-    }
-}
-
-/// Presence's monitor-scoped fullscreen verdict feeds the seat context.
-/// Idempotent — presence calls it every tick, which doubles as the retry
-/// for a swap deferred mid-press.
-pub fn set_fullscreen_context(app: &AppHandle, on: bool) {
-    app.state::<Dock>().want_fs.store(on, Ordering::SeqCst);
-    sync_seat(app);
-}
-
-/// Reconcile the window to the wanted seat context (the positioning sibling
-/// of apply_visibility). Entering a fullscreen episode: remember the exact
-/// desktop position, take the remembered fullscreen seat (or the same
-/// corner against the monitor rect when none). Leaving: restore the desktop
-/// position verbatim, clamped — the resolution may have changed mid-episode.
-/// Hidden windows jump instantly (a glide nobody sees just delays the hit
-/// rect); visible ones glide. Deferred (not skipped) while a press is in
-/// flight — moving the window mid-drag would yank it out from under the
-/// hand, the conceal's exact rule.
-pub fn sync_seat(app: &AppHandle) {
-    let Some(window) = app.get_webview_window("main") else {
-        return;
-    };
-    let dock = app.state::<Dock>();
-    // One reconciler at a time — see the seat_gate field doc.
-    let _gate = dock
-        .seat_gate
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    let want = dock.want_fs.load(Ordering::SeqCst);
-    if want == dock.seated_fs.load(Ordering::SeqCst) {
-        return;
-    }
-    let visible = window.is_visible().unwrap_or(false);
-    if visible && primary_button_down() {
-        return; // defer: the next presence tick retries
-    }
-    let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
-        return;
-    };
-    let (w, h) = (size.width as i32, size.height as i32);
-    let scale = window.scale_factor().unwrap_or(1.0);
-    let margin = (MARGIN_LOGICAL * scale).round() as i32;
-
-    let (corner, target) = if want {
-        let cur_corner = dock
+        *app.state::<Dock>()
             .corner
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .unwrap_or(Corner::BottomRight);
-        *dock
-            .desktop_return
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(((pos.x, pos.y), cur_corner));
-        // Mirror it to disk (logical px) for the quit-mid-episode case:
-        // window-state would persist the FULLSCREEN position as the launch
-        // position, silently replacing a free desktop placement — init +
-        // set_window_size consume this instead.
-        crate::settings::set_value(
-            app,
-            "desktopReturn",
-            json!({ "x": pos.x as f64 / scale, "y": pos.y as f64 / scale }),
-        );
-        let Some(rect) = space_rect(&window, Space::Fullscreen) else {
-            return;
-        };
-        match *dock.fs_seat.lock().unwrap_or_else(PoisonError::into_inner) {
-            Some(s) => {
-                let seat = corner_origin(s.corner, &rect, w, h, margin);
-                // saturating: dx/dy come from a hand-editable file — a huge
-                // value must clamp on-screen below, not overflow-panic here
-                // (the float→int cast saturates, but the ADD would panic in
-                // dev builds and kill the presence thread).
-                let x = seat.0.saturating_add((s.dx * scale).round() as i32);
-                let y = seat.1.saturating_add((s.dy * scale).round() as i32);
-                (s.corner, clamp_origin((x, y), &rect, w, h))
-            }
-            None => (cur_corner, corner_origin(cur_corner, &rect, w, h, margin)),
+            .unwrap_or_else(PoisonError::into_inner) = Some(corner);
+    }
+    for key in ["fsSeat", "desktopReturn"] {
+        if crate::settings::get_value(app, key).is_some_and(|v| !v.is_null()) {
+            crate::settings::set_value(app, key, Value::Null);
         }
-    } else {
-        // Resolve the rect BEFORE taking the return seat: a monitor-info
-        // miss must leave it in place for the next tick's retry.
-        let Some(rect) = space_rect(&window, Space::Desktop) else {
-            return;
-        };
-        let Some(((rx, ry), rcorner)) = dock
-            .desktop_return
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-        else {
-            dock.seated_fs.store(false, Ordering::SeqCst);
-            return; // nothing to restore (never actually seated)
-        };
-        // The episode ended cleanly — the persisted copy has done its job.
-        crate::settings::set_value(app, "desktopReturn", Value::Null);
-        (rcorner, clamp_origin((rx, ry), &rect, w, h))
-    };
-
-    dock.seated_fs.store(want, Ordering::SeqCst);
-    // A visible episode swap glides the shell to the new seat (App.tsx FLIP),
-    // same as a drag-release corner change — open the grace window for it; a
-    // hidden jump has no visible shell (and the hit watcher skips hidden).
-    set_corner(&dock, corner, visible);
-    emit_corner(&window, corner);
-    if visible {
-        animate_to(&window, (pos.x, pos.y), target);
-    } else {
-        jump_to(&window, target.0, target.1);
     }
 }
 
 /// Size + settle the window in ONE SetWindowPos. Called once at launch with
 /// WINDOW_MAX (the window is born at that size, so this is effectively pure
-/// positioning): the window-state-restored position runs through the SAME
-/// settle rule as a drag release — near a canonical seat → re-seat (heals
-/// margin drift, DPI changes, disconnected monitors, exactly the old
-/// always-snap behavior); anywhere else → the free position survives,
-/// clamped + railed. Seeds the dock-corner event. Mode changes never call
-/// this; the window stays at WINDOW_MAX for its whole life (see the module
-/// comment).
+/// positioning) plus the launch mode's own box: the window-state-restored
+/// position runs through the SAME footprint-space settle rule as a drag
+/// release, so a free placement survives a relaunch verbatim and a position
+/// persisted on a now-disconnected monitor is pulled back on-screen by the
+/// clamp. Seeds the dock-corner event. Mode changes never call this; the
+/// window stays at WINDOW_MAX for its whole life (see the module comment).
+///
+/// `mode_width`/`mode_height` are MODE_SIZES[launch mode]. They matter because
+/// the restored rect is the WINDOW's and the widget sits at a corner inside
+/// it: with the corner seeded from settings.json (dock::init) the two together
+/// locate the visible widget exactly. Without a seeded corner (fresh install /
+/// first launch after 2026-07-21) the whole window is treated as the widget,
+/// reproducing the old behavior rather than guessing a corner and teleporting.
 #[tauri::command]
-pub fn set_window_size(window: WebviewWindow, dock: State<Dock>, width: f64, height: f64) {
+pub fn set_window_size(
+    window: WebviewWindow,
+    dock: State<Dock>,
+    width: f64,
+    height: f64,
+    mode_width: f64,
+    mode_height: f64,
+) {
     dock.epoch.fetch_add(1, Ordering::SeqCst); // cancel any in-flight glide
-    let Some(wa) = space_rect(&window, Space::Desktop) else {
+
+    // Seed the placement box so the launch settle — and any Moved that beats
+    // the frontend's first set_hit_size — measures the widget, not the window.
+    let mode_box = (mode_width, mode_height);
+    *dock
+        .mode_size
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some(mode_box);
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let w = (width * scale).round() as i32;
+    let h = (height * scale).round() as i32;
+    let margin = (MARGIN_LOGICAL * scale).round() as i32;
+    // The corner dock::init seeded IS the quit-time corner; placement_rect
+    // reads it to find the widget inside the restored window rect. None →
+    // anchored_rect's whole-window fallback, and no rails (railing the
+    // window's far edges would move the widget onto a line it isn't at).
+    let seeded = dock
+        .corner
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_some();
+    let (mw, mh) = (
+        ((mode_width * scale).round() as i32).min(w),
+        ((mode_height * scale).round() as i32).min(h),
+    );
+    // Where the VISIBLE widget is right now: inside the restored rect at the
+    // seeded corner, or — with no corner to decode it — the whole window.
+    let (fx, fy, fw, fh) = match (window.outer_position(), seeded) {
+        (Ok(p), true) => placement_rect(&window, p.x, p.y, w, h),
+        (Ok(p), false) => (p.x, p.y, w, h),
+        // No position at all: aim the widget at the default seat, resolved
+        // below against whatever monitor answers.
+        (Err(_), _) => (0, 0, mw, mh),
+    };
+    let Some(rects) = monitor_rects(&window, fx + fw / 2, fy + fh / 2) else {
         // No monitor info at all — still honor the size so the native window
         // matches the React layout; position keeps its last value.
         let _ = window.set_size(tauri::LogicalSize::new(width, height));
         return;
     };
-    let scale = window.scale_factor().unwrap_or(1.0);
-    let w = (width * scale).round() as i32;
-    let h = (height * scale).round() as i32;
-    let margin = (MARGIN_LOGICAL * scale).round() as i32;
-    // A quit mid-fullscreen-episode persisted the FULLSCREEN position as the
-    // window-state position; init stashed the true desktop seat — prefer it.
-    let launch_pos = dock
-        .launch_pos
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .take()
-        .map(|(x, y)| ((x * scale).round() as i32, (y * scale).round() as i32));
-    let restored = launch_pos
-        .map(Ok)
-        .unwrap_or_else(|| window.outer_position().map(|p| (p.x, p.y)).map_err(|_| ()));
-    let (corner, (x, y)) = match restored {
-        Ok(pos) => {
-            // hit_size isn't reported yet at launch, so footprint_rect
-            // returns the whole window and the center is the window center —
-            // right for a pure-position launch settle.
-            let (hx, hy, hw, hh) = footprint_rect(&window, pos.0, pos.1, w, h);
-            settle_target((hx + hw / 2, hy + hh / 2), pos, (w, h), &wa, scale)
+    let (corner, (x, y)) = match window.outer_position() {
+        Ok(_) => {
+            let (corner, landing) = settle_target((fx, fy), (fw, fh), &rects, scale, seeded);
+            (
+                corner,
+                window_origin(corner, landing, (w, h), (fw, fh), &rects.mon),
+            )
         }
-        Err(_) => (
-            Corner::BottomRight,
-            corner_origin(Corner::BottomRight, &wa, w, h, margin),
-        ),
+        Err(_) => {
+            let corner = Corner::BottomRight;
+            let seat = corner_origin(corner, &rects.work, mw, mh, margin);
+            (
+                corner,
+                window_origin(corner, seat, (w, h), (mw, mh), &rects.mon),
+            )
+        }
     };
     // Launch derivation glides nothing (a single sized apply_pos) — no grace.
-    set_corner(&dock, corner, false);
+    set_corner(window.app_handle(), &dock, corner, false);
     emit_corner(&window, corner);
     dock.animating.fetch_add(1, Ordering::SeqCst);
     apply_pos(&window, x, y, Some((w, h)));
     dock.animating.fetch_sub(1, Ordering::SeqCst);
 }
 
-/// The frontend reports the current mode's interactive footprint (logical
-/// px, anchored at the docked corner) on every mode change — the hit
-/// watcher makes everything outside it click-through, and the drag-release
-/// snap picks its corner from this rect's center. The full MODE_SIZES
-/// footprint (shell + gutter), not just the shell, so the visible edge ring
-/// stays grabbable for drags.
+/// The frontend reports two boxes (logical px, both anchored at the docked
+/// corner) whenever either changes:
+///
+/// - `width`/`height`: the INTERACTIVE footprint — the hit watcher makes
+///   everything outside it click-through. It is a union, swelling to cover the
+///   queue popover and going whole-window under a transient overlay.
+/// - `mode_width`/`mode_height`: the mode's own MODE_SIZES box, which every
+///   PLACEMENT decision uses. Splitting them matters: compensating a corner
+///   flip with the popover union would move the window by a distance the
+///   shell's FLIP never travels, so a drag released with the queue open would
+///   teleport by the difference.
+///
+/// Both are the full MODE_SIZES footprint (shell + gutter), not just the
+/// shell, so the visible edge ring stays grabbable for drags.
 #[tauri::command]
-pub fn set_hit_size(dock: State<Dock>, width: f64, height: f64) {
+pub fn set_hit_size(dock: State<Dock>, width: f64, height: f64, mode_width: f64, mode_height: f64) {
     *dock.hit_size.lock().unwrap_or_else(PoisonError::into_inner) = Some((width, height));
+    *dock
+        .mode_size
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some((mode_width, mode_height));
 }
 
 /// The fixed-size window's transparent gutter must not eat clicks meant for
@@ -1008,6 +1008,207 @@ pub fn dock_corner(dock: State<Dock>) -> Option<&'static str> {
         .map(Corner::as_str)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 1920×1080 primary with a 48px bottom taskbar, and a pill-sized
+    /// footprint — the shape every placement question here is really about.
+    fn screen() -> Rects {
+        Rects {
+            work: WorkArea {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1032,
+            },
+            mon: WorkArea {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            },
+        }
+    }
+    const PILL: (i32, i32) = (300, 48);
+
+    fn settle(pos: (i32, i32)) -> (Corner, (i32, i32)) {
+        settle_target(pos, PILL, &screen(), 1.0, true)
+    }
+
+    #[test]
+    fn free_drop_stands_on_both_axes() {
+        // Thien's screenshot 2: dead center, nothing near an edge.
+        assert_eq!(settle((760, 500)).1, (760, 500));
+    }
+
+    #[test]
+    fn near_left_edge_snaps_x_and_holds_y() {
+        // Thien's screenshot 1 + the sentence that defines this whole change:
+        // "align with the nearest edge... and stay at that Y level."
+        assert_eq!(settle((20, 137)).1, (12, 137));
+    }
+
+    #[test]
+    fn no_corner_magnet() {
+        // 60px off BOTH of the bottom-right seat's lines — inside the old
+        // MAGNET_PX (80), so this used to be yanked into the corner seat.
+        // Now each axis is beyond RAIL_PX, so it stands exactly as dropped.
+        let seat = (1920 - 300 - 12, 1032 - 48 - 12);
+        assert_eq!(
+            settle((seat.0 - 60, seat.1 - 60)).1,
+            (seat.0 - 60, seat.1 - 60)
+        );
+    }
+
+    #[test]
+    fn one_axis_snapping_never_drags_the_other() {
+        // Near the right edge, mid-height: X rails, Y is untouched.
+        assert_eq!(settle((1920 - 300 - 20, 500)).1, (1920 - 300 - 12, 500));
+    }
+
+    #[test]
+    fn bottom_axis_picks_the_nearer_of_two_lines() {
+        let above_taskbar = 1032 - 48 - 12; // 972
+        let flush_bottom = 1080 - 48 - 12; // 1020
+        let y_of = |y: i32| settle((400, y)).1 .1;
+        // A few px under the work-area line: still nearest THAT line, pulled
+        // back up rather than dropped onto the taskbar.
+        assert_eq!(y_of(above_taskbar + 8), above_taskbar);
+        // Dragged genuinely to the bottom: the flush line wins. This is what
+        // replaces the deleted fullscreen seat — no sensing, same rule.
+        assert_eq!(y_of(flush_bottom - 8), flush_bottom);
+        // Exactly between the two (24px each way, both at the rail boundary):
+        // deterministic, and never left hanging between them.
+        assert_eq!(y_of((above_taskbar + flush_bottom) / 2), above_taskbar);
+        // Comfortably between them is NOT reachable at RAIL_PX 24 — the two
+        // lines are 48 apart, so the whole taskbar band is magnetic. If
+        // RAIL_PX ever shrinks, this is the assertion that notices.
+        assert_ne!(y_of(996), 996);
+    }
+
+    #[test]
+    fn clamps_the_footprint_on_screen() {
+        // Flung off the top-left: the VISIBLE widget comes back, and lands on
+        // the rails it now sits within.
+        assert_eq!(settle((-500, -500)).1, (12, 12));
+        // Off the bottom-right: clamped flush to the monitor rect, which is
+        // inside RAIL_PX of the flush lines, so it tidies onto them.
+        assert_eq!(settle((5000, 5000)).1, (1920 - 300 - 12, 1080 - 48 - 12));
+    }
+
+    #[test]
+    fn corner_follows_the_footprint_center() {
+        assert_eq!(settle((12, 12)).0, Corner::TopLeft);
+        assert_eq!(settle((1600, 12)).0, Corner::TopRight);
+        assert_eq!(settle((12, 1000)).0, Corner::BottomLeft);
+        assert_eq!(settle((1600, 1000)).0, Corner::BottomRight);
+        // Just above/below the horizontal midline: the FOOTPRINT's own center
+        // decides (x 900 + 300/2 = 1050 is right of 960; y + 48/2 straddles
+        // 540) — judged by the 380×440 window's center instead, a pill
+        // dropped here would pick the opposite corner.
+        assert_eq!(settle((900, 540 - 24 - 1)).0, Corner::TopRight);
+        assert_eq!(settle((900, 540 - 24 + 1)).0, Corner::BottomRight);
+    }
+
+    #[test]
+    fn launch_settle_clamps_without_railing() {
+        // rails=false (no footprint reported yet): a free position survives
+        // verbatim, and an off-screen one is only pulled back in.
+        let win = (380, 440);
+        assert_eq!(
+            settle_target((900, 300), win, &screen(), 1.0, false).1,
+            (900, 300)
+        );
+        assert_eq!(
+            settle_target((-999, 3000), win, &screen(), 1.0, false).1,
+            (0, 1080 - 440)
+        );
+    }
+
+    #[test]
+    fn relaunch_reproduces_the_placement_it_quit_at() {
+        // window-state restores the WINDOW's rect; the widget sits at a corner
+        // inside it. With the corner seeded from settings.json the pair
+        // round-trips exactly. Re-deriving the corner from the WINDOW's center
+        // instead — what the code did before "dockCorner" was persisted —
+        // lands in the wrong quadrant across a ~200px band around each midline
+        // (the two centers sit 196px apart in pill mode) and re-seats the
+        // shell at the far end of the window: a 392px teleport per launch.
+        let win = (380, 440);
+        let rects = screen();
+        for drop in [
+            (760, 500),
+            (900, 516),
+            (900, 560),
+            (12, 137),
+            (1608, 1020),
+            (400, 700),
+        ] {
+            let (corner, landing) = settle(drop);
+            let origin = window_origin(corner, landing, win, PILL, &rects.mon);
+            let (ox, oy) = corner_offset(corner, win, PILL);
+            assert_eq!(
+                (origin.0 + ox, origin.1 + oy),
+                landing,
+                "{corner:?} from {drop:?} did not round-trip"
+            );
+            // Idempotent, so nothing creeps across repeated relaunches.
+            let again = settle_target((origin.0 + ox, origin.1 + oy), PILL, &rects, 1.0, true);
+            assert_eq!(again, (corner, landing), "second launch drifted");
+        }
+    }
+
+    #[test]
+    fn window_clamp_saves_a_short_display_from_off_screen_growth() {
+        let win = (380, 440);
+        let short = Rects {
+            work: WorkArea {
+                x: 0,
+                y: 0,
+                w: 1366,
+                h: 728,
+            },
+            mon: WorkArea {
+                x: 0,
+                y: 0,
+                w: 1366,
+                h: 768,
+            },
+        };
+        // Just below the midline of a 768-tall display: the corner is Bottom*,
+        // so the window starts 392px above the widget — off the top, and the
+        // expanded mode that FILLS the window would paint there.
+        let (corner, landing) = settle_target((600, 360), PILL, &short, 1.0, true);
+        assert_eq!(corner, Corner::BottomRight);
+        let origin = window_origin(corner, landing, win, PILL, &short.mon);
+        assert!(origin.1 >= 0, "window hangs off the top: {origin:?}");
+        // Inert on anything taller than ~832px — the offset applies untouched.
+        let (c, l) = settle((600, 560));
+        assert_eq!(
+            window_origin(c, l, win, PILL, &screen().mon),
+            (l.0, l.1 - 392)
+        );
+    }
+
+    #[test]
+    fn corner_offset_is_the_shell_seat_inside_the_window() {
+        // These numbers ARE App.tsx's SHELL_SEAT geometry (WINDOW_MAX 380×440
+        // minus MODE_SIZES.pill 300×48). The compensation only cancels the
+        // frontend's FLIP if the two agree — if sizes.ts changes, this fails.
+        let win = (380, 440);
+        assert_eq!(corner_offset(Corner::TopLeft, win, PILL), (0, 0));
+        assert_eq!(corner_offset(Corner::TopRight, win, PILL), (80, 0));
+        assert_eq!(corner_offset(Corner::BottomLeft, win, PILL), (0, 392));
+        assert_eq!(corner_offset(Corner::BottomRight, win, PILL), (80, 392));
+        // Expanded fills the window — no offset, which is why the teleport
+        // never showed in the mode Thien screenshotted.
+        assert_eq!(corner_offset(Corner::BottomRight, win, win), (0, 0));
+        // A footprint bigger than the window can't push the origin negative.
+        assert_eq!(corner_offset(Corner::BottomRight, win, (500, 600)), (0, 0));
+    }
+}
+
 /// Native drag, killing any in-flight snap first so it can't fight the hand.
 #[tauri::command]
 pub fn start_drag(window: WebviewWindow, dock: State<Dock>) {
@@ -1060,12 +1261,12 @@ pub fn on_moved(window: &Window) {
     }
 }
 
-/// Tray recovery: show and re-dock to the bottom-right of the current
-/// monitor. Launch settling already heals disconnected-monitor positions;
-/// this is the manual belt-and-braces path. Context-aware: during a
-/// fullscreen episode it homes to the MONITOR rect's bottom-right and
-/// forgets the remembered fullscreen seat (reset means "back to defaults"
-/// for whichever seat is live); the desktop return position is untouched.
+/// Tray recovery: show and re-dock the widget to the bottom-right of the
+/// current monitor's WORK AREA — the familiar seat, above the taskbar. The
+/// launch clamp already heals disconnected-monitor positions; this is the
+/// manual belt-and-braces path, and with the corner magnet gone it is the
+/// ONLY way a position becomes a canonical corner seat without being dragged
+/// there.
 pub fn reset_position(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
@@ -1079,31 +1280,26 @@ pub fn reset_position(app: &AppHandle) {
     }
     crate::apply_visibility(app);
     let dock = app.state::<Dock>();
-    let space = if dock.seated_fs.load(Ordering::SeqCst) {
-        *dock.fs_seat.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        crate::settings::set_value(app, "fsSeat", Value::Null);
-        Space::Fullscreen
-    } else {
-        Space::Desktop
-    };
-    // A visible re-dock glides to bottom-right (animate_to below) — if that
-    // flips the corner, the shell FLIPs with it, so open the grace window.
-    set_corner(&dock, Corner::BottomRight, true);
-    emit_corner(&window, Corner::BottomRight);
-    let Some(wa) = space_rect(&window, space) else {
-        return;
-    };
     let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
         return;
     };
+    let (w, h) = (size.width as i32, size.height as i32);
+    // Read the widget's box BEFORE re-cornering — the SIZE is corner-blind but
+    // the position it reports is not, and the center is what picks the monitor
+    // to home on (the one the widget is on, not the one the window overlaps).
+    let (fx, fy, fw, fh) = placement_rect(&window, pos.x, pos.y, w, h);
+    let Some(rects) = monitor_rects(&window, fx + fw / 2, fy + fh / 2) else {
+        return;
+    };
+    // A visible re-dock glides to bottom-right (animate_to below) — if that
+    // flips the corner, the shell FLIPs with it, so open the grace window.
+    set_corner(app, &dock, Corner::BottomRight, true);
+    emit_corner(&window, Corner::BottomRight);
     let scale = window.scale_factor().unwrap_or(1.0);
     let margin = (MARGIN_LOGICAL * scale).round() as i32;
-    let target = corner_origin(
-        Corner::BottomRight,
-        &wa,
-        size.width as i32,
-        size.height as i32,
-        margin,
-    );
+    // Seat the VISIBLE widget, then derive the window origin from it — the
+    // same footprint-space rule as a drag release.
+    let seat = corner_origin(Corner::BottomRight, &rects.work, fw, fh, margin);
+    let target = window_origin(Corner::BottomRight, seat, (w, h), (fw, fh), &rects.mon);
     animate_to(&window, (pos.x, pos.y), target);
 }

@@ -1,13 +1,14 @@
 /*
  * Presence engine: senses ONE thing — settled fullscreen foreground
- * content — with two consumers acting on that same fact. The courtesy
- * conceal: settled fullscreen hides the native window via lib.rs's
- * VisIntent/apply_visibility; the episode ending restores it exactly as it
- * was (manual intent always wins; the tray "Hide on fullscreen" switch
- * stops the action, sensing continues). The fullscreen seat context: a
- * separately-settled, WIDGET-MONITOR-scoped verdict feeds
- * dock::set_fullscreen_context so the widget re-seats against the monitor
- * rect for the episode (see dock.rs's module doc). Input-idleness sensing
+ * content — and has ONE consumer, the courtesy conceal: settled fullscreen
+ * hides the native window via lib.rs's VisIntent/apply_visibility; the
+ * episode ending restores it exactly as it was (manual intent always wins;
+ * the tray "Hide on fullscreen" switch stops the action, sensing continues).
+ * Presence NEVER moves the window. The second consumer — a separately
+ * settled, widget-monitor-scoped verdict that re-seated the widget against
+ * the monitor rect for the episode — was removed 2026-07-21 along with the
+ * corner magnet: placement is now free and nothing repositions Palette in
+ * response to another app (see dock.rs's module doc). Input-idleness sensing
  * and the behaviors that rode it were removed 2026-07-11 — see CLAUDE.md's
  * Presence paragraph.
  * docs/presence-signal-matrix.md is the source of truth for what Windows
@@ -305,8 +306,8 @@ fn settle(raw: bool, settled: &mut bool, credit_ms: &mut u64) {
 
 /// Spawn the presence watcher thread. Senses every second, settles the
 /// fullscreen signal through enter/exit hysteresis, runs the courtesy
-/// conceal, feeds dock.rs's fullscreen seat context, and emits "presence"
-/// diff-suppressed (plus "presence-debug" raw while the debug flag is on).
+/// conceal, and emits "presence" diff-suppressed (plus "presence-debug" raw
+/// while the debug flag is on).
 pub fn spawn(app: AppHandle) {
     std::thread::Builder::new()
         .name("presence-watch".into())
@@ -314,13 +315,6 @@ pub fn spawn(app: AppHandle) {
             let own_pid = std::process::id();
             let mut fs_settled = false;
             let mut disagree_ms: u64 = 0;
-            // The seat-swap signal, settled separately: fullscreen owns the
-            // WIDGET's monitor (rect method only — the global QUNS states can't
-            // say WHICH monitor, and a game on the other monitor must not
-            // re-seat the widget over a still-visible taskbar). The conceal
-            // keeps the broader OR'd verdict above.
-            let mut fs_mon_settled = false;
-            let mut mon_disagree_ms: u64 = 0;
             loop {
                 let widget_hwnd = app
                     .get_webview_window("main")
@@ -336,7 +330,6 @@ pub fn spawn(app: AppHandle) {
                     // settled state early — the full window restarts (conservative
                     // in both directions; quick-review catch, 2026-07-09).
                     disagree_ms = 0;
-                    mon_disagree_ms = 0;
                     std::thread::sleep(Duration::from_millis(PRESENCE_POLL_MS));
                     continue;
                 };
@@ -346,12 +339,8 @@ pub fn spawn(app: AppHandle) {
                 if sim {
                     dbg.fs_raw = true;
                 }
-                // The simulation drives the monitor-scoped verdict too, so the
-                // dev tray item exercises the seat swap alongside the conceal.
-                let fs_mon_raw = sim || (dbg.rect_verdict == "fullscreen" && dbg.on_widget_monitor);
 
                 settle(dbg.fs_raw, &mut fs_settled, &mut disagree_ms);
-                settle(fs_mon_raw, &mut fs_mon_settled, &mut mon_disagree_ms);
 
                 // The courtesy conceal, the engine's visibility action: settled
                 // fullscreen (companion on) hides the native window; episode end
@@ -379,17 +368,6 @@ pub fn spawn(app: AppHandle) {
                     // immediate — there's nothing to mis-show on the way out.
                     restore_pending = true;
                 }
-
-                // The seat context follows the fullscreen FACT, independent of
-                // the conceal switch: dock.rs re-seats against the monitor rect
-                // while fullscreen owns the widget's monitor and restores the
-                // exact desktop seat after. Runs after the conceal decision
-                // (an episode-start hide makes the swap an invisible jump) and
-                // before restore_pending's show (an episode-end restore shows
-                // at the desktop seat, never flashing the fullscreen one).
-                // Every tick — set_fullscreen_context is idempotent and doubles
-                // as the retry for a swap deferred mid-press.
-                crate::dock::set_fullscreen_context(&app, fs_mon_settled);
 
                 let state = PresenceState {
                     fullscreen: fs_settled,

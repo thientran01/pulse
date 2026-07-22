@@ -758,16 +758,27 @@ export const commands = {
   /** Dock the native window at a logical size (one corner-pinned
    * SetWindowPos — Rust owns all positioning, see src-tauri/src/dock.rs).
    * Called ONCE at launch with WINDOW_MAX; the window never resizes after
-   * that — mode changes are the shell's CSS glide. */
-  setWindowSize(width: number, height: number): void {
-    if (IN_TAURI) void invoke("set_window_size", { width, height });
+   * that — mode changes are the shell's CSS glide. `mode*` is
+   * MODE_SIZES[launch mode]: the restored rect is the WINDOW's, and Rust
+   * needs the widget's own box to find it inside that rect. */
+  setWindowSize(width: number, height: number, modeWidth: number, modeHeight: number): void {
+    if (IN_TAURI)
+      void invoke("set_window_size", {
+        width,
+        height,
+        modeWidth,
+        modeHeight,
+      });
   },
-  /** Report the current mode's interactive footprint (logical px, anchored
-   * at the docked corner). The Rust cursor watcher makes everything outside
-   * it click-through — the fixed-size window's gutter must not eat clicks
-   * meant for what's beneath. */
-  setHitSize(width: number, height: number): void {
-    if (IN_TAURI) void invoke("set_hit_size", { width, height });
+  /** Report both corner-anchored boxes (logical px). `width`/`height` is the
+   * INTERACTIVE footprint — the Rust cursor watcher makes everything outside
+   * it click-through, so it unions the queue popover and any transient
+   * overlay. `mode*` is the mode's own MODE_SIZES box, which is what
+   * PLACEMENT uses: compensating a dock-corner flip with the popover union
+   * would move the window by a distance the shell never travels. */
+  setHitSize(width: number, height: number, modeWidth: number, modeHeight: number): void {
+    if (IN_TAURI)
+      void invoke("set_hit_size", { width, height, modeWidth, modeHeight });
   },
   /** Hide the widget (the right-click menu's "Hide Palette") — a dedicated
    * hide through the intent path, not a toggle. */

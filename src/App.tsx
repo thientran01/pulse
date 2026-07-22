@@ -1371,9 +1371,15 @@ function App() {
   // One-time launch dock: the window is born at WINDOW_MAX (tauri.conf.json
   // matches, so this never resizes anything) — it positions the window in
   // its corner and seeds the dock-corner event. The window is never touched
-  // again; every mode change below is pure CSS.
+  // again; every mode change below is pure CSS. The launch mode's box goes
+  // with it: window-state restores the WINDOW's rect and the widget sits at a
+  // corner inside it, so Rust needs the box to locate the widget (the seeded
+  // corner is the other half). `mode` is the launch mode here — this effect
+  // runs once, before any mode change.
   useEffect(() => {
-    commands.setWindowSize(WINDOW_MAX[0], WINDOW_MAX[1]);
+    const [mw, mh] = MODE_SIZES[mode];
+    commands.setWindowSize(WINDOW_MAX[0], WINDOW_MAX[1], mw, mh);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // JS-owned hover: mousemove arms it, mouseleave clears it, and the Rust
@@ -1482,13 +1488,16 @@ function App() {
     const uw = Math.max(w1, cw);
     const uh = Math.max(h1, ch);
     hitCommanded.current = [uw, uh];
-    commands.setHitSize(uw, uh);
+    // The mode box rides along unchanged through every union/deferred-shrink
+    // step below: Rust places the widget by THAT box, never the union (a
+    // corner flip compensated with the popover's extent would teleport).
+    commands.setHitSize(uw, uh, mw, mh);
     let timer: number | undefined;
     if (uw !== w1 || uh !== h1) {
       timer = window.setTimeout(
         () => {
           hitCommanded.current = [w1, h1];
-          commands.setHitSize(w1, h1);
+          commands.setHitSize(w1, h1, mw, mh);
         },
         reducedMotion || firstMeasure ? 0 : DUR[3] + 80,
       );

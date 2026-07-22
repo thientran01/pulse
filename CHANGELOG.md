@@ -8,6 +8,16 @@ Installed apps self-update at launch, so most users are always on the latest rel
 
 ## [Unreleased]
 
+### Changed
+
+- Placement is free: drag the widget anywhere on screen and it stays exactly where you dropped it. Drop it near an edge and only that axis tidies to a 12px margin — the other keeps its position. The corner magnet is gone.
+- The bottom edge offers two snap lines — above the taskbar, or flush with the screen — whichever you're nearer.
+- Palette no longer moves itself when another app goes fullscreen. The widget stays where you put it, and the reachable area is the same everywhere. "Hide on fullscreen" is unaffected.
+
+### Fixed
+
+- Pill and card modes could throw the widget up to 392px away from where it was released when a drag crossed the middle of the screen.
+
 ## [0.7.3] - 2026-07-19
 
 The 1.0-readiness release: the feature arc since 0.7.2 plus a full audit pass — robustness, security, and accessibility hardening across the backend and every window.

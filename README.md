@@ -12,7 +12,7 @@ It reads and controls any player that speaks the Windows system media API (GSMTC
 - **Album-art adaptive accent theming** — the cover's palette drives progress fills and accents while chrome stays neutral
 - **The audio-reactive "living separator"** — process-scoped WASAPI loopback + FFT drives capsules that bloom to the song (scoped to the playing app, so it rides the music, not your whole device mix)
 - **±10s seek** where the player supports it (Spotify natively; see player support below)
-- **Four-corner docking** with free placement — drag anywhere, a corner magnet snaps it home, and it stays out of the way
+- **Free placement with edge snapping** — drag it anywhere on screen and it stays; drop it near an edge and that axis tidies to a 12px margin, leaving the other alone
 - **Fullscreen focus-mode takeover** — a room-scale now-playing view with lyrics or the visualizer
 - **Search** (`Ctrl+Alt+S`) — search and play, queue, or resurface tracks from history
 - **Managed up-next queue + play history** — a Palette-kept queue and a full log of everything it displayed

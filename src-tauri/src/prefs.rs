@@ -177,9 +177,9 @@ pub async fn prefs_seed(app: AppHandle) -> PrefsSeed {
 /// Keys the generic persist seam (`set_setting`) is allowed to write — the
 /// inert settings the prefs UI legitimately touches. DELIBERATELY excludes the
 /// security-relevant / side-effecting keys ("companion" fullscreen conceal,
-/// "hotkeys", "fsSeat", autostart): those have their own typed setters that
-/// keep the tray mirror and geometry in sync, and the generic seam must never
-/// be a back door around them.
+/// "hotkeys", autostart): those have their own typed setters that keep the
+/// tray mirror and geometry in sync, and the generic seam must never be a
+/// back door around them.
 const SETTABLE_KEYS: [&str; 4] = [
     "reactive_separator",
     "launch_mode",

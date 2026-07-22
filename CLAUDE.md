@@ -22,32 +22,42 @@ src-tauri/src/
                 diff-suppressed and unchanged heartbeat ticks skip the snapshot, so a
                 payload arrives only when the player's data actually moved
                 (splits into media_core/ + adapters/ when M5 adds Spotify Web API)
-  dock.rs       corner-anchored docking with a FREE OFFSET (the corner is a
-                gravity well, not a cage): drag release derives the nearest
-                corner from the VISIBLE footprint center — the corner stays
-                the anchor IDENTITY (shell seat, hit-rect anchor, popover
-                direction all key on it and all anchor to the window rect,
-                so they work at any position) — then a drop within MAGNET_PX
-                (80) of the canonical seat glides home, within RAIL_PX (24)
-                of a seat coordinate settles that axis onto the 12px rail,
-                anywhere else stands clamped on-screen (Moved-debounce +
+  dock.rs       FREE PLACEMENT with edge snapping — the widget goes anywhere
+                and stays dropped. There is NO corner magnet (removed
+                2026-07-21 on Thien's live verdict: near-corner drops were
+                pulled INTO the corner; "I just want it to align with the
+                nearest edge... and stay at that Y level") and NO fullscreen
+                special case — Palette never repositions itself in response to
+                another app. On release each axis settles INDEPENDENTLY:
+                within RAIL_PX (24) of an edge line it snaps to that line,
+                otherwise it keeps exactly the coordinate it was dropped at;
+                the visible widget is clamped on-screen (Moved-debounce +
                 GetAsyncKeyState — no drag-end event exists; glide stays
-                native EASE.out — pure moves never shake). Launch runs the
-                SAME settle rule on the window-state-restored position: the
-                magnet radius IS the snapped-vs-free classifier (near a seat
-                → re-seat/heal, else the free spot survives; nothing new
-                persisted). The FULLSCREEN SEAT: while presence's
-                monitor-scoped verdict says fullscreen owns the widget's
-                monitor, sync_seat (the positioning sibling of
-                apply_visibility) re-seats against the FULL MONITOR RECT
-                (the taskbar is covered — work-area seats float a
-                taskbar-height too high over game HUDs) using a separately
-                remembered seat (mid-episode drags update it; persisted
-                corner-relative as settings.json "fsSeat"; default = same
-                corner vs monitor rect); episode end restores the exact
-                desktop position — the conceal's episode/restore grammar,
-                deferred mid-press the same way, hidden swaps jump instantly
-                and apply_visibility syncs the seat before every show. The
+                native EASE.out — pure moves never shake). Edge lines per
+                axis = the 12px inset of BOTH the work area and the full
+                monitor rect, nearest within RAIL_PX wins: left/right/top
+                coincide, the bottom offers "above the taskbar" and "flush
+                with the screen" ~a-taskbar apart — and that second line is
+                what RETIRED the fullscreen seat (it already exists on the
+                desktop, so a near-bottom drop over a game lands flush with
+                no sensing at all). Launch runs the SAME rule on the
+                window-state-restored position (rails only once the frontend
+                has reported a footprint), so a free spot survives verbatim
+                and the clamp alone heals a disconnected monitor. The settle
+                runs in FOOTPRINT coordinates and the window origin is
+                DERIVED last (window = footprint − corner_offset): the shell
+                seats at the docked corner INSIDE the fixed window, so
+                placing the window instead let a corner flip re-seat the
+                visible widget by WINDOW_MAX − MODE_SIZE across a stationary
+                window (80×392px in pill — crossing the screen midline threw
+                it most of a screen height; invisible in expanded, which
+                fills the window). The derivation absorbs the flip, at the
+                cost that the compensating native glide and the frontend's
+                FLIP must CANCEL (same 200ms/EASE.out) — a skew there shows
+                as a release wobble; the fallbacks are EASE.inOut for
+                compensated flips, then decoupling the corner from placement.
+                The window may hang off-screen as a result (transparent +
+                click-through out there); only the footprint is clamped. The
                 window NEVER RESIZES after launch: born at WINDOW_MAX
                 (tauri.conf = MODE_SIZES.expanded, keep in sync); every mode
                 change is the shell's 200ms EASE.inOut CSS glide inside it.
@@ -57,15 +67,34 @@ src-tauri/src/
                 blinks (measured PR #51). The oversized window's gutter is
                 kept from eating clicks by spawn_hit_watcher: cursor-polled
                 whole-window click-through (set_ignore_cursor_events)
-                gated on the frontend-reported hit rect (set_hit_size, the mode's
-                footprint at the docked corner). A corner CHANGE glides the shell
-                to its new seat (App.tsx FLIP translate, EASE.out, riding the
-                native glide; a bare seat flip teleports the widget across the
-                fixed window), and the whole window stays interactive for that
-                glide (HIT_GRACE_MS) since no corner-anchored hit rect is honest
+                gated on the frontend-reported hit rect (set_hit_size, which
+                reports TWO corner-anchored boxes: the interactive union — it
+                swells for the queue popover and goes whole-window under a
+                transient overlay — and the mode's own MODE_SIZES box, which is
+                what every PLACEMENT decision uses; compensating a corner flip
+                with the union would move the window by a distance the shell's
+                FLIP never travels). The corner is still DERIVED on
+                every settle (from the footprint's center) and is still the anchor
+                IDENTITY — shell seat, hit-rect anchor, popover direction, mode-glide
+                growth all key on it and all anchor to the window rect, so they work
+                at any position; it just no longer PULLS. A corner CHANGE glides the
+                shell to its new seat (App.tsx FLIP translate, EASE.out, riding the
+                native glide — which now runs the compensating distance the other
+                way), and the whole window stays interactive for that glide
+                (HIT_GRACE_MS) since no corner-anchored hit rect is honest
                 mid-travel. Docked corner is pushed to the
-                webview ("dock-corner" event + dock_corner seed command); corner
-                derived from the window-state-restored position, never stored
+                webview ("dock-corner" event + dock_corner seed command) and,
+                since 2026-07-21, PERSISTED (settings.json "dockCorner"):
+                window-state restores the WINDOW's rect and the widget sits at
+                one of four corners inside it, which the rect alone cannot say
+                — re-deriving it from the window's center puts it in the wrong
+                quadrant across a ~200px band around each midline (the two
+                centers sit ~196px apart in pill mode) and re-seats the shell
+                at the far end of the window, i.e. a 392px teleport EVERY
+                launch. The corner is the decoder ring; absent (fresh install)
+                the whole window is treated as the widget, the pre-2026-07-21
+                behavior. reset_position (tray) is the ONLY way a position
+                becomes a canonical corner seat without being dragged there
   lyrics.rs     LRCLIB get→search fallback, disk cache (bounded, app-data) + session
                 miss set; candidate picking prefers ORIGINAL-SCRIPT synced entries
                 (hangul/CJK/kana) over romanized uploads — a Latin-only exact hit
@@ -386,7 +415,7 @@ src/icons/      morphing icon system (benji.org/morphing-icons-with-claude, gene
 
 Design rule: chrome stays neutral (house semantic tokens); the album-art palette is the **accent layer only** — progress fills, the **living separator** (src/Waveform.tsx — a colorless muted middot that blooms into Apple-style accent capsules while music plays and settles back on pause; the ONLY audio-reactive surface — one living instance per view, riding the TITLE line everywhere (the capsules are a now-playing pulse — they belong to the song), sized to its container (pill: `sm` inline between title·artist, where a track change while playing runs the **announcement** — the ladder collapses to the lone dot with the old song's color draining at the bottom, re-multiplies gray on the bloom cadence, and ignites LAST (in the incoming album's accent when the palette has resolved; AM art can lag ~10s, and the standard retint sweep recolors late arrivals); the keyed title/artist fade in up front (`.title-in`, mount-gated so a mode switch into the pill never replays it; `__mockNext()` drives it from console in preview) — separator vocabulary responding to a content event, not a new ambient license; card + the expanded lyrics/queue header (one shared, fixed header across those two peer layers — gated to ONE mounted instance per state so the album view's lg hero is the only reactive surface there): `md` trailing the title, bars-only while playing, 10px gap = ml-1 over the built-in mx-1.5, with the artist/album lines on a static `SeparatorDot` — an md separator overpowered the 12px line, 2026-07-10; expanded big-art: standalone `lg` hero, nine capsules, constant footprint so the art never moves, metadata line on a static `SeparatorDot`); supersedes the art-halo direction and the shell glow blessed 2026-07-06), and the current-lyric **marker** (the lyric line's text stays fg — extracted accents only guarantee 3:1, below the 4.5:1 text floor), plus the 11a queue feedback (the newly-queued row flash `accent/15` and the drop-zone glow `border-accent/55 bg-accent/5` — transient content feedback, handoff-licensed 2026-07-10, NOT a new ambient or chrome license). No glow anywhere: the card shell shadow is neutral black and non-reactive (lift only), the art carries no shadow. The art never moves; nothing moves *ambiently* except the separator's bars and the resting pulse (the no-session breathing dot) — interactive icon glyphs may morph in response to input (press, mode change), per src/icons/. Accent never colors text or chrome surfaces. Motion uses EASE/DUR tokens — `/emil-pass` binds to them. Transitions earn continuity by content identity: arrival choreography (the expanded view's lyric cascade) is reserved for content the user actually waited on; on a track change the outgoing view exits fast and plain — stale art/lyrics never get choreographed continuity, and chrome (transport/progress/mode cluster) holds still by living outside the swap.
 
-**Presence (the courtesy layer):** the widget senses ONE thing — settled fullscreen foreground content (src-tauri/src/presence.rs) — and takes ONE action: the courtesy conceal. Fullscreen content on the widget's monitor (rect-vs-monitor, OR'd with SHQueryUserNotificationState's GLOBAL D3D/presentation states; hysteresis 2s in / 1s out) hides the native window; the episode ending restores it exactly as it was. Visibility is intent-composed (`VisIntent` in lib.rs) — a manual hide is sticky across episodes, a manual show (hotkey/tray/reset/relaunch) snoozes the conceal for the current episode, and **every show/hide flows through `apply_visibility`, never raw hide()/show()** (grep rule). The tray "Hide on fullscreen" check item (id/settings key still `companion`) is the persisted switch for the action (sensing continues). The resting pulse (the no-session breathing dot, `.resting-pulse`) stays — it reacts to the MUSIC being absent, not to the user. **The idle-driven behaviors (P3 ambient AFK grow, P4 working quiet) were REMOVED 2026-07-11 after two weeks of soak:** behaviors that guess at attention from idle timers (away thresholds, input duty) fought manual intent hard enough to need latches on latches; the conceal acts on a fact and never misfired. Do not re-propose idle-driven mode changes — PRs #57–#59 hold the machinery and the lessons if this is ever revisited. Presence has exactly TWO consumers, both acting on the same fullscreen fact: the conceal (visibility) and dock.rs's fullscreen seat context (a monitor-scoped settled verdict → sync_seat re-seats against the monitor rect for the episode, restores the exact desktop position after — see the dock.rs entry). Presence never resizes the native window, never moves it except through sync_seat's episode seat swap, never touches accent or color, and manual input always wins. docs/presence-signal-matrix.md is the source of truth for what Windows actually reports — check it before trusting a detection path.
+**Presence (the courtesy layer):** the widget senses ONE thing — settled fullscreen foreground content (src-tauri/src/presence.rs) — and takes ONE action: the courtesy conceal. Fullscreen content on the widget's monitor (rect-vs-monitor, OR'd with SHQueryUserNotificationState's GLOBAL D3D/presentation states; hysteresis 2s in / 1s out) hides the native window; the episode ending restores it exactly as it was. Visibility is intent-composed (`VisIntent` in lib.rs) — a manual hide is sticky across episodes, a manual show (hotkey/tray/reset/relaunch) snoozes the conceal for the current episode, and **every show/hide flows through `apply_visibility`, never raw hide()/show()** (grep rule). The tray "Hide on fullscreen" check item (id/settings key still `companion`) is the persisted switch for the action (sensing continues). The resting pulse (the no-session breathing dot, `.resting-pulse`) stays — it reacts to the MUSIC being absent, not to the user. **The idle-driven behaviors (P3 ambient AFK grow, P4 working quiet) were REMOVED 2026-07-11 after two weeks of soak:** behaviors that guess at attention from idle timers (away thresholds, input duty) fought manual intent hard enough to need latches on latches; the conceal acts on a fact and never misfired. Do not re-propose idle-driven mode changes — PRs #57–#59 hold the machinery and the lessons if this is ever revisited. Presence has exactly ONE consumer: the conceal. **The second one — dock.rs's fullscreen seat context (a monitor-scoped verdict that re-seated the widget against the monitor rect for the episode) — was REMOVED 2026-07-21** alongside the corner magnet: placement is free now, so the seat it was compensating for doesn't exist, and the bottom edge already offers a flush-with-the-screen line on the desktop. **Presence NEVER moves the native window** (that is now a grep rule too), never resizes it, never touches accent or color, and manual input always wins. docs/presence-signal-matrix.md is the source of truth for what Windows actually reports — check it before trusting a detection path.
 
 
 ## Global hotkeys (M1 defaults, constants in src-tauri/src/lib.rs)

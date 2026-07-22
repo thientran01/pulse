@@ -27,8 +27,12 @@ const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement)
 // mode but expanded and clicks land on the desktop. Widen the rect to the
 // full window BEFORE the fallback needs clicks. Fire-and-forget (setHitSize
 // is already void-invoke; a no-op in the browser mock); other windows are
-// fully interactive and keep the no-op default.
-const widenHitToWindow = () => commands.setHitSize(WINDOW_MAX[0], WINDOW_MAX[1]);
+// fully interactive and keep the no-op default. The PLACEMENT box is widened
+// with it: after a render crash there is no App to report a mode, and a stale
+// mode box would have Rust compensate a corner flip for a shell that no longer
+// glides — with both full-window the two agree and the offset is zero.
+const widenHitToWindow = () =>
+  commands.setHitSize(WINDOW_MAX[0], WINDOW_MAX[1], WINDOW_MAX[0], WINDOW_MAX[1]);
 
 // Window routing: each webview window carries its identity in the builder
 // URL's query (?window=search — see src-tauri/src/search.rs), and the same

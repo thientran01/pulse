@@ -729,11 +729,6 @@ pub(crate) fn apply_visibility(app: &AppHandle) {
     // the worst failure class here (quick-review catch, 2026-07-09).
     let is = win.is_visible().unwrap_or(!want);
     if want && !is {
-        // Reconcile the seat context first: a show landing between presence
-        // ticks (hotkey snooze, tray) must never flash at the wrong seat.
-        // The hidden-window swap is an instant jump, and sync_seat never
-        // calls back into apply_visibility.
-        dock::sync_seat(app);
         let _ = win.show();
         // The hit watcher parks while hidden — wake it so click-through is
         // reconciled to the cursor before the first click, not up to a poll
@@ -1436,8 +1431,8 @@ pub fn run() {
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(move |app, event| match event.id.as_ref() {
-                    // toggle/reset/companion reach apply_visibility → emit_now
-                    // (GSMTC) and sync_seat; on_menu_event runs on the main
+                    // toggle/reset/companion reach apply_visibility → emit_now,
+                    // whose GSMTC .get() blocks; on_menu_event runs on the main
                     // thread, so run them OFF it (see defer_main_action) — this
                     // is what kept the tray from freezing the pump.
                     "toggle" => defer_main_action(app, toggle_widget),
@@ -1506,7 +1501,8 @@ pub fn run() {
             history::init(app.handle());
             // Managed up-next: restore the persisted list + fed marker.
             upnext::init(app.handle());
-            // Docking: restore the persisted fullscreen seat.
+            // Docking: seed the persisted corner (the decoder ring for the
+            // window-state-restored rect) + retire the dead seat keys.
             dock::init(app.handle());
 
             // Global hotkeys — resolve persisted overrides and register the
