@@ -71,11 +71,41 @@ Consequences:
   380×440 box was what had to fit.
 - Rails snap the edge the user is actually aiming at.
 
-Launch keeps working unchanged: `hit_size` is `None` before the frontend's first
-report, so the footprint *is* the whole window and the math degenerates to the
-old window-space behavior (including the disconnected-monitor heal, which is now
-purely the clamp — `MAGNET_PX`'s second job as the snapped-vs-free classifier
-disappears with it).
+The disconnected-monitor heal is now purely the clamp — `MAGNET_PX`'s second job
+as the snapped-vs-free classifier disappears with it.
+
+### The corner has to be persisted
+
+Deriving the window origin from the corner means the *inverse* is needed at
+launch, and it isn't recoverable: window-state restores the WINDOW's rect, the
+widget sits at one of four corners inside it, and the rect alone cannot say
+which. Re-deriving the corner from the window's center puts it in the wrong
+quadrant across a ~200px band around each midline — the two centers sit ~196px
+apart in pill mode — and the shell then seats at the far end of the window: a
+392px jump on **every launch**, with autostart on.
+
+So `settings.json` gains **`"dockCorner"`**, written whenever the corner changes
+(off-thread — `set_corner` is reachable from the main thread via the sync
+`set_window_size` command). `set_window_size` also takes the launch mode's box,
+and the two together locate the widget exactly. No seeded corner (fresh install,
+or the first launch after this change) falls back to treating the whole window as
+the widget — the pre-change behavior — rather than guessing and teleporting on the
+upgrade; rails are skipped in that one case, since railing the window's far edges
+would move the widget onto a line it isn't at.
+
+This contradicts the old "corner derived, never stored" rule. That rule held only
+because the window rect *was* the placement; once the widget's position and the
+window's diverge, the corner is the missing bit and storing it is the honest fix.
+
+### Placement box ≠ interactive box
+
+`set_hit_size`'s rect is a UNION: it swells to cover the queue popover and goes
+whole-window under a transient overlay. That is right for click-through and wrong
+for placement — compensating a corner flip with it moves the window by a distance
+the shell's FLIP never travels, so a drag released with the queue open teleports
+by the difference. The frontend therefore reports **two** corner-anchored boxes:
+the interactive union, and the mode's own `MODE_SIZES` box. `footprint_rect`
+feeds the click-through gate; `placement_rect` feeds every placement decision.
 
 ## Deletions
 
@@ -93,10 +123,16 @@ entirely:
 | the `sync_seat` call in `apply_visibility` | `lib.rs` |
 | `fs_mon_raw` / `fs_mon_settled` / `mon_disagree_ms` (the monitor-scoped verdict — its only consumer was the seat) | `presence.rs` |
 
-`dock::init` survives, reduced to a one-time cleanup that nulls the two dead
-settings keys. `reset_position` (tray) survives as the escape hatch and now homes
-the footprint to the work-area bottom-right. Presence keeps its one action, the
-courtesy conceal, and stops touching position.
+`dock::init` survives: it seeds `"dockCorner"` and nulls the two dead keys.
+`reset_position` (tray) survives as the escape hatch and now homes the footprint
+to the work-area bottom-right. Presence keeps its one action, the courtesy
+conceal, and stops touching position.
+
+**Accepted upgrade cost:** a 0.7.3 install that quit *during* a fullscreen
+episode has the in-game position persisted as its window rect, and the
+`desktopReturn` consumer that used to correct for it is gone. That one launch
+lands at the in-game spot; one drag fixes it permanently. Not worth keeping the
+machinery alive for.
 
 ## Risk: the compensated corner flip
 
@@ -121,11 +157,15 @@ Mitigation ladder if it wobbles live, cheapest first:
 
 ## Verification
 
-**Unit** (`settle_target` is pure — new `#[cfg(test)]` module in `dock.rs`):
-free drop stands on both axes; near-left snaps X and leaves Y untouched
-(Thien's screenshot 1); the bottom axis picks the nearer of the two lines; a
-drop past the screen edge clamps the footprint fully on-screen; corner
-derivation follows the footprint center, not the window center.
+**Unit** (the settle math is pure — new `#[cfg(test)]` module in `dock.rs`, 9
+tests): free drop stands on both axes; near-left snaps X and leaves Y untouched
+(Thien's screenshot 1); no corner magnet at 60px off both seat lines; the bottom
+axis picks the nearer of the two lines; a drop past the screen edge clamps the
+footprint fully on-screen; corner derivation follows the footprint center, not
+the window center; `corner_offset` equals `App.tsx`'s `SHELL_SEAT` geometry for
+every corner and mode (the cross-language invariant the compensation rests on);
+the quit→relaunch round-trip reproduces the exact placement and is idempotent;
+the window clamp saves a short display and is inert above ~832px.
 
 **Static:** `cargo check`, `cargo clippy`, `tsc --noEmit`, `npm run build`.
 
@@ -140,5 +180,9 @@ historically):
 3. Drop near each edge → that axis tidies to 12px, the other axis holds.
 4. Drop low over the taskbar → stands flush, does not get pulled up.
 5. Alt-tab into a fullscreen game → the widget does not move at all.
-6. Quit and relaunch → position survives; queue popover still opens away from
-   the nearest edge.
+6. Quit and relaunch **in pill mode, parked near the middle of the screen** →
+   comes back in the same spot. *(the persisted-corner test — the one the
+   review found, and the one that fires daily under autostart)*
+7. Open the queue popover, drag across a midline, release → no teleport.
+8. Queue popover still opens away from the nearest edge; expanding pill →
+   expanded near a screen edge still grows inward and stays on-screen.
