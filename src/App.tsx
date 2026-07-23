@@ -897,17 +897,26 @@ function ExpandedView({
   const slideIn = { duration: reducedMotion ? 0 : DUR[3] / 1000, ease: slideEase };
   const slideOut = { duration: reducedMotion ? 0 : DUR[2] / 1000, ease: slideEase };
   // "still" mounts without theater — the earned cascade owns that entrance.
+  // Exits carry pointerEvents none (the PR #48 inert-exiting rule): the old
+  // panel's click-to-seek lines must not eat a click meant for the new track.
   const contentSlide = {
     still: { opacity: 1, x: 0 },
     enter: (dx: number) => ({ opacity: 0, x: dx }),
     center: { opacity: 1, x: 0 },
-    exit: (dx: number) => ({ opacity: 0, x: -dx, transition: slideOut }),
+    exit: (dx: number) => ({
+      opacity: 0,
+      x: -dx,
+      pointerEvents: "none" as const,
+      transition: slideOut,
+    }),
   };
   // The album block additionally lifts its exiting copy OUT OF FLOW (absolute
   // in the relative wrapper below) so the incoming block takes the seat
   // without the column stacking two covers for the exit beat.
   const albumSlide = {
     ...contentSlide,
+    // Plus the out-of-flow lift, so the incoming block takes the seat
+    // without the column stacking two covers for the exit beat.
     exit: (dx: number) => ({
       opacity: 0,
       x: -dx,
