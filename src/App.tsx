@@ -673,9 +673,11 @@ function PillTime({ np }: { np: NowPlaying }) {
   );
 }
 
-/** How long an incoming cover fades in over the settled one. DUR[2]-scale —
- * an identity change swaps fast and plain, it just doesn't POP. */
-const ART_XFADE_MS = 140;
+/** How long an incoming cover fades in over the settled one — DUR[2], an
+ * identity change swaps fast and plain, it just doesn't POP. (The Tailwind
+ * animate-[…140ms…] literal below mirrors it, the file's arbitrary-value
+ * convention — change both together.) */
+const ART_XFADE_MS = DUR[2];
 
 /** Album cover with an opacity-only crossfade on identity change: the
  * incoming art fades in OVER the settled one, then becomes the base — the

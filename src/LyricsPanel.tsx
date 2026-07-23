@@ -176,21 +176,30 @@ export const HOLD_GRACE_MS = 2500;
 
 /** The verdict-gated hold: true while a track change's fetch interlude should
  * keep the surface router in its current seat — the interlude never moves the
- * surface; only verdicts (or this grace expiring) do. The expiry is KEY-
- * STAMPED, not a bare boolean: a bare flag only resets in an effect (after
- * render), so the previous track's long-expired `true` would leak into the
- * first render after a track change and defeat the hold on exactly the frame
- * the flash happens (caught live by the mock recorder, 2026-07-23). */
+ * surface; only verdicts (or this grace expiring) do. The expiry resets AT
+ * RENDER TIME on a key change (React's adjust-state-during-render pattern),
+ * never in an effect: an effect reset lands one render late, leaking the
+ * previous pendency's `expired` into the first render after a track change —
+ * as a bare boolean that defeated the hold on exactly the flash frame (mock
+ * recorder, 2026-07-23), and as a persisted per-key stamp it defeated the
+ * hold for a REPLAYED key (prev back to a slow-fetch track; AM's session
+ * vanish/return) whose old expiry still matched (quick-review catch). */
 export function useSeatHold(np: NowPlaying | null, verdict: LyricsVerdict): boolean {
   const key = lyricsKeyOf(np);
-  const [expiredKey, setExpiredKey] = useState<string | null>(null);
+  const [graceKey, setGraceKey] = useState<string | null>(null);
+  const [expired, setExpired] = useState(false);
+  if (key !== graceKey) {
+    // Synchronous re-arm for the new pendency; React re-renders before commit.
+    setGraceKey(key);
+    setExpired(false);
+  }
   useEffect(() => {
     if (!key) return;
-    const t = window.setTimeout(() => setExpiredKey(key), HOLD_GRACE_MS);
+    const t = window.setTimeout(() => setExpired(true), HOLD_GRACE_MS);
     return () => window.clearTimeout(t);
   }, [key]);
   // key === null (no track) holds nothing — there's no seat to protect.
-  return verdict === "pending" && key !== null && expiredKey !== key;
+  return verdict === "pending" && key !== null && !expired;
 }
 
 /** Browsing hands control back three ways, fastest first: the "Now" chip
