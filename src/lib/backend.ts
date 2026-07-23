@@ -68,7 +68,7 @@ let mock: NowPlaying = {
   duration_ms: MOCK_DURATION,
   position_at_ms: Date.now(),
   can_seek: !AM_PROFILE,
-  art_id: "mock-art",
+  art_id: "mock-art-0",
 };
 
 function mockSkip(dir: 1 | -1): void {
@@ -83,7 +83,15 @@ function mockJumpTo(i: number): void {
   mockTrack = i;
   const now = Date.now();
   amTruth = { pos: 0, at: now };
-  pushMock({ ...MOCK_TRACKS[mockTrack], status: "playing", position_ms: 0, position_at_ms: now });
+  // Per-track art id so a mock skip exercises the Art crossfade (one shared
+  // id made every track-change art swap a silent no-op in preview).
+  pushMock({
+    ...MOCK_TRACKS[mockTrack],
+    status: "playing",
+    position_ms: 0,
+    position_at_ms: now,
+    art_id: `mock-art-${mockTrack}`,
+  });
   const front = mockUpNext[0];
   if (front && front.title === MOCK_TRACKS[mockTrack].title) {
     mockUpNext.shift();
@@ -375,19 +383,22 @@ function pushMock(patch: Partial<NowPlaying>): void {
   mock = { ...mock, ...patch, seq: mock.seq + 1 };
 }
 
-/** Deterministic fake album cover so preview exercises art + accent extraction. */
-function mockArt(): string {
+/** Deterministic fake album cover so preview exercises art + accent
+ * extraction. `seed` rotates the hue per mock track, so a skip produces a
+ * genuinely different cover (art crossfade + accent retint stay visible). */
+function mockArt(seed = 0): string {
   const c = document.createElement("canvas");
   c.width = 144;
   c.height = 144;
   const ctx = c.getContext("2d")!;
+  const hue = (seed * 95) % 360;
   const g = ctx.createLinearGradient(0, 0, 144, 144);
-  g.addColorStop(0, "#0f3d8a");
-  g.addColorStop(0.6, "#2f6fd0");
-  g.addColorStop(1, "#0a1f44");
+  g.addColorStop(0, `hsl(${hue} 72% 30%)`);
+  g.addColorStop(0.6, `hsl(${hue} 63% 50%)`);
+  g.addColorStop(1, `hsl(${hue} 75% 15%)`);
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, 144, 144);
-  ctx.fillStyle = "#e8b23c";
+  ctx.fillStyle = `hsl(${(hue + 165) % 360} 66% 57%)`;
   ctx.beginPath();
   ctx.arc(100, 44, 26, 0, Math.PI * 2);
   ctx.fill();
@@ -873,7 +884,8 @@ export const commands = {
     }
   },
   async art(artId: string): Promise<string | null> {
-    if (!IN_TAURI) return artId === "mock-art" ? mockArt() : null;
+    if (!IN_TAURI)
+      return artId.startsWith("mock-art") ? mockArt(Number(artId.split("-").pop()) || 0) : null;
     return invoke<string | null>("media_art", { artId });
   },
   /** Start the Spotify OAuth consent flow (PKCE, system browser). Progress
