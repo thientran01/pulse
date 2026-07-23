@@ -417,6 +417,18 @@ export function onSeekNudge(cb: (dir: -1 | 1) => void): () => void {
   };
 }
 
+/** A track HOTKEY fired (lib.rs emits the direction only, the seek-nudge
+ * pattern) — feeds the track-change slide's direction ledger (lib/trackDir).
+ * Mock: never fires (no global hotkeys in the browser); the mock's skips go
+ * through the transport buttons, which note direction themselves. */
+export function onTrackNudge(cb: (dir: -1 | 1) => void): () => void {
+  if (!IN_TAURI) return () => {};
+  const un = listen<-1 | 1>("track-nudge", (e) => cb(e.payload));
+  return () => {
+    un.then((f) => f());
+  };
+}
+
 export function onNowPlaying(cb: (np: NowPlaying) => void): () => void {
   if (IN_TAURI) {
     /** While playing, the backend emits at least every heartbeat (position

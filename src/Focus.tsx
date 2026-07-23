@@ -36,7 +36,7 @@
  * audio capture gate are widened backend-side to keep feeding this window
  * while the main widget hides behind it.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { MorphIcon } from "./icons/MorphIcon";
 import { commands, onNowPlaying, onSpotifyJump, onSpotifyJumpCancel } from "./lib/backend";
@@ -47,6 +47,7 @@ import { initReactive } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
 import { DeviceTag } from "./DeviceTag";
 import { LyricsPanel, lyricsKeyOf, lyricsVerdictOf, useLyrics, useSeatHold } from "./LyricsPanel";
+import { initTrackDir, SLIDE_PX, takeTrackDir } from "./lib/trackDir";
 import {
   armSuppression,
   clearSuppression,
@@ -99,6 +100,7 @@ function IdentityStack({
   captionExpired,
   centered,
   device,
+  dx = 0,
 }: {
   np: NowPlaying;
   artUrl: string | null;
@@ -112,6 +114,11 @@ function IdentityStack({
    * the metadata; the room horizon is at rest because the audio is
    * elsewhere. Already gated to a live Spotify session. */
   device: SpotifyDevice | null;
+  /** Track-change slide offset for the keyed metadata block (the CENTERED
+   * room, where no seat remount carries direction — the split seat slides
+   * as a whole plane and passes 0 so motion never doubles up). Art stays
+   * static here; only the split's plane carries it. */
+  dx?: number;
 }) {
   const align = centered ? "items-center text-center" : "items-start text-left";
   // Broken art (a CDN 403/404, or AM's lagged first read) degrades to the note
@@ -140,9 +147,13 @@ function IdentityStack({
           <MorphIcon name="note" size={44} />
         )}
       </div>
-      {/* Keyed per track: the metadata remounts with the title fade (fast
-          and plain — a track change earns no choreography beyond this). */}
-      <div key={`${np.title}|${np.artist}`} className="title-in mt-8 w-full min-w-0">
+      {/* Keyed per track: the metadata remounts with the title beat (fast
+          and plain — directional when dx says the room saw a skip). */}
+      <div
+        key={`${np.title}|${np.artist}`}
+        className={`${dx !== 0 ? "track-in" : "title-in"} mt-8 w-full min-w-0`}
+        style={dx !== 0 ? ({ "--track-dx": `${dx}px` } as CSSProperties) : undefined}
+      >
         <p className="truncate text-[40px] font-medium leading-tight text-fg">{np.title}</p>
         <p className="mt-1 truncate text-[22px] leading-7 text-muted">
           {np.artist}
@@ -183,14 +194,25 @@ function IdentityStack({
 
 export default function Focus() {
   const [np, setNp] = useState<NowPlaying | null>(null);
+  // Track-change slide direction — the room's own copy of App's ledger
+  // consumption (each window's trackDir module is its own instance; the
+  // hotkey "track-nudge" event reaches both).
+  const [trackDir, setTrackDir] = useState<1 | -1>(1);
+  const lastTrackKey = useRef<string | null>(null);
   useEffect(
     () =>
       onNowPlaying((next) => {
         if (!posClock.ingest(next)) return;
+        const nextKey = lyricsKeyOf(next);
+        if (nextKey !== lastTrackKey.current) {
+          if (nextKey !== null && lastTrackKey.current !== null) setTrackDir(takeTrackDir());
+          lastTrackKey.current = nextKey;
+        }
         setNp((prev) => (sameIdentity(prev, next) ? prev : next));
       }),
     [],
   );
+  useEffect(() => initTrackDir(), []);
   const artUrl = useArt(np?.art_id ?? null);
   useArtAccent(artUrl);
   const lyrics = useLyrics(np);
@@ -310,14 +332,40 @@ export default function Focus() {
     splitRef.current = split;
   });
 
-  const swap = {
-    initial: { opacity: 0 },
-    animate: { opacity: 1 },
-    exit: { opacity: 0 },
-  };
   const swapTiming = {
     duration: reducedMotion ? 0 : DUR[3] / 1000,
     ease: [...EASE.out] as [number, number, number, number],
+  };
+
+  // The seat's track-change slide: only a split→split key change (a skip
+  // while lyrics hold the room) drifts directionally — split⇄centered swaps
+  // are COMPOSITION changes (a verdict, the queue), not skips, and keep the
+  // plain opacity crossfade (dx 0). Computed per render so the entering
+  // seat's variants and the exiting seat's `custom` both see the change.
+  const seatKey = split ? `split:${lyricsKeyOf(np)}` : "centered";
+  const prevSeatKey = useRef(seatKey);
+  const seatDx =
+    seatKey !== prevSeatKey.current &&
+    seatKey.startsWith("split:") &&
+    prevSeatKey.current.startsWith("split:") &&
+    !announceSuppressed
+      ? trackDir * SLIDE_PX.room
+      : 0;
+  useEffect(() => {
+    prevSeatKey.current = seatKey;
+  });
+  const seatVariants = {
+    enter: (dx: number) => ({ opacity: 0, x: dx }),
+    center: { opacity: 1, x: 0 },
+    exit: (dx: number) => ({
+      opacity: 0,
+      x: -dx,
+      pointerEvents: "none" as const,
+      transition: {
+        duration: reducedMotion ? 0 : DUR[2] / 1000,
+        ease: [...EASE.out] as [number, number, number, number],
+      },
+    }),
   };
 
   return (
@@ -402,17 +450,16 @@ export default function Focus() {
               which stays honest when the seat is queue- or hold-forced
               through the fetch interlude. */}
           <div className="relative min-h-0 flex-1">
-            <AnimatePresence initial={false}>
+            <AnimatePresence initial={false} custom={seatDx}>
               {split ? (
                 <motion.div
-                  key={`split:${lyricsKeyOf(np)}`}
-                  {...swap}
+                  key={seatKey}
+                  custom={seatDx}
+                  variants={seatVariants}
+                  initial="enter"
+                  animate="center"
+                  exit="exit"
                   transition={swapTiming}
-                  exit={{
-                    opacity: 0,
-                    pointerEvents: "none" as const,
-                    transition: { duration: reducedMotion ? 0 : DUR[2] / 1000, ease: [...EASE.out] as [number, number, number, number] },
-                  }}
                   className="absolute inset-0 flex items-stretch gap-[7%] px-[10%]"
                 >
                   {/* Seated on the root's --stack-top (see the root div's
@@ -466,14 +513,13 @@ export default function Focus() {
                 </motion.div>
               ) : (
                 <motion.div
-                  key="centered"
-                  {...swap}
+                  key={seatKey}
+                  custom={seatDx}
+                  variants={seatVariants}
+                  initial="enter"
+                  animate="center"
+                  exit="exit"
                   transition={swapTiming}
-                  exit={{
-                    opacity: 0,
-                    pointerEvents: "none" as const,
-                    transition: { duration: reducedMotion ? 0 : DUR[2] / 1000, ease: [...EASE.out] as [number, number, number, number] },
-                  }}
                   className="absolute inset-0 flex items-end justify-center"
                 >
                   {/* No-lyrics fallback: the identity stack is BOTTOM-anchored
@@ -499,7 +545,15 @@ export default function Focus() {
                       art center→left, so this rides the same opacity
                       crossfade, not a new "art slides" break. */}
                   <div className="mb-[calc(var(--horizon-mb)_+_1vh_-_32px)]">
-                    <IdentityStack np={np} artUrl={artUrl} caption={caption} captionExpired={captionExpired} centered device={remoteDevice} />
+                    <IdentityStack
+                      np={np}
+                      artUrl={artUrl}
+                      caption={caption}
+                      captionExpired={captionExpired}
+                      centered
+                      device={remoteDevice}
+                      dx={announceSuppressed ? 0 : trackDir * SLIDE_PX.content}
+                    />
                   </div>
                 </motion.div>
               )}

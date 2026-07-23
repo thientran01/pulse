@@ -13,6 +13,7 @@ import { useSeekTick } from "./icons/useSeekTick";
 import { useSkipFlick } from "./icons/useSkipFlick";
 import { commands, onSeekNudge } from "./lib/backend";
 import * as posClock from "./lib/posClock";
+import { noteTrackDir } from "./lib/trackDir";
 import { DUR, EASE } from "./lib/tokens";
 import type { NowPlaying } from "./types";
 
@@ -371,6 +372,9 @@ export function SkipButton({ dir, size = "md" }: { dir: -1 | 1; size?: ButtonSiz
       onPointerDown={(e) => e.button === 0 && void tick()}
       onClick={(e) => {
         if (e.detail === 0) void tick(); // keyboard gets the flick too
+        // Note the direction BEFORE the command: the identity change it
+        // causes consumes the note to direct the track-change slide.
+        noteTrackDir(dir);
         (dir < 0 ? commands.prev : commands.next)();
       }}
     >
