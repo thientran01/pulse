@@ -67,6 +67,20 @@ src-tauri/src/
                 blinks (measured PR #51). The oversized window's gutter is
                 kept from eating clicks by spawn_hit_watcher: cursor-polled
                 whole-window click-through (set_ignore_cursor_events)
+                — that same loop also RE-ASSERTS TOPMOST on every
+                foreground change (reassert_topmost), because Windows keeps
+                all topmost windows in ONE band ordered by whoever called
+                SetWindowPos last and the shell raises the taskbar to the
+                front of it on alt-tab; alwaysOnTop is applied once at
+                creation, so a widget parked on the flush-with-the-screen
+                bottom line got its bottom edge clipped by the taskbar
+                (reported live 2026-07-22). Gated twice so it can never
+                become a z-order fight: only while the VISIBLE widget
+                escapes the work area (escapes_work_area — the
+                work/monitor difference IS the shell's reserved chrome, so
+                any taskbar edge is covered without naming a window class)
+                and never when the incoming foreground is one of OUR
+                windows (so summoning Search/Prefs doesn't get jumped)
                 gated on the frontend-reported hit rect (set_hit_size, which
                 reports TWO corner-anchored boxes: the interactive union — it
                 swells for the queue popover and goes whole-window under a

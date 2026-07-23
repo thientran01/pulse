@@ -65,8 +65,9 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetSystemMetrics, SetWindowPos, SystemParametersInfoW, SET_WINDOW_POS_FLAGS,
-    SM_SWAPBUTTON, SPI_GETCLIENTAREAANIMATION, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOSIZE,
+    GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, SetWindowPos,
+    SystemParametersInfoW, HWND_TOPMOST, SET_WINDOW_POS_FLAGS, SM_SWAPBUTTON,
+    SPI_GETCLIENTAREAANIMATION, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOMOVE, SWP_NOSIZE,
     SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
@@ -913,6 +914,68 @@ pub fn set_hit_size(dock: State<Dock>, width: f64, height: f64, mode_width: f64,
         .unwrap_or_else(PoisonError::into_inner) = Some((mode_width, mode_height));
 }
 
+/// Does this rect stick out past the work area — i.e. is it over the taskbar
+/// (or any other appbar)? The work-area/monitor difference IS the chrome the
+/// shell reserved, so asking it this way covers a taskbar docked on any edge
+/// without naming a window class. The topmost re-assert's gate.
+fn escapes_work_area(pos: (i32, i32), size: (i32, i32), wa: &WorkArea) -> bool {
+    pos.0 < wa.x || pos.1 < wa.y || pos.0 + size.0 > wa.x + wa.w || pos.1 + size.1 > wa.y + wa.h
+}
+
+/// Windows keeps every topmost window in ONE band, ordered by whoever called
+/// SetWindowPos last — and the shell raises the taskbar to the front of that
+/// band on foreground changes. Palette's always-on-top is applied once at
+/// window creation, so an alt-tab left the taskbar sitting ON TOP of a widget
+/// parked at the flush-with-the-screen bottom line, clipping its bottom edge
+/// (reported live 2026-07-22). Re-assert topmost when the foreground changes.
+///
+/// Gated so this can never become a z-order fight:
+/// - only when the VISIBLE widget escapes the work area, i.e. it is over the
+///   taskbar. The work-area/monitor difference IS the shell's reserved chrome,
+///   so a side- or top-docked taskbar is covered for free, and a widget parked
+///   anywhere else never re-raises at all (nothing is covering it there).
+/// - never when the incoming foreground belongs to US, so summoning Search or
+///   Preferences doesn't make the widget jump on top of them.
+///
+/// SWP_NOMOVE|SWP_NOSIZE means no WM_MOVE, so this can't be mistaken for a
+/// user drag by on_moved, and SWP_NOACTIVATE means it never steals focus.
+fn reassert_topmost(window: &WebviewWindow, own_pid: u32) {
+    let mut pid = 0u32;
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg == windows::Win32::Foundation::HWND::default() {
+            return; // secure desktop — nothing to lose z-order to
+        }
+        GetWindowThreadProcessId(fg, Some(&mut pid));
+    }
+    if pid == own_pid {
+        return;
+    }
+    let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
+        return;
+    };
+    let (w, h) = (size.width as i32, size.height as i32);
+    let (fx, fy, fw, fh) = placement_rect(window, pos.x, pos.y, w, h);
+    let Some(rects) = monitor_rects(window, fx + fw / 2, fy + fh / 2) else {
+        return;
+    };
+    if !escapes_work_area((fx, fy), (fw, fh), &rects.work) {
+        return;
+    }
+    let Ok(hwnd) = window.hwnd() else { return };
+    unsafe {
+        let _ = SetWindowPos(
+            HWND(hwnd.0),
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
 /// The fixed-size window's transparent gutter must not eat clicks meant for
 /// whatever is beneath: poll the cursor and toggle whole-window
 /// click-through (WS_EX_TRANSPARENT via set_ignore_cursor_events) so the
@@ -921,16 +984,31 @@ pub fn set_hit_size(dock: State<Dock>, width: f64, height: f64, mode_width: f64,
 /// suppressed mid-press so a drag/click can't have the window yanked out
 /// from under it. While hidden the loop parks on Dock::show_signal (woken by
 /// apply_visibility's show path) instead of polling.
+///
+/// This loop also carries the topmost re-assert (reassert_topmost): it is the
+/// one thread that already runs exactly while the widget is visible, at a
+/// cadence fast enough that the taskbar can't be seen winning, and it already
+/// holds the window rect. A foreground-window CHANGE is the trigger, so the
+/// per-poll cost is one GetForegroundWindow call.
 pub fn spawn_hit_watcher(window: WebviewWindow) {
     std::thread::Builder::new()
         .name("hit-watch".into())
         .spawn(move || {
             // Local mirror of the applied state — the window starts interactive.
             let mut ignoring = false;
+            let own_pid = std::process::id();
+            // Last foreground window seen, as a raw pointer value. Seeded with
+            // a sentinel so the first poll after launch re-asserts once: the
+            // shell may already have raised the taskbar before we got here.
+            let mut last_fg: isize = -1;
             loop {
                 let mut near = false;
                 let visible = window.is_visible().unwrap_or(false);
                 if !visible {
+                    // Forget the foreground while hidden, so the show that
+                    // brings the widget back re-asserts instead of matching a
+                    // stale value and skipping.
+                    last_fg = -1;
                     // Park until a show wakes us (or the safety timeout). Re-check
                     // visibility under the lock so a show that landed between the
                     // check above and here isn't waited past (lost-wakeup guard);
@@ -948,6 +1026,13 @@ pub fn spawn_hit_watcher(window: WebviewWindow) {
                     }
                     *shown = false; // consume
                     continue;
+                }
+                // Z-order: re-assert topmost when the foreground app changed
+                // (the shell raises the taskbar over us on exactly that event).
+                let fg = unsafe { GetForegroundWindow().0 as isize };
+                if fg != last_fg {
+                    last_fg = fg;
+                    reassert_topmost(&window, own_pid);
                 }
                 {
                     let mut p = windows::Win32::Foundation::POINT::default();
@@ -1189,6 +1274,33 @@ mod tests {
             window_origin(c, l, win, PILL, &screen().mon),
             (l.0, l.1 - 392)
         );
+    }
+
+    #[test]
+    fn topmost_reassert_fires_exactly_when_the_widget_is_over_the_taskbar() {
+        let s = screen();
+        let flush_bottom = 1080 - 48 - 12; // the line Thien parks on
+        let above_taskbar = 1032 - 48 - 12;
+        // THE case: parked on the flush-with-the-screen bottom line, so the
+        // widget sits in the taskbar's band and the shell's raise clips it.
+        // If this gate ever reads false, the taskbar silently wins again.
+        assert!(escapes_work_area((1608, flush_bottom), PILL, &s.work));
+        // Parked above the taskbar, or anywhere mid-screen: nothing is over
+        // it, so no re-assert and no z-order fight with other topmost apps.
+        assert!(!escapes_work_area((1608, above_taskbar), PILL, &s.work));
+        assert!(!escapes_work_area((760, 500), PILL, &s.work));
+        // Exactly flush with the work area's bottom edge is still inside it.
+        assert!(!escapes_work_area((760, 1032 - 48), PILL, &s.work));
+        assert!(escapes_work_area((760, 1032 - 47), PILL, &s.work));
+        // A LEFT-docked taskbar: same predicate, no window class named.
+        let side = WorkArea {
+            x: 48,
+            y: 0,
+            w: 1872,
+            h: 1080,
+        };
+        assert!(escapes_work_area((12, 500), PILL, &side));
+        assert!(!escapes_work_area((60, 500), PILL, &side));
     }
 
     #[test]

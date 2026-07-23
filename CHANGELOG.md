@@ -16,6 +16,7 @@ Installed apps self-update at launch, so most users are always on the latest rel
 
 ### Fixed
 
+- The taskbar no longer covers the widget's bottom edge after switching apps. Windows had been raising the taskbar above it on every app switch; parked flush with the bottom of the screen, that clipped it.
 - Pill and card modes could throw the widget up to 392px away from where it was released when a drag crossed the middle of the screen.
 
 ## [0.7.3] - 2026-07-19
