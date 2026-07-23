@@ -67,27 +67,33 @@ src-tauri/src/
                 blinks (measured PR #51). The oversized window's gutter is
                 kept from eating clicks by spawn_hit_watcher: cursor-polled
                 whole-window click-through (set_ignore_cursor_events)
-                — that same loop also RE-ASSERTS TOPMOST on every
-                foreground change (reassert_topmost), because Windows keeps
-                all topmost windows in ONE band ordered by whoever called
-                SetWindowPos last and the shell raises the taskbar to the
-                front of it on alt-tab; alwaysOnTop is applied once at
-                creation, so a widget parked on the flush-with-the-screen
-                bottom line got its bottom edge clipped by the taskbar
-                (reported live 2026-07-22). Gated twice so it can never
-                become a z-order fight: only while the VISIBLE widget
-                escapes the work area (escapes_work_area — the
-                work/monitor difference IS the shell's reserved chrome, so
-                any taskbar edge is covered without naming a window class)
-                and never when the incoming foreground is one of OUR
-                windows (so summoning Search/Prefs doesn't get jumped)
                 gated on the frontend-reported hit rect (set_hit_size, which
                 reports TWO corner-anchored boxes: the interactive union — it
                 swells for the queue popover and goes whole-window under a
                 transient overlay — and the mode's own MODE_SIZES box, which is
                 what every PLACEMENT decision uses; compensating a corner flip
                 with the union would move the window by a distance the shell's
-                FLIP never travels). The corner is still DERIVED on
+                FLIP never travels). THAT SAME LOOP KEEPS THE WIDGET AT THE
+                FRONT OF THE TOPMOST BAND (reassert_topmost): Windows orders
+                all topmost windows by whoever called SetWindowPos last and
+                the shell raises the taskbar to the front of it, while
+                alwaysOnTop is applied once at creation — so the first app
+                switch clipped the bottom edge of a widget parked on the
+                flush-with-the-screen line (reported live 2026-07-22). The
+                re-assert is LEVEL-triggered (a burst on every foreground
+                change + a 500ms idle heartbeat), NOT a one-shot reaction:
+                our raise and the shell's are reactions to the SAME event and
+                the shell's is async, so arriving first just means being
+                raised over — being fast is losing, and nothing can observe
+                who won. For the same reason there is NO "is it over the
+                taskbar?" gate: an auto-hidden taskbar reserves no work area
+                (rcWork == rcMonitor), so a rect gate is unsatisfiable
+                exactly where the taskbar can slide over the widget. The ONE
+                exemption is our own topmost windows (Search/focus keep the
+                front while they hold the foreground; prefs is a normal
+                window and already sits below). SWP_ASYNCWINDOWPOS is
+                required — this loop also drives click-through and must never
+                block on the main thread pumping. The corner is still DERIVED on
                 every settle (from the footprint's center) and is still the anchor
                 IDENTITY — shell seat, hit-rect anchor, popover direction, mode-glide
                 growth all key on it and all anchor to the window rect, so they work
