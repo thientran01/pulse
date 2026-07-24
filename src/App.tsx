@@ -23,7 +23,14 @@ import { IntroBubble } from "./IntroBubble";
 import { WidgetMenu, WIDGET_MENU_W, WIDGET_MENU_H } from "./WidgetMenu";
 import { VOCAL_LEAD_MS } from "./lib/lrc";
 import { PlayPauseButton, ProgressBar, Transport, useProgressDom } from "./Transport";
-import { LyricsPanel, lyricsKeyOf, useLyrics, type LyricsState } from "./LyricsPanel";
+import {
+  LyricsPanel,
+  lyricsKeyOf,
+  lyricsVerdictOf,
+  useLyrics,
+  useSeatHold,
+  type LyricsState,
+} from "./LyricsPanel";
 import { useArt, useArtAccent } from "./lib/artAccent";
 import * as posClock from "./lib/posClock";
 import { initReactive, setReactiveEnabledSetting } from "./lib/reactive";
@@ -666,16 +673,49 @@ function PillTime({ np }: { np: NowPlaying }) {
   );
 }
 
+/** How long an incoming cover fades in over the settled one — DUR[2], an
+ * identity change swaps fast and plain, it just doesn't POP. (The Tailwind
+ * animate-[…140ms…] literal below mirrors it, the file's arbitrary-value
+ * convention — change both together.) */
+const ART_XFADE_MS = DUR[2];
+
+/** Album cover with an opacity-only crossfade on identity change: the
+ * incoming art fades in OVER the settled one, then becomes the base — the
+ * art never moves. Covers track-change swaps, the pref=art view, and
+ * media.rs's stale-art rev-bump heals. Timer, not transitionend — the
+ * outgoing top layer unmounts, so it can't report its own end. */
 function Art({ url, size, radiusPx }: { url: string | null; size: number; radiusPx: number }) {
+  const [settled, setSettled] = useState(url);
+  useEffect(() => {
+    if (url === settled) return;
+    if (url === null) {
+      // Art gone (no-art track / session drop): fall to the glyph plain —
+      // there's nothing to crossfade toward.
+      setSettled(null);
+      return;
+    }
+    const t = window.setTimeout(() => setSettled(url), ART_XFADE_MS);
+    return () => window.clearTimeout(t);
+  }, [url, settled]);
+  const incoming = url !== null && url !== settled ? url : null;
   return (
     <div
-      className="grid shrink-0 place-items-center overflow-hidden bg-surface-2 text-muted"
+      className="relative grid shrink-0 place-items-center overflow-hidden bg-surface-2 text-muted"
       style={{ width: size, height: size, borderRadius: radiusPx }}
     >
-      {url ? (
-        <img src={url} alt="" className="h-full w-full object-cover" draggable={false} />
+      {settled ? (
+        <img src={settled} alt="" className="h-full w-full object-cover" draggable={false} />
       ) : (
         <MorphIcon name="note" size={22} />
+      )}
+      {incoming && (
+        <img
+          key={incoming}
+          src={incoming}
+          alt=""
+          draggable={false}
+          className="absolute inset-0 h-full w-full animate-[caption-in_140ms_var(--ease-out-tk)_both] object-cover"
+        />
       )}
     </div>
   );
@@ -692,8 +732,10 @@ const SNAP_WINDOW_MS = 300;
 const NO_LYRICS_CAPTION_MS = 4000;
 
 /**
- * Expanded mode: big-art fallback while lyrics fetch, karaoke view once they
- * land — unless the user flipped the top-right ViewToggle to art, which wins
+ * Expanded mode: karaoke view when lyrics land, big-art fallback on a MISS —
+ * the fetch interlude holds whatever surface is seated (see `seat`) instead
+ * of flashing the fallback in — unless the user flipped the top-right
+ * ViewToggle to art, which wins
  * over available lyrics (a persisted preference, see readViewPref). Progress
  * and transport are HOISTED out of the swap — chrome holds perfectly still
  * (and the rAF-driven progress fill never remounts mid-write); only the
@@ -735,7 +777,13 @@ function ExpandedView({
   const reducedMotion = useReducedMotion();
   // Key-stamped gate: never render the new track's header over the old
   // track's lines during useLyrics' one-render loading gap (see lyricsKeyOf).
+  // (Kept as the inline discriminant check — aliased-condition narrowing is
+  // what lets lyrics.lines/.key flow into LyricsPanel below.)
   const lyricsLive = lyrics.status === "synced" && lyrics.key === lyricsKeyOf(np);
+  // What the state says about THIS track — stale verdicts read as pending,
+  // so captions/routing can't answer for the previous track.
+  const verdict = lyricsVerdictOf(np, lyrics);
+  const hold = useSeatHold(np, verdict);
 
   // The user's art ⇄ lyrics preference. Lyrics still gate on availability:
   // "lyrics" with none synced falls back to art, and the preference sits
@@ -764,6 +812,20 @@ function ExpandedView({
   // false throughout, and the stale timestamp would let the next track's
   // instant resolve wrongly earn the cascade.
   const trackKey = lyricsKeyOf(np);
+
+  // The non-queue seat. THE INTERLUDE NEVER MOVES THE SURFACE — only verdicts
+  // do: while the new track's verdict is pending (within HOLD_GRACE_MS) and
+  // the pref is lyrics, the seat holds whatever it was — a lyrics→lyrics skip
+  // never flashes the album view, and an album seat (miss→x) never yanks to a
+  // blank lyric body on the chance lyrics arrive. A verdict, the grace, or a
+  // view toggle (a user command) releases it.
+  const seatRef = useRef<"lyrics" | "album">(view === "lyrics" ? "lyrics" : "album");
+  const seat: "lyrics" | "album" =
+    hold && view === "lyrics" ? seatRef.current : showLyrics ? "lyrics" : "album";
+  useEffect(() => {
+    seatRef.current = seat;
+  });
+
   const artShownAt = useRef<number | null>(null);
   useEffect(() => {
     artShownAt.current = null;
@@ -771,7 +833,11 @@ function ExpandedView({
   useEffect(() => {
     if (showLyrics) {
       artShownAt.current = null;
-    } else if (artShownAt.current === null) {
+    } else if (seat === "album" && artShownAt.current === null) {
+      // Stamp only while the album view actually holds the seat — a held
+      // (blank) lyric seat is not "looking at art", so a fast lyrics→lyrics
+      // change stays plain while a post-grace album seat still earns the
+      // cascade on a late resolve.
       artShownAt.current = performance.now();
     }
   });
@@ -787,18 +853,14 @@ function ExpandedView({
   const [captionExpired, setCaptionExpired] = useState(false);
   useEffect(() => {
     setCaptionExpired(false);
-    if (lyrics.status !== "none" && lyrics.status !== "offline") return;
+    if (verdict !== "none" && verdict !== "offline") return;
     const t = window.setTimeout(() => setCaptionExpired(true), NO_LYRICS_CAPTION_MS);
     return () => window.clearTimeout(t);
-  }, [lyrics.status, trackKey]);
+  }, [verdict, trackKey]);
 
   // Which of the three peer views owns the surface. They crossfade IN PLACE
   // under a fixed header — switching content, never a panel over a panel.
-  const active: "lyrics" | "album" | "queue" = queueOpen
-    ? "queue"
-    : showLyrics
-      ? "lyrics"
-      : "album";
+  const active: "lyrics" | "album" | "queue" = queueOpen ? "queue" : seat;
   // The header is shown for lyrics + queue (identical markup, so crossing
   // between them never moves it); the album view is the one headerless
   // surface (its big cover is the identity), so the header fades only there.
@@ -873,13 +935,35 @@ function ExpandedView({
           className={`absolute inset-0 flex flex-col bg-surface pt-[52px] ${layer(active === "lyrics")}`}
         >
           {lyricsLive && (
-            <LyricsPanel
+            // A PLAIN arrival (into a held, already-visible seat) still gets
+            // the title-in beat — 140ms caption-in, the pill's track-change
+            // grammar — because no layer crossfade runs anymore; the earned
+            // cascade path stays unwrapped so choreography never stacks.
+            <div
               key={lyrics.key}
-              lines={lyrics.lines}
-              seekable={seekable}
-              leadMs={VOCAL_LEAD_MS[np.player]}
-              entrance={celebrate}
-            />
+              className={`flex min-h-0 flex-1 flex-col ${
+                celebrate ? "" : "animate-[caption-in_140ms_var(--ease-out-tk)_both]"
+              }`}
+            >
+              <LyricsPanel
+                lines={lyrics.lines}
+                seekable={seekable}
+                leadMs={VOCAL_LEAD_MS[np.player]}
+                entrance={celebrate}
+              />
+            </div>
+          )}
+          {/* The held-seat interlude: old lines exited fast and plain, the
+              fixed header + waveform announcement narrate the new track, and
+              the body answers the wait on the same 400ms-delayed caption
+              pattern as the album view — cache hits resolve before it ever
+              shows. */}
+          {active === "lyrics" && !lyricsLive && (
+            <p className="flex flex-1 items-center justify-center text-[11px] leading-4 text-muted">
+              <span className="inline-block animate-[caption-in_200ms_var(--ease-out-tk)_both] [animation-delay:400ms]">
+                Finding lyrics…
+              </span>
+            </p>
           )}
         </div>
 
@@ -940,21 +1024,21 @@ function ExpandedView({
           <div className="flex min-h-0 flex-1 flex-col items-center">
             <div className="flex flex-1 items-center">
               <p className="h-4 text-[11px] leading-4 text-muted">
-                {lyrics.status !== "synced" && (
+                {verdict !== "synced" && (
                   <span
-                    key={lyrics.status}
+                    key={verdict}
                     aria-hidden={captionExpired || undefined}
                     className={`inline-block ${
                       captionExpired
                         ? "animate-[caption-out_260ms_var(--ease-out-tk)_both]"
                         : `animate-[caption-in_200ms_var(--ease-out-tk)_both] ${
-                            lyrics.status === "loading" ? "[animation-delay:400ms]" : ""
+                            verdict === "pending" ? "[animation-delay:400ms]" : ""
                           }`
                     }`}
                   >
-                    {lyrics.status === "loading"
+                    {verdict === "pending"
                       ? "Finding lyrics…"
-                      : lyrics.status === "offline"
+                      : verdict === "offline"
                         ? "Lyrics unavailable — offline"
                         : "No synced lyrics"}
                   </span>
@@ -998,10 +1082,10 @@ function ExpandedView({
       {/* Hoisted chrome, like progress/transport below: the toggle keeps its
           seat while the content it switches crossfades under it. Glyph and
           label name the destination; no lyrics = disabled in place. The
-          miss states key on status === "none" (not !== "synced"): during a
-          track change there's a one-render gap where the OLD track's synced
-          state hasn't flipped to loading yet (see lyricsKeyOf), and mapping
-          it to micOff would kick a spurious slash morph on every skip.
+          miss states key on the VERDICT, not the raw status: a stale state
+          (the previous track's answer, standing through useLyrics' one-render
+          gap) reads as pending, so a skip never kicks a spurious micOff slash
+          morph from the old track's miss.
           11a: the note seat is the ONLY lyrics entry — from the queue
           surface it EXITS to lyrics (or art when none are synced). */}
       <ViewToggle
@@ -1014,7 +1098,7 @@ function ExpandedView({
               ? showLyrics
                 ? "note"
                 : "mic"
-              : lyrics.status === "none" || lyrics.status === "offline"
+              : verdict === "none" || verdict === "offline"
                 ? "micOff"
                 : "mic"
         }
@@ -1027,9 +1111,9 @@ function ExpandedView({
               ? showLyrics
                 ? "Show album cover"
                 : "Show lyrics"
-              : lyrics.status === "none"
+              : verdict === "none"
                 ? "No synced lyrics"
-                : lyrics.status === "offline"
+                : verdict === "offline"
                   ? "Lyrics unavailable — offline"
                   : "Finding lyrics…"
         }

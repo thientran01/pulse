@@ -46,7 +46,7 @@ import * as posClock from "./lib/posClock";
 import { initReactive } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
 import { DeviceTag } from "./DeviceTag";
-import { LyricsPanel, lyricsKeyOf, useLyrics } from "./LyricsPanel";
+import { LyricsPanel, lyricsKeyOf, lyricsVerdictOf, useLyrics, useSeatHold } from "./LyricsPanel";
 import {
   armSuppression,
   clearSuppression,
@@ -250,6 +250,11 @@ export default function Focus() {
   const playing = np?.status === "playing";
   const lyricsLive =
     lyrics.status === "synced" && np !== null && lyrics.key === lyricsKeyOf(np);
+  // What the state says about THIS track (stale verdicts read as pending) +
+  // the verdict-gated hold — the room's seat rule matches the expanded
+  // view's: the interlude never moves the surface, only verdicts do.
+  const verdict = lyricsVerdictOf(np, lyrics);
+  const hold = useSeatHold(np, verdict);
   const nothing = !np || np.player === "none";
   useEffect(() => {
     if (nothing) setQueueOpen(false);
@@ -270,16 +275,16 @@ export default function Focus() {
 
   const caption = lyricsLive
     ? null
-    : lyrics.status === "loading"
+    : verdict === "pending"
       ? "Finding lyrics…"
-      : lyrics.status === "offline"
+      : verdict === "offline"
         ? "Lyrics unavailable — offline"
         : np && np.player !== "none"
           ? "No synced lyrics"
           : null;
 
   // The miss caption answers once, then leaves (the expanded view's rule) —
-  // the timer restarts per track and per status flip so a loading→none
+  // the timer restarts per track and per verdict flip so a pending→none
   // resolve gets its full read window.
   const trackKey = lyricsKeyOf(np);
   const [captionExpired, setCaptionExpired] = useState(false);
@@ -288,10 +293,22 @@ export default function Focus() {
     // Both terminal non-synced states expire (the expanded view's gate,
     // App.tsx — this room's own rule comment claims to keep in step): the
     // offline caption used to sit under the metadata forever.
-    if (lyrics.status !== "none" && lyrics.status !== "offline") return;
+    if (verdict !== "none" && verdict !== "offline") return;
     const t = window.setTimeout(() => setCaptionExpired(true), NO_LYRICS_CAPTION_MS);
     return () => window.clearTimeout(t);
-  }, [lyrics.status, trackKey]);
+  }, [verdict, trackKey]);
+
+  // The room's held seat: while the verdict is pending the composition holds
+  // — a held split keeps the identity column + a quiet lyric column (the
+  // per-track key still crossfades old split → new split, fast and plain)
+  // instead of collapsing to the centered fallback and re-splitting a few
+  // frames later. Initial false: a takeover opened mid-fetch starts centered,
+  // preserving the once-per-takeover arrival.
+  const splitRef = useRef(false);
+  const split = queueOpen || (hold ? splitRef.current : lyricsLive);
+  useEffect(() => {
+    splitRef.current = split;
+  });
 
   const swap = {
     initial: { opacity: 0 },
@@ -372,20 +389,21 @@ export default function Focus() {
         <>
           {/* THE UPPER ROOM — the only region that swaps (one stack, two
               seats). Crossfade by opacity; the art never slides. Seats are
-              keyed per track (split) / per view (centered): every track
-              change exits through the fallback interlude anyway (lyricsLive
-              flips while lyrics re-key), so the per-track key just makes
-              the remount explicit and covers the fast-resolve path where
-              AnimatePresence would otherwise recycle the exiting seat.
+              keyed per track (split) / per view (centered): a held split
+              rides the fetch interlude (see `split` above — the seat no
+              longer collapses to centered while the verdict is pending), so
+              a track change crossfades old split → new split via the
+              per-track key, fast and plain, and the fast-resolve path can't
+              have AnimatePresence recycle the exiting seat.
               An OPEN QUEUE also forces the split composition: the queue
               surface lives in the lyric column's seat (below), so the
               identity stack must hold the left seat even with no lyrics —
               keyed on lyricsKeyOf(np) (≡ lyrics.key whenever lyricsLive),
-              which stays honest when the seat is queue-forced through the
-              fetch interlude. */}
+              which stays honest when the seat is queue- or hold-forced
+              through the fetch interlude. */}
           <div className="relative min-h-0 flex-1">
             <AnimatePresence initial={false}>
-              {lyricsLive || queueOpen ? (
+              {split ? (
                 <motion.div
                   key={`split:${lyricsKeyOf(np)}`}
                   {...swap}
@@ -425,13 +443,24 @@ export default function Focus() {
                         Closing the queue mounts lyrics fresh; the panel
                         re-anchors itself. */}
                     {lyricsLive && !queueOpen && (
-                      <LyricsPanel
-                        lines={lyrics.lines}
-                        seekable={seekable}
-                        leadMs={VOCAL_LEAD_MS[np.player]}
-                        entrance={entrance}
-                        scale="focus"
-                      />
+                      // Plain arrivals (lyrics resolving into a HELD split, or
+                      // a queue close re-revealing the column) get the title-in
+                      // beat — the seat's own crossfade no longer covers the
+                      // resolve, which lands after it. The once-per-takeover
+                      // entrance stays unwrapped so choreography never stacks.
+                      <div
+                        className={`flex min-h-0 min-w-0 flex-1 flex-col ${
+                          entrance ? "" : "animate-[caption-in_140ms_var(--ease-out-tk)_both]"
+                        }`}
+                      >
+                        <LyricsPanel
+                          lines={lyrics.lines}
+                          seekable={seekable}
+                          leadMs={VOCAL_LEAD_MS[np.player]}
+                          entrance={entrance}
+                          scale="focus"
+                        />
+                      </div>
                     )}
                   </div>
                 </motion.div>
