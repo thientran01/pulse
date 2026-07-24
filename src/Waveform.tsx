@@ -424,7 +424,12 @@ export function Waveform({
         }, ANNOUNCE_MS * 2),
       );
       // Hold the lone gray dot for two beats — the drain needs a moment to
-      // read before the multiplication reverses.
+      // read before the multiplication reverses. This reveal-"three" beat
+      // still runs under the "collapse" stage: drop-shape gives the
+      // fading-in d≤1 pair 0 delay (correct), and the d≥2 dots it computes
+      // delays for don't change computed style (already hidden) — a CSS
+      // no-op. The stage flips only where it matters, before the reveal
+      // "dots" un-hides that outer tier.
       seqTimers.push(window.setTimeout(() => setPhase("three"), ANNOUNCE_MS * 4));
       seqTimers.push(
         window.setTimeout(() => {
