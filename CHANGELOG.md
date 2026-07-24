@@ -8,15 +8,23 @@ Installed apps self-update at launch, so most users are always on the latest rel
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-07-23
+
+The placement + track-change release: the widget goes anywhere and stays put, and track changes got one calm, directional grammar.
+
 ### Changed
 
 - Placement is free: drag the widget anywhere on screen and it stays exactly where you dropped it. Drop it near an edge and only that axis tidies to a 12px margin — the other keeps its position. The corner magnet is gone.
 - The bottom edge offers two snap lines — above the taskbar, or flush with the screen — whichever you're nearer.
 - Palette no longer moves itself when another app goes fullscreen. The widget stays where you put it, and the reachable area is the same everywhere. "Hide on fullscreen" is unaffected.
+- Track changes slide directionally: skipping forward slides the title (and the big album art, where it's the hero) out left and in right; previous mirrors it. A change Palette didn't initiate drifts forward.
+- The waveform no longer runs its track-change announcement — the collapse-to-a-single-dot ladder read as the widget resetting at focus mode's scale. The bars now ride straight through every track change; the sliding title is the track-change beat. (Play/pause settle and bloom are unchanged.)
+- Switching tracks no longer flashes the expanded/focus layout through the album or fallback view while lyrics load — the seated view holds until the lyrics verdict lands (or a short grace expires).
 
 ### Fixed
 
 - Pill and card modes could throw the widget up to 392px away from where it was released when a drag crossed the middle of the screen.
+- A skip's piecemeal metadata delivery could rubber-band the outgoing album cover during the track-change slide.
 
 ## [0.7.3] - 2026-07-19
 
@@ -220,7 +228,8 @@ First public release.
 - Synced lyrics (LRCLIB with disk cache), album-art adaptive accents, an audio-reactive "living separator", corner docking, morphing icons, and a monotonic position clock owning playback time.
 - Ships as a per-user NSIS installer — single-instance, opt-in start-at-login — with a GitHub Releases auto-update pipeline and an in-app updater.
 
-[Unreleased]: https://github.com/thientran01/palette/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/thientran01/palette/compare/v0.7.4...HEAD
+[0.7.4]: https://github.com/thientran01/palette/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/thientran01/palette/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/thientran01/palette/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/thientran01/palette/compare/v0.7.0...v0.7.1
