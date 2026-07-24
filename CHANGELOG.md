@@ -8,6 +8,10 @@ Installed apps self-update at launch, so most users are always on the latest rel
 
 ## [Unreleased]
 
+### Changed
+
+- The expanded album view now seats "No synced lyrics" directly under the artist line — the same place focus mode puts it — and centres the waveform between that line and the progress bar. The caption no longer pushes the bars down, and neither does the "Playing on <device>" tag: the two share one row, the caption answering first and the tag settling into the same seat as it fades.
+
 ## [0.7.4] - 2026-07-23
 
 The placement + track-change release: the widget goes anywhere and stays put, and track changes got one calm, directional grammar.

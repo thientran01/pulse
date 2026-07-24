@@ -1088,17 +1088,12 @@ function ExpandedView({
                 className="flex w-full flex-col items-center"
               >
                 <Art url={artUrl} size={190} radiusPx={12} />
-                {/* Metadata: title + artist, then a HEIGHT-RESERVED device-tag
-                    slot. The tag mounts only when a non-PC device is playing,
-                    but the slot holds its row height whether or not it's
-                    present: the tag refreshes on track change and a LATE
-                    "spotify-device" event lands after the view settled — an
-                    un-reserved conditional row nudged the centered hero wave
-                    ~8px on that flip (98337fd dropped the reserve reasoning
-                    only about the top-pinned art). Reserved, nothing below
-                    shifts on device flips (the art is TOP-PINNED at pt-8, so
-                    it never moved — this restores the same guarantee for the
-                    wave). */}
+                {/* Metadata: title + artist·album, and nothing else — the
+                    device tag moved OUT to the shared status band below
+                    (2026-07-24). Its height-reserved slot used to live here
+                    so a late "spotify-device" event couldn't nudge the hero;
+                    the band is absolute, so that guarantee now holds for BOTH
+                    occupants without spending a row the wave's seat needs. */}
                 <div className="mt-3 min-w-0 self-stretch text-center">
                   <p className="truncate text-sm font-medium text-fg">{np.title}</p>
                   <p className="truncate text-xs text-muted">
@@ -1106,62 +1101,63 @@ function ExpandedView({
                     {np.album && <SeparatorDot />}
                     {np.album}
                   </p>
-                  <div className="mt-1 flex h-4 justify-center">
-                    {remoteDevice && <DeviceTag device={remoteDevice} playing={playing} showName />}
-                  </div>
                 </div>
               </motion.div>
             </AnimatePresence>
           </div>
-          {/* Caption + hero fill the flex remainder as THREE zones: an
-              upper flex-1 that CENTERS the caption, the wave at its natural
-              size, and a matching lower flex-1 spacer. The two equal
-              spacers center the WAVE between the metadata and the console
-              (its approved seat), while the caption floats centered in the
-              gap ABOVE it — so "No synced lyrics" sits ~equidistant between
-              the artist line and the wave instead of glued to the bars
-              (it crowded them before — Thien, 2026-07-17: "too close to the
-              waveform, looks like it's directly on top"; a single centered
-              caption+wave group left the caption pinned to the wave). The
-              caption keeps its height-reserved h-4 slot so its fade never
-              nudges anything; the metadata line keeps a static middot so the
-              reactive surface isn't on screen twice.
-              This container is ALWAYS mounted — only the hero Waveform below
-              is gated to the active view. Gating the whole block (98337fd
-              swept the caption inside the Waveform's gate) re-mounted an
-              already-EXPIRED caption on every album re-entry (e.g. a queue
-              close) and replayed its 260ms caption-out ghost; a persistently
-              mounted span lets aria-hidden/opacity settle it once and hold. */}
-          <div className="flex min-h-0 flex-1 flex-col items-center">
-            <div className="flex flex-1 items-center">
-              <p className="h-4 text-[11px] leading-4 text-muted">
-                {verdict !== "synced" && (
-                  <span
-                    key={verdict}
-                    aria-hidden={captionExpired || undefined}
-                    className={`inline-block ${
-                      captionExpired
-                        ? "animate-[caption-out_260ms_var(--ease-out-tk)_both]"
-                        : `animate-[caption-in_200ms_var(--ease-out-tk)_both] ${
-                            verdict === "pending" ? "[animation-delay:400ms]" : ""
-                          }`
-                    }`}
-                  >
-                    {verdict === "pending"
-                      ? "Finding lyrics…"
-                      : verdict === "offline"
-                        ? "Lyrics unavailable — offline"
-                        : "No synced lyrics"}
-                  </span>
-                )}
-              </p>
-            </div>
+          {/* The dead zone below the metadata, and the two things that live in
+              it. The HERO is centred in the WHOLE zone — metadata line to
+              progress bar, the seat Thien specified 2026-07-24 ("in the center
+              of [the artist·album line] and the progress bar", ~7px above its
+              0.7.3 seat) — and the STATUS BAND floats absolutely at the top of
+              that zone, tucked under the metadata the way focus mode seats its
+              caption. Absolute is what makes the rule hold: the band's
+              occupants come and go (a verdict resolving, a late
+              "spotify-device" event) and NONE of them may move the bars —
+              the guarantee the old height-reserved rows bought with a row the
+              hero's seat needed. -mb-2 cancels the column's gap-2 for this box
+              alone, so the centring reaches the progress bar the eye measures
+              against instead of stopping 8px short of it. */}
+          <div className="relative -mb-2 flex min-h-0 w-full flex-1 items-center justify-center">
+            {/* The shared band: the lyric caption answers first and expires at
+                NO_LYRICS_CAPTION_MS, then the remote-device tag settles into
+                the SAME seat as it fades (Thien's call 2026-07-24 — one row,
+                two occupants in sequence, so neither costs the hero its
+                centre). ALWAYS mounted: gating the caption with the Waveform
+                (98337fd swept it inside that gate) re-mounted an
+                already-EXPIRED caption on every album re-entry — e.g. a queue
+                close — and replayed its 260ms caption-out ghost. */}
+            <p className="absolute inset-x-0 top-1 flex h-4 items-center justify-center text-[11px] leading-4 text-muted">
+              {verdict !== "synced" && (
+                <span
+                  key={verdict}
+                  aria-hidden={captionExpired || undefined}
+                  className={`inline-block ${
+                    captionExpired
+                      ? "animate-[caption-out_260ms_var(--ease-out-tk)_both]"
+                      : `animate-[caption-in_200ms_var(--ease-out-tk)_both] ${
+                          verdict === "pending" ? "[animation-delay:400ms]" : ""
+                        }`
+                  }`}
+                >
+                  {verdict === "pending"
+                    ? "Finding lyrics…"
+                    : verdict === "offline"
+                      ? "Lyrics unavailable — offline"
+                      : "No synced lyrics"}
+                </span>
+              )}
+            </p>
+            {remoteDevice && (verdict === "synced" || captionExpired) && (
+              <div className="absolute inset-x-0 top-1 flex h-4 items-center justify-center animate-[caption-in_200ms_var(--ease-out-tk)_both]">
+                <DeviceTag device={remoteDevice} playing={playing} showName />
+              </div>
+            )}
             {/* Gated to the active view — one living Waveform per state (the
                 header's md carries lyrics + queue; two mounted ran two
                 rAF/bands loops). lastAlive bridges the mount/unmount so the
                 album toggle doesn't re-bloom the capsules from the dot. */}
             {active === "album" && <Waveform size="lg" playing={np.status === "playing"} />}
-            <div className="flex-1" />
           </div>
         </div>
 
