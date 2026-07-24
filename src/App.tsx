@@ -1239,7 +1239,9 @@ function App() {
   const activeDevice = useSpotifyDevice();
   const remoteDevice: SpotifyDevice | null =
     activeDevice && np?.player === "spotify" ? activeDevice : null;
-  // Jump-intermediate suppression for the pill's announcement layer.
+  // Jump-intermediate suppression for the pill's track-change layer (the
+  // title fade + the AT live region below; the separator's visual announce
+  // ladder was removed 2026-07-23).
   const announceSuppressed = isAnnounceSuppressed(np);
   // Backend-initiated jumps (the queue-aware skip: transport next /
   // Ctrl+Alt+N landing on the up-next front) arm the same suppression the
@@ -1248,14 +1250,13 @@ function App() {
   // change must announce).
   useEffect(() => onSpotifyJump(armSuppression), []);
   useEffect(() => onSpotifyJumpCancel(clearSuppression), []);
-  // The track-change announcement's AT twin: the visual choreography is all
-  // aria-hidden (the Waveform ladder, the pill title fade), so identity
-  // changes reach a screen reader only through this text. Ref-gated — the
-  // first identity after mount seeds silently (launch is not a change) — and
-  // held by the SAME suppression the visual ladder rides (a play_now jump's
-  // intermediates stay silent; the landing's unsuppressed render announces
-  // once). No parallel suppression machinery: announceSuppressed above IS
-  // the gate.
+  // The track-change AT announcement: the visual layer is all aria-hidden
+  // (the pill title fade), so identity changes reach a screen reader only
+  // through this text. Ref-gated — the first identity after mount seeds
+  // silently (launch is not a change) — and held by the SAME suppression the
+  // title fade rides (a play_now jump's intermediates stay silent; the
+  // landing's unsuppressed render announces once). No parallel suppression
+  // machinery: announceSuppressed above IS the gate.
   const [announceText, setAnnounceText] = useState("");
   const announcedKey = useRef<string | null>(null);
   useEffect(() => {
@@ -1631,9 +1632,10 @@ function App() {
                   where a change needs NOTICING; card/expanded already read
                   as now-playing surfaces): the incoming title/artist fade
                   in via remount (outgoing exits instantly — track changes
-                  exit fast and plain) while the separator runs its announce
-                  ladder — collapse, gray re-multiply, accent igniting last
-                  in the NEW album's color. */}
+                  exit fast and plain) — the title fade IS the track-change
+                  beat; the separator rides straight through (the announce
+                  ladder was removed 2026-07-23: its collapse-to-one-dot
+                  read as a full reset at focus's room scale). */}
               <p className="min-w-0 flex-1 truncate text-xs font-medium text-fg">
                 <TrackFadeSpan
                   key={`t:${lyricsKeyOf(np)}`}
@@ -1642,15 +1644,7 @@ function App() {
                 >
                   {np.title}
                 </TrackFadeSpan>
-                {/* A play_now jump's intermediates don't announce — the
-                    separator would run five drain/ignite ladders for tracks
-                    the user only skipped through; the TARGET's arrival
-                    announces once, normally (isAnnounceSuppressed). */}
-                <Waveform
-                  trailing={!np.artist}
-                  announceKey={announceSuppressed ? undefined : (lyricsKeyOf(np) ?? undefined)}
-                  playing={np.status === "playing"}
-                />
+                <Waveform trailing={!np.artist} playing={np.status === "playing"} />
                 <TrackFadeSpan
                   key={`a:${lyricsKeyOf(np)}`}
                   k={lyricsKeyOf(np)}

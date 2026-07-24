@@ -14,9 +14,10 @@
  * (room Waveform, now 19 capsules at 780×100 (⅔ the console) — clearly narrower than
  * the console), then the console. The horizon + console live OUTSIDE
  * the upper-room swap so they never remount: the horizon survives every
- * track change and runs the ANNOUNCEMENT (announceKey) — the pill is
- * hidden behind this takeover, so the horizon is the room's one
- * now-playing pulse. The upper room carries NO other Waveform
+ * track change and rides straight through it (its announce ladder was
+ * removed 2026-07-23 — the collapse-to-one-dot read as a full reset at
+ * room scale; the title fade is the room's track-change beat), staying
+ * the room's one now-playing pulse. The upper room carries NO other Waveform
  * (SeparatorDot only): one reactive surface per view. Grafts: art at
  * ~560px (The Hang), the asymmetric deep-bottom lyric mask (The Hang),
  * the reserved lyrics-status caption slot (Gatefold), one-stack-two-seats
@@ -26,7 +27,7 @@
  * on EVERY track change (the key-mismatch gate in lyricsKeyOf's doc
  * comment), so the active seat always exits through the fallback and
  * remounts — per-track state (title fade, lyric panel) resets for free.
- * Anything that must SURVIVE a track change (the announcing horizon)
+ * Anything that must SURVIVE a track change (the riding horizon)
  * must live outside the swap; nothing keyed inside a seat does.
  *
  * Realm notes: own onNowPlaying → posClock.ingest loop (posClock is
@@ -204,19 +205,19 @@ export default function Focus() {
   const remoteDevice: SpotifyDevice | null =
     activeDevice && np?.player === "spotify" ? activeDevice : null;
   // Jump-intermediate suppression, exactly the pill's wiring (App.tsx): a
-  // play_now jump flickers through intermediates, and the room's horizon —
-  // this window's one announcing surface — must not run the full drain/
-  // ignite ladder for tracks the user only skipped through. The target's
-  // arrival announces once, normally.
+  // play_now jump flickers through intermediates that must not announce —
+  // the target's arrival announces once, normally. Since the horizon's
+  // visual announce ladder was removed (2026-07-23: its collapse-to-one-dot
+  // read as a full reset at room scale), the AT live region below is this
+  // window's one announcing surface.
   const announceSuppressed = isAnnounceSuppressed(np);
   useEffect(() => onSpotifyJump(armSuppression), []);
   useEffect(() => onSpotifyJumpCancel(clearSuppression), []);
-  // The AT twin of the horizon's announcement (App.tsx's wiring, own realm —
-  // each webview owns its live regions): the room's choreography is all
-  // aria-hidden, so identity changes reach AT only through this text.
-  // Ref-gated (the first identity after open seeds silently — the takeover
-  // opened ON this track) and held by the same suppression the horizon
-  // rides; the jump landing announces once.
+  // The track-change AT announcement (App.tsx's wiring, own realm — each
+  // webview owns its live regions): the room's visual layer is aria-hidden,
+  // so identity changes reach AT only through this text. Ref-gated (the
+  // first identity after open seeds silently — the takeover opened ON this
+  // track) and suppression-held; the jump landing announces once.
   const [announceText, setAnnounceText] = useState("");
   const announcedKey = useRef<string | null>(null);
   useEffect(() => {
@@ -521,11 +522,7 @@ export default function Focus() {
               region above absorbs the rest — so mb = half the free space
               (Thien, 2026-07-14: "even" gaps both sides). */}
           <div className="mb-(--horizon-mb) flex shrink-0 items-center justify-center">
-            <Waveform
-              size="room"
-              announceKey={announceSuppressed ? undefined : (lyricsKeyOf(np) ?? undefined)}
-              playing={np?.status === "playing"}
-            />
+            <Waveform size="room" playing={np?.status === "playing"} />
           </div>
 
           {/* THE CONSOLE — persistent (a summoned takeover shows its
