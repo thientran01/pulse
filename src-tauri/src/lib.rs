@@ -103,11 +103,15 @@ fn hotkey_defs() -> [HotkeyDef; 7] {
             },
         },
         // Queue-aware like the media_next command — lands on the up-next front.
+        // "track-nudge" carries only the direction (the seek-nudge pattern):
+        // the frontend's track-change slide needs to know next vs prev, and
+        // hotkey skips bypass the transport buttons that would note it.
         HotkeyDef {
             id: "next",
             label: "Next track",
             default_chord: HK_NEXT,
             action: |app| {
+                let _ = app.emit("track-nudge", 1);
                 if !upnext::try_queue_skip(app) {
                     media::next();
                     emit_now(app);
@@ -119,6 +123,7 @@ fn hotkey_defs() -> [HotkeyDef; 7] {
             label: "Previous track",
             default_chord: HK_PREV,
             action: |app| {
+                let _ = app.emit("track-nudge", -1);
                 media::prev();
                 emit_now(app);
             },

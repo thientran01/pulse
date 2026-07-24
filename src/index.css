@@ -256,6 +256,32 @@ body {
   animation: caption-in 140ms var(--ease-out-tk) both;
 }
 
+/* Track-change slide (2026-07-23): the directional variant of the title
+ * beat — incoming content drifts in from the skip's direction (--track-dx:
+ * positive = next, entering from the right; negative = prev, from the
+ * left; unset/0 = the plain fade). Opacity still carries the swap; the
+ * offset is deliberately small (SLIDE_PX in lib/trackDir.ts) so heavy
+ * skippers never tire of it. translate, not transform: compositor-friendly
+ * and it can't collide with an imperative transform write (the scale-x-0
+ * lesson). Exits on the CSS path stay instant (remount-keyed); only the
+ * motion-managed surfaces (expanded content, focus seats) slide out. */
+.track-in {
+  /* 140ms, one rung under the first cut's 200 — Thien's live verdict
+     2026-07-23: "a bit dramatic... a bit faster". Next knob if it still
+     reads staged: the SLIDE_PX amplitudes, not more speed. */
+  animation: track-slide-in 140ms var(--ease-out-tk) both;
+}
+@keyframes track-slide-in {
+  from {
+    opacity: 0;
+    translate: var(--track-dx, 0px) 0;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
 /* Focus mode's arrival: the whole room fades in as one plane (200ms,
  * opacity only — chrome gets no theater; the lyric cascade and the hero's
  * own bloom are the arrival's only choreography). */

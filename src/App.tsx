@@ -33,6 +33,7 @@ import {
 } from "./LyricsPanel";
 import { useArt, useArtAccent } from "./lib/artAccent";
 import * as posClock from "./lib/posClock";
+import { initTrackDir, SLIDE_PX, SLIDE_SETTLE_MS, takeTrackDir } from "./lib/trackDir";
 import { initReactive, setReactiveEnabledSetting } from "./lib/reactive";
 import { MODE_SIZES, WINDOW_MAX, type Mode } from "./lib/sizes";
 import { DUR, EASE } from "./lib/tokens";
@@ -758,6 +759,9 @@ function ExpandedView({
   onCloseQueue,
   spotifyConnected,
   remoteDevice,
+  slideDir,
+  slideSuppressed,
+  slideEpoch,
 }: {
   np: NowPlaying;
   artUrl: string | null;
@@ -773,6 +777,16 @@ function ExpandedView({
   /** Non-PC playback device (or null) — the "Playing on <device>" tag on the
    * album view's metadata line. Already gated to a live Spotify session. */
   remoteDevice: SpotifyDevice | null;
+  /** Track-change slide direction (App's ledger-consumed state): +1 = next
+   * (out left / in from the right), -1 = prev, mirrored. */
+  slideDir: 1 | -1;
+  /** Jump-intermediate suppression (isAnnounceSuppressed) — intermediates
+   * swap by plain opacity, the landing target slides once. */
+  slideSuppressed: boolean;
+  /** The settled transition epoch (App's ledger) — the REMOUNT key for every
+   * sliding surface; raw-key flaps inside SLIDE_SETTLE_MS update content in
+   * place instead of restarting the slide. */
+  slideEpoch: number;
 }) {
   const reducedMotion = useReducedMotion();
   // Key-stamped gate: never render the new track's header over the old
@@ -878,6 +892,50 @@ function ExpandedView({
       ? "opacity-100 [transition:opacity_200ms_var(--ease-out-tk)]"
       : "invisible opacity-0 [transition:opacity_140ms_var(--ease-out-tk),visibility_0s_140ms]";
 
+  // The track-change slide (2026-07-23): content INSIDE a layer swaps with a
+  // small directional drift — the LAYERS themselves still crossfade in
+  // place, chrome and the waveform never move. dx = 0 (jump intermediates)
+  // degrades every variant to the existing plain opacity swap.
+  const contentDx = slideSuppressed ? 0 : slideDir * SLIDE_PX.content;
+  const headerDx = slideDir * SLIDE_PX.header;
+  const slideEase = [...EASE.out] as [number, number, number, number];
+  // 140/90, one rung under the first cut's 200/140 — Thien's live verdict
+  // 2026-07-23: "a bit dramatic... a bit faster". Next knob: SLIDE_PX.
+  const slideIn = { duration: reducedMotion ? 0 : DUR[2] / 1000, ease: slideEase };
+  const slideOut = { duration: reducedMotion ? 0 : DUR[1] / 1000, ease: slideEase };
+  // "still" mounts without theater — the earned cascade owns that entrance.
+  // Exits carry pointerEvents none (the PR #48 inert-exiting rule): the old
+  // panel's click-to-seek lines must not eat a click meant for the new track.
+  const contentSlide = {
+    still: { opacity: 1, x: 0 },
+    enter: (dx: number) => ({ opacity: 0, x: dx }),
+    center: { opacity: 1, x: 0 },
+    exit: (dx: number) => ({
+      opacity: 0,
+      x: -dx,
+      pointerEvents: "none" as const,
+      transition: slideOut,
+    }),
+  };
+  // The album block additionally lifts its exiting copy OUT OF FLOW (absolute
+  // in the relative wrapper below) so the incoming block takes the seat
+  // without the column stacking two covers for the exit beat.
+  const albumSlide = {
+    ...contentSlide,
+    // Plus the out-of-flow lift, so the incoming block takes the seat
+    // without the column stacking two covers for the exit beat.
+    exit: (dx: number) => ({
+      opacity: 0,
+      x: -dx,
+      position: "absolute" as const,
+      left: 0,
+      right: 0,
+      top: 0,
+      pointerEvents: "none" as const,
+      transition: slideOut,
+    }),
+  };
+
   return (
     // pb-0.5 (+ the shell's 1px border) seats the h-8 transport row's center
     // on the 25px control centerline (see ModeCluster) — 2px less than the
@@ -908,7 +966,18 @@ function ExpandedView({
                 seat right after the clipped text. ml-1 over the waveform's
                 mx-1.5 = the same 10px gap as the card. */}
             <div className="flex min-w-0 items-center">
-              <TruncateTip text={np.title} className="text-[15px] font-medium text-fg" />
+              {/* Keyed track slide (one grammar with the pill/card): the text
+                  drifts in from the skip's direction; the waveform beside it
+                  holds its seat — the living instance never slides. */}
+              <TrackFadeSpan
+                key={`xt:${slideEpoch}`}
+                k={trackKey}
+                suppress={slideSuppressed}
+                dx={headerDx}
+                className="block min-w-0"
+              >
+                <TruncateTip text={np.title} className="text-[15px] font-medium text-fg" />
+              </TrackFadeSpan>
               {/* Mounted only while the header shows — one living Waveform per
                   state (doctrine: one reactive surface per view). In the album
                   view the lg hero is that surface; leaving both always-mounted
@@ -924,42 +993,59 @@ function ExpandedView({
             {/* text-xs leading-4 = the card's metadata rung exactly, so the
                 artist line holds size through the card⇄expanded morph (the
                 15px title above already does; 13px here visibly stepped). */}
-            <TruncateTip text={np.artist} className="text-xs leading-4 text-muted" />
+            <TrackFadeSpan
+              key={`xa:${slideEpoch}`}
+              k={trackKey}
+              suppress={slideSuppressed}
+              dx={headerDx}
+              className="block min-w-0"
+            >
+              <TruncateTip text={np.artist} className="text-xs leading-4 text-muted" />
+            </TrackFadeSpan>
           </div>
         </div>
 
-        {/* Lyrics view — pt-[52px] clears the fixed header. Keyed per track so
-            a change re-anchors fresh instead of sliding the old offset. */}
+        {/* Lyrics view — the top-[52px] body box clears the fixed header.
+            Keyed per track so a change re-anchors fresh; the outgoing panel
+            slides out through AnimatePresence (both states sit in the same
+            absolute box, so the 140ms exit overlaps the entrance as one
+            directional motion — dx 0 degrades it to the plain crossfade). */}
         <div
           inert={active !== "lyrics"}
-          className={`absolute inset-0 flex flex-col bg-surface pt-[52px] ${layer(active === "lyrics")}`}
+          className={`absolute inset-0 bg-surface ${layer(active === "lyrics")}`}
         >
-          {lyricsLive && (
-            // A PLAIN arrival (into a held, already-visible seat) still gets
-            // the title-in beat — 140ms caption-in, the pill's track-change
-            // grammar — because no layer crossfade runs anymore; the earned
-            // cascade path stays unwrapped so choreography never stacks.
-            <div
-              key={lyrics.key}
-              className={`flex min-h-0 flex-1 flex-col ${
-                celebrate ? "" : "animate-[caption-in_140ms_var(--ease-out-tk)_both]"
-              }`}
-            >
-              <LyricsPanel
-                lines={lyrics.lines}
-                seekable={seekable}
-                leadMs={VOCAL_LEAD_MS[np.player]}
-                entrance={celebrate}
-              />
-            </div>
-          )}
+          <AnimatePresence initial={false} custom={contentDx}>
+            {lyricsLive && (
+              // A PLAIN arrival slides in from the skip's direction (the
+              // track-change grammar; a resolve into a held seat still
+              // carries the change's direction) — the earned cascade path
+              // mounts "still" so choreography never stacks.
+              <motion.div
+                key={lyrics.key}
+                custom={contentDx}
+                variants={contentSlide}
+                initial={celebrate ? "still" : "enter"}
+                animate="center"
+                exit="exit"
+                transition={slideIn}
+                className="absolute inset-x-0 bottom-0 top-[52px] flex flex-col"
+              >
+                <LyricsPanel
+                  lines={lyrics.lines}
+                  seekable={seekable}
+                  leadMs={VOCAL_LEAD_MS[np.player]}
+                  entrance={celebrate}
+                />
+              </motion.div>
+            )}
+          </AnimatePresence>
           {/* The held-seat interlude: old lines exited fast and plain, the
               fixed header + waveform announcement narrate the new track, and
               the body answers the wait on the same 400ms-delayed caption
               pattern as the album view — cache hits resolve before it ever
               shows. */}
           {active === "lyrics" && !lyricsLive && (
-            <p className="flex flex-1 items-center justify-center text-[11px] leading-4 text-muted">
+            <p className="absolute inset-x-0 bottom-0 top-[52px] flex items-center justify-center text-[11px] leading-4 text-muted">
               <span className="inline-block animate-[caption-in_200ms_var(--ease-out-tk)_both] [animation-delay:400ms]">
                 Finding lyrics…
               </span>
@@ -981,26 +1067,51 @@ function ExpandedView({
           inert={active !== "album"}
           className={`absolute inset-0 flex flex-col items-center bg-surface pt-8 ${layer(active === "album")}`}
         >
-          <Art url={artUrl} size={190} radiusPx={12} />
-          {/* Metadata: title + artist, then a HEIGHT-RESERVED device-tag slot.
-              The tag mounts only when a non-PC device is playing, but the slot
-              holds its row height whether or not it's present: the tag
-              refreshes on track change and a LATE "spotify-device" event lands
-              after the view settled — an un-reserved conditional row nudged the
-              centered hero wave ~8px on that flip (98337fd dropped the reserve
-              reasoning only about the top-pinned art). Reserved, nothing below
-              shifts on device flips (the art is TOP-PINNED at pt-8, so it never
-              moved — this restores the same guarantee for the wave). */}
-          <div className="mt-3 min-w-0 self-stretch text-center">
-            <p className="truncate text-sm font-medium text-fg">{np.title}</p>
-            <p className="truncate text-xs text-muted">
-              {np.artist}
-              {np.album && <SeparatorDot />}
-              {np.album}
-            </p>
-            <div className="mt-1 flex h-4 justify-center">
-              {remoteDevice && <DeviceTag device={remoteDevice} playing={playing} showName />}
-            </div>
+          {/* Epoch-keyed identity block — cover + metadata slide as ONE plane
+              on a track change (KEPT on Thien's live verdict 2026-07-23 —
+              hero art is content, and content carries the slide; only
+              chrome-seat art crossfades in place). The relative wrapper keeps the exiting copy
+              overlaid (albumSlide absolutizes it) so the caption/hero below
+              never move. Keying Art per track skips its crossfade on track
+              changes (the slide carries the swap); rev-bump heals within a
+              track still crossfade. */}
+          <div className="relative w-full">
+            <AnimatePresence initial={false} custom={contentDx}>
+              <motion.div
+                key={`alb:${slideEpoch}`}
+                custom={contentDx}
+                variants={albumSlide}
+                initial="enter"
+                animate="center"
+                exit="exit"
+                transition={slideIn}
+                className="flex w-full flex-col items-center"
+              >
+                <Art url={artUrl} size={190} radiusPx={12} />
+                {/* Metadata: title + artist, then a HEIGHT-RESERVED device-tag
+                    slot. The tag mounts only when a non-PC device is playing,
+                    but the slot holds its row height whether or not it's
+                    present: the tag refreshes on track change and a LATE
+                    "spotify-device" event lands after the view settled — an
+                    un-reserved conditional row nudged the centered hero wave
+                    ~8px on that flip (98337fd dropped the reserve reasoning
+                    only about the top-pinned art). Reserved, nothing below
+                    shifts on device flips (the art is TOP-PINNED at pt-8, so
+                    it never moved — this restores the same guarantee for the
+                    wave). */}
+                <div className="mt-3 min-w-0 self-stretch text-center">
+                  <p className="truncate text-sm font-medium text-fg">{np.title}</p>
+                  <p className="truncate text-xs text-muted">
+                    {np.artist}
+                    {np.album && <SeparatorDot />}
+                    {np.album}
+                  </p>
+                  <div className="mt-1 flex h-4 justify-center">
+                    {remoteDevice && <DeviceTag device={remoteDevice} playing={playing} showName />}
+                  </div>
+                </div>
+              </motion.div>
+            </AnimatePresence>
           </div>
           {/* Caption + hero fill the flex remainder as THREE zones: an
               upper flex-1 that CENTERS the caption, the wave at its natural
@@ -1209,12 +1320,17 @@ function PresenceOverlay({ corner }: { corner: DockCorner }) {
  * replay the track-change fade. */
 let lastPillKey: string | null = null;
 
-/** Pill title/artist span: remounted per track key by the parent's `key`,
- * fading in ONLY when the mount is a real track change (a mode switch into
- * the pill re-creates the DOM with the same key — no beat). */
+/** Track-change text span (pill titles, card titles, the expanded header):
+ * remounted per track key by the parent's `key`, animating ONLY when the
+ * mount is a real track change (a mode switch re-creates the DOM with the
+ * same key — no beat; lastPillKey is shared module state, which works
+ * because only one surface's spans are mounted per mode). With `dx` the
+ * fade becomes the directional track slide (.track-in); without, the plain
+ * title-in fade. */
 function TrackFadeSpan({
   k,
   suppress = false,
+  dx = 0,
   className,
   children,
 }: {
@@ -1222,6 +1338,8 @@ function TrackFadeSpan({
   /** A play_now jump's intermediate flicker — real remount, no announcement
    * (the target's own mount animates normally; see isAnnounceSuppressed). */
   suppress?: boolean;
+  /** Signed slide offset in px (trackDir × SLIDE_PX.<surface>); 0 = fade. */
+  dx?: number;
   className?: string;
   children: React.ReactNode;
 }) {
@@ -1231,11 +1349,40 @@ function TrackFadeSpan({
   useEffect(() => {
     lastPillKey = k;
   }, [k]);
-  return <span className={`${animate ? "title-in " : ""}${className ?? ""}`}>{children}</span>;
+  return (
+    <span
+      className={`${animate ? (dx !== 0 ? "track-in " : "title-in ") : ""}${className ?? ""}`}
+      style={
+        animate && dx !== 0 ? ({ "--track-dx": `${dx}px` } as React.CSSProperties) : undefined
+      }
+    >
+      {children}
+    </span>
+  );
 }
 
 function App() {
   const [np, setNp] = useState<NowPlaying | null>(null);
+  // Track-change slide direction — consumed from the ledger when the TRACK
+  // key changes (status flips and art rev-bumps keep the last value). Held
+  // in state, not consumed per-surface: the slide-IN can land seconds after
+  // the change (a lyrics resolve into a held seat) and must still know which
+  // way the skip went.
+  const [trackDir, setTrackDir] = useState<1 | -1>(1);
+  const lastTrackKey = useRef<string | null>(null);
+  // The SLIDE EPOCH: one perceived track change per settle window. GSMTC
+  // delivers a skip's fields piecemeal (title/artist/album from the media
+  // properties, duration from the TIMELINE update), so the raw lyricsKeyOf
+  // can flap 2–3 times within ~200ms of one skip — keying the sliding
+  // surfaces on it remounted them per flap, and a flap back to a still-
+  // exiting key made AnimatePresence re-adopt the exiting album block and
+  // yank it back to center mid-exit (Thien's live "held back by a rope"
+  // report, 2026-07-23; invisible in the mock, which emits atomically).
+  // Keyed on the epoch, stragglers update content IN PLACE inside the one
+  // running slide. Bursts faster than the window also merge — one slide
+  // per mash, landing on the right content.
+  const [slideEpoch, setSlideEpoch] = useState(0);
+  const epochAt = useRef(0);
   useEffect(
     () =>
       onNowPlaying((next) => {
@@ -1244,10 +1391,32 @@ function App() {
         // either — adopting its identity would pair the new track's clock
         // with the old track's lyrics.
         if (!posClock.ingest(next)) return;
+        // Direction consumes OUTSIDE the updater (StrictMode double-invokes
+        // updaters; takeTrackDir clears on read). track→track only: a
+        // session appearing or vanishing isn't a skip — those RESET to
+        // forward, so a new session can't inherit the last skip's -1
+        // (quick-review catch). Known-and-accepted: a play_now jump's first
+        // suppressed intermediate consumes the note; harmless while Next is
+        // the only intermediate producer (its note ≡ the forward default).
+        const nextKey = lyricsKeyOf(next);
+        if (nextKey !== lastTrackKey.current) {
+          // ALWAYS consume (clears the slot) so a note stranded by a vanish
+          // can't misdirect a later unrelated advance inside its TTL — but
+          // only a real→real change USES the value.
+          const noted = takeTrackDir();
+          setTrackDir(nextKey !== null && lastTrackKey.current !== null ? noted : 1);
+          lastTrackKey.current = nextKey;
+          const now = performance.now();
+          if (now - epochAt.current > SLIDE_SETTLE_MS) {
+            epochAt.current = now;
+            setSlideEpoch((e) => e + 1);
+          }
+        }
         setNp((prev) => (sameIdentity(prev, next) ? prev : next));
       }),
     [],
   );
+  useEffect(() => initTrackDir(), []);
   const artUrl = useArt(np?.art_id ?? null);
   // A data URL that fails to decode falls back to the note glyph instead of
   // the browser's broken-image icon.
@@ -1711,18 +1880,25 @@ function App() {
                 12px it needs to breathe. */}
             <div className="flex h-full items-center gap-2 pl-1.5 pr-3">
               <Art url={shownArt} size={26} radiusPx={6} />
-              {/* Track-change announcement (pill only — the quiet state is
-                  where a change needs NOTICING; card/expanded already read
-                  as now-playing surfaces): the incoming title/artist fade
-                  in via remount (outgoing exits instantly — track changes
-                  exit fast and plain) while the separator runs its announce
+              {/* Track-change title beat: the incoming title/artist slide in
+                  via remount (.track-in — one directional grammar with the
+                  card/expanded since 2026-07-23; outgoing exits instantly,
+                  track changes exit fast and plain). The WAVEFORM announce
                   ladder — collapse, gray re-multiply, accent igniting last
-                  in the NEW album's color. */}
+                  in the NEW album's color — stays pill-only: the quiet state
+                  is where a change needs noticing. */}
               <p className="min-w-0 flex-1 truncate text-xs font-medium text-fg">
+                {/* inline-block: translate does NOT apply to non-replaced
+                    inline boxes (spec) — a bare span slides nowhere and the
+                    beat silently degrades to the fade (quick-review catch).
+                    Default baseline alignment, so nothing shifts against the
+                    inline waveform beside it. */}
                 <TrackFadeSpan
-                  key={`t:${lyricsKeyOf(np)}`}
+                  key={`t:${slideEpoch}`}
                   k={lyricsKeyOf(np)}
                   suppress={announceSuppressed}
+                  dx={trackDir * SLIDE_PX.pill}
+                  className="inline-block"
                 >
                   {np.title}
                 </TrackFadeSpan>
@@ -1736,10 +1912,11 @@ function App() {
                   playing={np.status === "playing"}
                 />
                 <TrackFadeSpan
-                  key={`a:${lyricsKeyOf(np)}`}
+                  key={`a:${slideEpoch}`}
                   k={lyricsKeyOf(np)}
                   suppress={announceSuppressed}
-                  className="font-normal text-muted"
+                  dx={trackDir * SLIDE_PX.pill}
+                  className="inline-block font-normal text-muted"
                 >
                   {np.artist}
                 </TrackFadeSpan>
@@ -1815,7 +1992,20 @@ function App() {
                     against a cap-height bold title. ml-1 over the waveform's
                     own mx-1.5 = the 10px gap. */}
                 <div className="flex min-w-0 items-center">
-                  <p className="min-w-0 truncate text-[15px] font-medium text-fg">{np.title}</p>
+                  {/* One track-change grammar (2026-07-23): the card's titles
+                      join the directional slide — the waveform beside them
+                      never moves (its announcement is the pill's beat). */}
+                  <p className="min-w-0 truncate text-[15px] font-medium text-fg">
+                    <TrackFadeSpan
+                      key={`ct:${slideEpoch}`}
+                      k={lyricsKeyOf(np)}
+                      suppress={announceSuppressed}
+                      dx={trackDir * SLIDE_PX.card}
+                      className="inline-block max-w-full truncate align-top"
+                    >
+                      {np.title}
+                    </TrackFadeSpan>
+                  </p>
                   <span className="ml-1 flex shrink-0 items-center">
                     <Waveform size="md" trailing playing={np.status === "playing"} />
                   </span>
@@ -1826,9 +2016,17 @@ function App() {
                     so it explains the waveform sitting on its resting dot. */}
                 <div className="flex min-w-0 items-center gap-1">
                   <p className="min-w-0 flex-1 truncate text-xs leading-4 text-muted">
-                    {np.artist}
-                    {np.album && <SeparatorDot />}
-                    {np.album}
+                    <TrackFadeSpan
+                      key={`ca:${slideEpoch}`}
+                      k={lyricsKeyOf(np)}
+                      suppress={announceSuppressed}
+                      dx={trackDir * SLIDE_PX.card}
+                      className="inline-block max-w-full truncate align-top"
+                    >
+                      {np.artist}
+                      {np.album && <SeparatorDot />}
+                      {np.album}
+                    </TrackFadeSpan>
                   </p>
                   {remoteDevice && <DeviceTag device={remoteDevice} playing={playing} />}
                 </div>
@@ -1850,6 +2048,9 @@ function App() {
             onCloseQueue={() => setQueueOpen(false)}
             spotifyConnected={spotifyConnected}
             remoteDevice={remoteDevice}
+            slideDir={trackDir}
+            slideSuppressed={announceSuppressed}
+            slideEpoch={slideEpoch}
           />
         )}
         </ModeContent>
