@@ -508,7 +508,7 @@ export default function Focus() {
 
           {/* THE HORIZON — the room's one living reactive surface, OUTSIDE
               the swap (never remounts, so it survives every track change
-              and the announcement always fires — the pill is hidden behind
+              and rides straight through it — the pill is hidden behind
               this takeover, so the horizon is the only now-playing pulse on
               screen). RESIZED 2026-07-14 (Thien's live verdict): the 1170px
               band matched the progress bar's width and read as a second
