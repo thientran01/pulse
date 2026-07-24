@@ -100,7 +100,11 @@ export type LyricsState =
   // "offline" = the fetch bailed on a transport failure (offline/DNS/timeout),
   // NOT recorded as a miss — a distinct, honest caption ("unavailable —
   // offline" vs "No synced lyrics"). lyrics.rs sets the `offline` flag.
-  | { status: "loading" | "none" | "offline" }
+  // EVERY terminal state stamps the track key it answers for (null = the
+  // no-track resting state), so consumers can tell a fresh verdict from the
+  // previous track's stale one — see lyricsVerdictOf.
+  | { status: "loading" }
+  | { status: "none" | "offline"; key: string | null }
   | { status: "synced"; lines: LyricLine[]; key: string };
 
 /** The track identity a lyric fetch is keyed on. Consumers compare a synced
@@ -116,13 +120,13 @@ export function lyricsKeyOf(np: NowPlaying | null): string | null {
 
 /** Fetch + parse synced lyrics per track; "none" is a definitive miss. */
 export function useLyrics(np: NowPlaying | null): LyricsState {
-  const [state, setState] = useState<LyricsState>({ status: "none" });
+  const [state, setState] = useState<LyricsState>({ status: "none", key: null });
   const lastKey = useRef<string | null>(null);
   const key = lyricsKeyOf(np);
   useEffect(() => {
     if (!key || !np) {
       lastKey.current = null;
-      setState({ status: "none" });
+      setState({ status: "none", key: null });
       return;
     }
     if (key === lastKey.current) return;
@@ -140,8 +144,8 @@ export function useLyrics(np: NowPlaying | null): LyricsState {
         lines.length > 0
           ? { status: "synced", lines, key }
           : l.offline
-            ? { status: "offline" }
-            : { status: "none" },
+            ? { status: "offline", key }
+            : { status: "none", key },
       );
     });
     return () => {
@@ -150,6 +154,52 @@ export function useLyrics(np: NowPlaying | null): LyricsState {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
   return state;
+}
+
+export type LyricsVerdict = "pending" | "synced" | "none" | "offline";
+
+/** What the lyrics state says about the CURRENT track. A stale state — the
+ * previous track's verdict, still standing during useLyrics' one-render
+ * loading gap — reads as "pending", never as an answer: captions and surface
+ * routing read this, so a stale "No synced lyrics" can't show against a new
+ * track. */
+export function lyricsVerdictOf(np: NowPlaying | null, lyrics: LyricsState): LyricsVerdict {
+  if (lyrics.status === "loading") return "pending";
+  return lyrics.key === lyricsKeyOf(np) ? lyrics.status : "pending";
+}
+
+/** How long the surface router holds its seat while a new track's verdict is
+ * pending before conceding to the art fallback. Cache hits resolve in a few
+ * frames and typical LRCLIB round trips land well inside it; past this, art
+ * is better company for the wait than a quiet lyric seat. */
+export const HOLD_GRACE_MS = 2500;
+
+/** The verdict-gated hold: true while a track change's fetch interlude should
+ * keep the surface router in its current seat — the interlude never moves the
+ * surface; only verdicts (or this grace expiring) do. The expiry resets AT
+ * RENDER TIME on a key change (React's adjust-state-during-render pattern),
+ * never in an effect: an effect reset lands one render late, leaking the
+ * previous pendency's `expired` into the first render after a track change —
+ * as a bare boolean that defeated the hold on exactly the flash frame (mock
+ * recorder, 2026-07-23), and as a persisted per-key stamp it defeated the
+ * hold for a REPLAYED key (prev back to a slow-fetch track; AM's session
+ * vanish/return) whose old expiry still matched (quick-review catch). */
+export function useSeatHold(np: NowPlaying | null, verdict: LyricsVerdict): boolean {
+  const key = lyricsKeyOf(np);
+  const [graceKey, setGraceKey] = useState<string | null>(null);
+  const [expired, setExpired] = useState(false);
+  if (key !== graceKey) {
+    // Synchronous re-arm for the new pendency; React re-renders before commit.
+    setGraceKey(key);
+    setExpired(false);
+  }
+  useEffect(() => {
+    if (!key) return;
+    const t = window.setTimeout(() => setExpired(true), HOLD_GRACE_MS);
+    return () => window.clearTimeout(t);
+  }, [key]);
+  // key === null (no track) holds nothing — there's no seat to protect.
+  return verdict === "pending" && key !== null && !expired;
 }
 
 /** Browsing hands control back three ways, fastest first: the "Now" chip

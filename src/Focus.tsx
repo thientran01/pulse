@@ -37,7 +37,7 @@
  * audio capture gate are widened backend-side to keep feeding this window
  * while the main widget hides behind it.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { MorphIcon } from "./icons/MorphIcon";
 import { commands, onNowPlaying, onSpotifyJump, onSpotifyJumpCancel } from "./lib/backend";
@@ -47,7 +47,8 @@ import * as posClock from "./lib/posClock";
 import { initReactive } from "./lib/reactive";
 import { DUR, EASE } from "./lib/tokens";
 import { DeviceTag } from "./DeviceTag";
-import { LyricsPanel, lyricsKeyOf, useLyrics } from "./LyricsPanel";
+import { LyricsPanel, lyricsKeyOf, lyricsVerdictOf, useLyrics, useSeatHold } from "./LyricsPanel";
+import { initTrackDir, SLIDE_PX, SLIDE_SETTLE_MS, takeTrackDir } from "./lib/trackDir";
 import {
   armSuppression,
   clearSuppression,
@@ -100,6 +101,7 @@ function IdentityStack({
   captionExpired,
   centered,
   device,
+  dx = 0,
 }: {
   np: NowPlaying;
   artUrl: string | null;
@@ -113,6 +115,11 @@ function IdentityStack({
    * the metadata; the room horizon is at rest because the audio is
    * elsewhere. Already gated to a live Spotify session. */
   device: SpotifyDevice | null;
+  /** Track-change slide offset for the keyed metadata block (the CENTERED
+   * room, where no seat remount carries direction — the split seat slides
+   * as a whole plane and passes 0 so motion never doubles up). Art stays
+   * static here; only the split's plane carries it. */
+  dx?: number;
 }) {
   const align = centered ? "items-center text-center" : "items-start text-left";
   // Broken art (a CDN 403/404, or AM's lagged first read) degrades to the note
@@ -141,9 +148,13 @@ function IdentityStack({
           <MorphIcon name="note" size={44} />
         )}
       </div>
-      {/* Keyed per track: the metadata remounts with the title fade (fast
-          and plain — a track change earns no choreography beyond this). */}
-      <div key={`${np.title}|${np.artist}`} className="title-in mt-8 w-full min-w-0">
+      {/* Keyed per track: the metadata remounts with the title beat (fast
+          and plain — directional when dx says the room saw a skip). */}
+      <div
+        key={`${np.title}|${np.artist}`}
+        className={`${dx !== 0 ? "track-in" : "title-in"} mt-8 w-full min-w-0`}
+        style={dx !== 0 ? ({ "--track-dx": `${dx}px` } as CSSProperties) : undefined}
+      >
         <p className="truncate text-[40px] font-medium leading-tight text-fg">{np.title}</p>
         <p className="mt-1 truncate text-[22px] leading-7 text-muted">
           {np.artist}
@@ -184,14 +195,39 @@ function IdentityStack({
 
 export default function Focus() {
   const [np, setNp] = useState<NowPlaying | null>(null);
+  // Track-change slide direction — the room's own copy of App's ledger
+  // consumption (each window's trackDir module is its own instance; the
+  // hotkey "track-nudge" event reaches both).
+  const [trackDir, setTrackDir] = useState<1 | -1>(1);
+  const lastTrackKey = useRef<string | null>(null);
+  // The settled slide epoch — App's rule: one perceived change per
+  // SLIDE_SETTLE_MS, so GSMTC's piecemeal field flaps can't remount the
+  // seat mid-slide (the "held back by a rope" rubber-band, 2026-07-23).
+  const [slideEpoch, setSlideEpoch] = useState(0);
+  const epochAt = useRef(0);
   useEffect(
     () =>
       onNowPlaying((next) => {
         if (!posClock.ingest(next)) return;
+        // track→track consumes; vanish/appear RESETS to forward and still
+        // CLEARS the note (a new session can't inherit the last skip's -1,
+        // and a stranded note can't misdirect a later advance — App's rule).
+        const nextKey = lyricsKeyOf(next);
+        if (nextKey !== lastTrackKey.current) {
+          const noted = takeTrackDir();
+          setTrackDir(nextKey !== null && lastTrackKey.current !== null ? noted : 1);
+          lastTrackKey.current = nextKey;
+          const now = performance.now();
+          if (now - epochAt.current > SLIDE_SETTLE_MS) {
+            epochAt.current = now;
+            setSlideEpoch((e) => e + 1);
+          }
+        }
         setNp((prev) => (sameIdentity(prev, next) ? prev : next));
       }),
     [],
   );
+  useEffect(() => initTrackDir(), []);
   const artUrl = useArt(np?.art_id ?? null);
   useArtAccent(artUrl);
   const lyrics = useLyrics(np);
@@ -251,6 +287,11 @@ export default function Focus() {
   const playing = np?.status === "playing";
   const lyricsLive =
     lyrics.status === "synced" && np !== null && lyrics.key === lyricsKeyOf(np);
+  // What the state says about THIS track (stale verdicts read as pending) +
+  // the verdict-gated hold — the room's seat rule matches the expanded
+  // view's: the interlude never moves the surface, only verdicts do.
+  const verdict = lyricsVerdictOf(np, lyrics);
+  const hold = useSeatHold(np, verdict);
   const nothing = !np || np.player === "none";
   useEffect(() => {
     if (nothing) setQueueOpen(false);
@@ -271,16 +312,16 @@ export default function Focus() {
 
   const caption = lyricsLive
     ? null
-    : lyrics.status === "loading"
+    : verdict === "pending"
       ? "Finding lyrics…"
-      : lyrics.status === "offline"
+      : verdict === "offline"
         ? "Lyrics unavailable — offline"
         : np && np.player !== "none"
           ? "No synced lyrics"
           : null;
 
   // The miss caption answers once, then leaves (the expanded view's rule) —
-  // the timer restarts per track and per status flip so a loading→none
+  // the timer restarts per track and per verdict flip so a pending→none
   // resolve gets its full read window.
   const trackKey = lyricsKeyOf(np);
   const [captionExpired, setCaptionExpired] = useState(false);
@@ -289,19 +330,68 @@ export default function Focus() {
     // Both terminal non-synced states expire (the expanded view's gate,
     // App.tsx — this room's own rule comment claims to keep in step): the
     // offline caption used to sit under the metadata forever.
-    if (lyrics.status !== "none" && lyrics.status !== "offline") return;
+    if (verdict !== "none" && verdict !== "offline") return;
     const t = window.setTimeout(() => setCaptionExpired(true), NO_LYRICS_CAPTION_MS);
     return () => window.clearTimeout(t);
-  }, [lyrics.status, trackKey]);
+  }, [verdict, trackKey]);
 
-  const swap = {
-    initial: { opacity: 0 },
-    animate: { opacity: 1 },
-    exit: { opacity: 0 },
-  };
+  // The room's held seat: while the verdict is pending the composition holds
+  // — a held split keeps the identity column + a quiet lyric column (the
+  // per-track key still crossfades old split → new split, fast and plain)
+  // instead of collapsing to the centered fallback and re-splitting a few
+  // frames later. Initial false: a takeover opened mid-fetch starts centered,
+  // preserving the once-per-takeover arrival.
+  const splitRef = useRef(false);
+  const split = queueOpen || (hold ? splitRef.current : lyricsLive);
+  useEffect(() => {
+    splitRef.current = split;
+  });
+
   const swapTiming = {
     duration: reducedMotion ? 0 : DUR[3] / 1000,
     ease: [...EASE.out] as [number, number, number, number],
+  };
+
+  // The seat's track-change slide: only a split→split key change (a skip
+  // while lyrics hold the room) drifts directionally — split⇄centered swaps
+  // are COMPOSITION changes (a verdict, the queue), not skips, and keep the
+  // plain opacity crossfade (dx 0). Computed per render so the entering
+  // seat's variants and the exiting seat's `custom` both see the change.
+  // split seats key on the settled EPOCH, not the raw track key — raw-key
+  // flaps (GSMTC piecemeal fields) update the seat's content in place
+  // instead of remounting it mid-slide.
+  const seatKey = split ? `split:${slideEpoch}` : "centered";
+  const prevSeatKey = useRef(seatKey);
+  const seatDx =
+    seatKey !== prevSeatKey.current &&
+    seatKey.startsWith("split:") &&
+    prevSeatKey.current.startsWith("split:") &&
+    !announceSuppressed
+      ? trackDir * SLIDE_PX.room
+      : 0;
+  useEffect(() => {
+    prevSeatKey.current = seatKey;
+  });
+  // Track-change slides run one rung faster (140/90 — Thien's live "a bit
+  // dramatic" verdict, 2026-07-23) than the composition swaps, which keep
+  // their pre-slide 200/140 feel; the dx-conditional transitions split them.
+  const slideEase = [...EASE.out] as [number, number, number, number];
+  const slideInT = { duration: reducedMotion ? 0 : DUR[2] / 1000, ease: slideEase };
+  const slideOutT = { duration: reducedMotion ? 0 : DUR[1] / 1000, ease: slideEase };
+  const compositionOutT = { duration: reducedMotion ? 0 : DUR[2] / 1000, ease: slideEase };
+  const seatVariants = {
+    enter: (dx: number) => ({ opacity: 0, x: dx }),
+    center: (dx: number) => ({
+      opacity: 1,
+      x: 0,
+      transition: dx !== 0 ? slideInT : swapTiming,
+    }),
+    exit: (dx: number) => ({
+      opacity: 0,
+      x: -dx,
+      pointerEvents: "none" as const,
+      transition: dx !== 0 ? slideOutT : compositionOutT,
+    }),
   };
 
   return (
@@ -373,29 +463,29 @@ export default function Focus() {
         <>
           {/* THE UPPER ROOM — the only region that swaps (one stack, two
               seats). Crossfade by opacity; the art never slides. Seats are
-              keyed per track (split) / per view (centered): every track
-              change exits through the fallback interlude anyway (lyricsLive
-              flips while lyrics re-key), so the per-track key just makes
-              the remount explicit and covers the fast-resolve path where
-              AnimatePresence would otherwise recycle the exiting seat.
+              keyed per track (split) / per view (centered): a held split
+              rides the fetch interlude (see `split` above — the seat no
+              longer collapses to centered while the verdict is pending), so
+              a track change crossfades old split → new split via the
+              per-track key, fast and plain, and the fast-resolve path can't
+              have AnimatePresence recycle the exiting seat.
               An OPEN QUEUE also forces the split composition: the queue
               surface lives in the lyric column's seat (below), so the
               identity stack must hold the left seat even with no lyrics —
-              keyed on lyricsKeyOf(np) (≡ lyrics.key whenever lyricsLive),
-              which stays honest when the seat is queue-forced through the
-              fetch interlude. */}
+              keyed on the settled slide EPOCH (one bump per perceived
+              change), which stays honest when the seat is queue- or
+              hold-forced through the fetch interlude. */}
           <div className="relative min-h-0 flex-1">
-            <AnimatePresence initial={false}>
-              {lyricsLive || queueOpen ? (
+            <AnimatePresence initial={false} custom={seatDx}>
+              {split ? (
                 <motion.div
-                  key={`split:${lyricsKeyOf(np)}`}
-                  {...swap}
+                  key={seatKey}
+                  custom={seatDx}
+                  variants={seatVariants}
+                  initial="enter"
+                  animate="center"
+                  exit="exit"
                   transition={swapTiming}
-                  exit={{
-                    opacity: 0,
-                    pointerEvents: "none" as const,
-                    transition: { duration: reducedMotion ? 0 : DUR[2] / 1000, ease: [...EASE.out] as [number, number, number, number] },
-                  }}
                   className="absolute inset-0 flex items-stretch gap-[7%] px-[10%]"
                 >
                   {/* Seated on the root's --stack-top (see the root div's
@@ -426,26 +516,36 @@ export default function Focus() {
                         Closing the queue mounts lyrics fresh; the panel
                         re-anchors itself. */}
                     {lyricsLive && !queueOpen && (
-                      <LyricsPanel
-                        lines={lyrics.lines}
-                        seekable={seekable}
-                        leadMs={VOCAL_LEAD_MS[np.player]}
-                        entrance={entrance}
-                        scale="focus"
-                      />
+                      // Plain arrivals (lyrics resolving into a HELD split, or
+                      // a queue close re-revealing the column) get the title-in
+                      // beat — the seat's own crossfade no longer covers the
+                      // resolve, which lands after it. The once-per-takeover
+                      // entrance stays unwrapped so choreography never stacks.
+                      <div
+                        className={`flex min-h-0 min-w-0 flex-1 flex-col ${
+                          entrance ? "" : "animate-[caption-in_140ms_var(--ease-out-tk)_both]"
+                        }`}
+                      >
+                        <LyricsPanel
+                          lines={lyrics.lines}
+                          seekable={seekable}
+                          leadMs={VOCAL_LEAD_MS[np.player]}
+                          entrance={entrance}
+                          scale="focus"
+                        />
+                      </div>
                     )}
                   </div>
                 </motion.div>
               ) : (
                 <motion.div
-                  key="centered"
-                  {...swap}
+                  key={seatKey}
+                  custom={seatDx}
+                  variants={seatVariants}
+                  initial="enter"
+                  animate="center"
+                  exit="exit"
                   transition={swapTiming}
-                  exit={{
-                    opacity: 0,
-                    pointerEvents: "none" as const,
-                    transition: { duration: reducedMotion ? 0 : DUR[2] / 1000, ease: [...EASE.out] as [number, number, number, number] },
-                  }}
                   className="absolute inset-0 flex items-end justify-center"
                 >
                   {/* No-lyrics fallback: the identity stack is BOTTOM-anchored
@@ -471,7 +571,15 @@ export default function Focus() {
                       art center→left, so this rides the same opacity
                       crossfade, not a new "art slides" break. */}
                   <div className="mb-[calc(var(--horizon-mb)_+_1vh_-_32px)]">
-                    <IdentityStack np={np} artUrl={artUrl} caption={caption} captionExpired={captionExpired} centered device={remoteDevice} />
+                    <IdentityStack
+                      np={np}
+                      artUrl={artUrl}
+                      caption={caption}
+                      captionExpired={captionExpired}
+                      centered
+                      device={remoteDevice}
+                      dx={announceSuppressed ? 0 : trackDir * SLIDE_PX.content}
+                    />
                   </div>
                 </motion.div>
               )}
